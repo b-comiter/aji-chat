@@ -4,7 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "server": "pnpm --filter @aji/server dev",
+    "mobile": "pnpm --filter mobile start",
+    "send": "pnpm dlx tsx tools/send.ts"
   },
   "keywords": [],
   "author": "",

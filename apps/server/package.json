@@ -1,0 +1,21 @@
+{
+  "name": "@aji/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "start": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.8",
+    "hono": "^4.7.11",
+    "ws": "^8.20.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.23",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.19.4",
+    "typescript": "~5.9.2"
+  }
+}
