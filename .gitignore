@@ -1,0 +1,86 @@
+# Node
+node_modules/
+
+# Dependency directories
+.pnpm/
+.pnp/
+.pnp.js
+yarn.lock
+npm-debug.log*
+
+# Build outputs
+dist/
+build/
+out/
+.next/
+.expo/
+.expo-shared/
+coverage/
+
+# Expo
+*.expo/*
+.expo/*
+.expo-shared/*
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# VS Code
+.vscode/
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.*
+
+# React Native
+*.keystore
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# Misc
+.idea/
+*.swp
+*.swo
+
+# Test coverage
+coverage/
+
+# TypeScript
+*.tsbuildinfo
+
+# Expo assets
+apps/mobile/assets/*
+!apps/mobile/assets/fonts/
+!apps/mobile/assets/images/
+
+# Ignore local tools
+/tools/local/
+
+# Ignore core package build
+/packages/core/dist/
+
+# Ignore infra state
+/infra/.terraform/
+/infra/terraform.tfstate*
+
+# Ignore web build
+/apps/web/.next/
+/apps/web/out/
+
+# Ignore mobile build
+/apps/mobile/.expo/
+/apps/mobile/.expo-shared/
+
+# Ignore server build
+/apps/server/dist/
+
+# Ignore pnpm store
+.pnpm-store/
