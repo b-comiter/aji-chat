@@ -1,12 +1,18 @@
 import { Hono } from 'hono'
 import { serve } from '@hono/node-server'
 import { WebSocketServer, WebSocket } from 'ws'
-import type { ClientEvent, ServerEvent } from '@aji/protocol'
+import type { ClientEvent, PermissionRequest, PromptResponse, ServerEvent } from '@aji/protocol'
 import { textMessage } from '@aji/protocol'
 
 const app = new Hono()
 const clients = new Set<WebSocket>()
 const webhooks = new Set<string>()
+const promptWaiters = new Map<string, { resolve: (event: PromptResponse | null) => void; timer: ReturnType<typeof setTimeout> }>()
+
+interface WaitForPromptBody {
+  prompt: PermissionRequest
+  timeoutMs?: number
+}
 
 // ---------------------------------------------------------------------------
 // Broadcast helpers
@@ -35,6 +41,34 @@ function dispatchToWebhooks(event: ClientEvent): void {
   }
 }
 
+function dismissPrompt(id: string): void {
+  broadcast({ type: 'prompt_dismiss', id })
+}
+
+function resolvePrompt(event: PromptResponse): boolean {
+  const waiter = promptWaiters.get(event.id)
+  if (!waiter) return false
+  clearTimeout(waiter.timer)
+  promptWaiters.delete(event.id)
+  dismissPrompt(event.id)
+  waiter.resolve(event)
+  return true
+}
+
+function waitForPrompt(prompt: PermissionRequest, timeoutMs: number): Promise<PromptResponse | null> {
+  broadcast(prompt)
+
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      promptWaiters.delete(prompt.id)
+      dismissPrompt(prompt.id)
+      resolve(null)
+    }, timeoutMs)
+
+    promptWaiters.set(prompt.id, { resolve, timer })
+  })
+}
+
 // ---------------------------------------------------------------------------
 // HTTP endpoints — agent-facing
 // ---------------------------------------------------------------------------
@@ -54,6 +88,14 @@ app.post('/send', async (c) => {
     sent = broadcast(event)
   }
   return c.json({ sent })
+})
+
+/** Broadcast a permission prompt and wait for the first client response. */
+app.post('/prompt/wait', async (c) => {
+  const { prompt, timeoutMs = 15000 } = await c.req.json<WaitForPromptBody>()
+  console.log(`POST /prompt/wait: ${prompt.id} (wait: ${timeoutMs}ms)`)
+  const response = await waitForPrompt(prompt, timeoutMs)
+  return c.json({ response, timedOut: response === null })
 })
 
 /** Register a webhook URL to receive ClientEvents forwarded from the phone. */
@@ -91,6 +133,7 @@ wss.on('connection', (ws) => {
     try {
       const event = JSON.parse(raw.toString()) as ClientEvent
       console.log('← client:', JSON.stringify(event))
+      if (event.type === 'prompt_response') resolvePrompt(event)
       dispatchToWebhooks(event)
     } catch {
       console.warn('unparseable client frame:', raw.toString())

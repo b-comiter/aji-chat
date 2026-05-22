@@ -11,7 +11,7 @@ import {
   TextInput,
   View,
 } from 'react-native'
-import { useSafeAreaInsets } from 'react-native-safe-area-context'
+import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs'
 import type { AgentStatus, ServerEvent } from '@aji/protocol'
 import { newId } from '@aji/protocol'
 
@@ -26,7 +26,7 @@ type Item =
   | { kind: 'tool'; id: string; name: string; args: Record<string, unknown>; result?: unknown; done: boolean }
   | { kind: 'prompt'; id: string; title: string; message: string; options: { id: string; label: string }[] }
 
-export default function ChatScreen() {
+export default function HomeScreen() {
   const [items, setItems] = useState<Item[]>([])
   const [conn, setConn] = useState<ConnStatus>('connecting')
   const [agentStatus, setAgentStatus] = useState<AgentStatus>('idle')
@@ -36,32 +36,26 @@ export default function ChatScreen() {
   const attempt = useRef(0)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const mounted = useRef(true)
+  const tabBarHeight = useBottomTabBarHeight()
+  const kbOffset = useRef(new Animated.Value(0)).current
 
-  const { top: safeTop, bottom: safeBottom } = useSafeAreaInsets()
-
-  // kbOffset drives paddingBottom on the root view.
-  // At rest it equals safeBottom so the composer clears the home indicator.
-  // When the keyboard opens it animates to endCoordinates.height (keyboard + home indicator area).
-  const kbOffsetRef = useRef<Animated.Value | null>(null)
-  if (!kbOffsetRef.current) kbOffsetRef.current = new Animated.Value(safeBottom)
-  const kbOffset = kbOffsetRef.current
-
+  // Keyboard animation
   useEffect(() => {
     if (Platform.OS !== 'ios') return
     const onShow = Keyboard.addListener('keyboardWillShow', (e) => {
       Animated.timing(kbOffset, {
-        toValue: e.endCoordinates.height,
+        toValue: Math.max(0, e.endCoordinates.height - tabBarHeight),
         duration: e.duration,
         useNativeDriver: false,
       }).start()
     })
     const onHide = Keyboard.addListener('keyboardWillHide', (e) => {
-      Animated.timing(kbOffset, { toValue: safeBottom, duration: e.duration, useNativeDriver: false }).start()
+      Animated.timing(kbOffset, { toValue: 0, duration: e.duration, useNativeDriver: false }).start()
     })
     return () => { onShow.remove(); onHide.remove() }
-  }, [kbOffset, safeBottom])
+  }, [kbOffset, tabBarHeight])
 
-  // WebSocket with exponential backoff and AppState reconnect
+  // WebSocket
   useEffect(() => {
     function connect() {
       if (!mounted.current) return
@@ -151,7 +145,7 @@ export default function ChatScreen() {
   const canSend = draft.trim().length > 0 && conn === 'connected'
 
   return (
-    <Animated.View style={[styles.screen, { paddingTop: safeTop + 12, paddingBottom: kbOffset }]}>
+    <Animated.View style={[styles.screen, { paddingBottom: kbOffset }]}>
       {/* Header */}
       <View style={styles.header}>
         <Text style={styles.title}>aji-chat</Text>
@@ -235,7 +229,7 @@ function Row({ item, onChoose }: { item: Item; onChoose: (id: string, choice: st
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: '#0d1117' },
+  screen: { flex: 1, backgroundColor: '#0d1117', paddingTop: 60 },
   header: {
     flexDirection: 'row', alignItems: 'center',
     paddingHorizontal: 20, paddingBottom: 16,
