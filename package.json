@@ -6,7 +6,16 @@
   "scripts": {
     "server": "pnpm --filter @aji/server dev",
     "mobile": "pnpm --filter mobile start",
-    "send": "pnpm dlx tsx tools/send.ts"
+    "send": "tsx tools/send.ts",
+    "simulate": "tsx tools/simulate.ts"
+  },
+  "dependencies": {
+    "@aji/protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.19",
+    "tsx": "^4.19.4",
+    "typescript": "~5.9.2"
   },
   "keywords": [],
   "author": "",

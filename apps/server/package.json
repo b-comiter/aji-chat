@@ -8,6 +8,7 @@
     "start": "tsx src/index.ts"
   },
   "dependencies": {
+    "@aji/protocol": "workspace:*",
     "@hono/node-server": "^1.13.8",
     "hono": "^4.7.11",
     "ws": "^8.20.1"
