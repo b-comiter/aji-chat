@@ -1,8 +1,6 @@
 # aji-chat
 
-A messaging client purpose-built for chatting with AI agents (Hermes, Claude
-Code, future agents). The chat surface stays conversational; tool calls live
-in a side pane / bottom sheet, one click away.
+A messaging client purpose-built for chatting with AI agents (Hermes, Claude Code, future agents). The chat surface stays conversational; tool calls live in a side pane / bottom sheet, one click away.
 
 See [`mobile-mockup.html`](./mobile-mockup.html) for the UI direction.
 
@@ -118,3 +116,9 @@ will handle them without any changes.
   broadcasts them to connected clients.
 - Platform-specific concerns (Expo APIs, Node APIs) stay inside their
   respective `apps/` package and never leak into `packages/`.
+
+---
+
+## License
+
+This project is licensed under the [MIT License](./LICENSE).
