@@ -24,6 +24,7 @@ from typing import Any, Optional
 import httpx
 
 from .state import SessionState
+from ._log import flog, flog_warn
 
 logger = logging.getLogger(__name__)
 
@@ -56,19 +57,26 @@ class AjiClient:
             current = self.state.current_turn(chat_id)
             if current is not None:
                 payload.setdefault("turn_id", current)
+        flog("emit() type=%s id=%s turn_id=%s",
+             payload.get("type"), payload.get("id"), payload.get("turn_id"))
         await self._post("/event", payload)
 
     async def register_webhook(self, url: str) -> None:
+        flog("register_webhook() url=%s", url)
         await self._post("/webhook", {"url": url})
+        flog("register_webhook() POST complete")
 
     async def deregister_webhook(self, url: str) -> None:
+        flog("deregister_webhook() url=%s", url)
         try:
             response = await self._client.request(
                 "DELETE", f"{self.server_url}/webhook", json={"url": url}
             )
             response.raise_for_status()
+            flog("deregister_webhook() OK status=%d", response.status_code)
         except Exception as exc:
             logger.warning("aji-chat deregister_webhook failed: %s", exc)
+            flog_warn("deregister_webhook() failed: %s", exc)
 
     async def _post(self, path: str, body: dict[str, Any]) -> None:
         try:
@@ -76,3 +84,4 @@ class AjiClient:
             response.raise_for_status()
         except Exception as exc:
             logger.warning("aji-chat POST %s failed: %s", path, exc)
+            flog_warn("_post(%s) failed: %s", path, exc)

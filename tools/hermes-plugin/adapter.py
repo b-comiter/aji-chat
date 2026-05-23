@@ -43,8 +43,10 @@ meantime.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import re
 import uuid
 from typing import Any, Optional
 
@@ -52,6 +54,7 @@ from typing import Any, Optional
 from .client import AjiClient
 from .state import SessionState
 from .webhook_server import WebhookServer
+from ._log import flog, flog_info, flog_warn
 
 # Hermes imports — resolved at runtime by the Hermes plugin loader.
 # Static analysis won't find these unless the Hermes repo is on PYTHONPATH;
@@ -78,6 +81,17 @@ _CURSOR_SUFFIXES = (" ▉", " ▍", "▉", "▍")
 # constant chat_id and user_id.
 _DEFAULT_CHAT_ID = "default"
 _DEFAULT_USER_ID = "aji-mobile"
+
+# Hermes's send_progress_messages() formats tool calls as text before calling
+# send() on the adapter, e.g.:
+#   💻 terminal(['command'])\n{"command": "ls -la /tmp"}
+# We detect this pattern and suppress it — the pre/post_tool_call hooks deliver
+# the same information as structured tool_start / tool_end events.
+# Pattern: <emoji(s)> <word>([...args...])\n{...json...}
+_TOOL_PROGRESS_RE = re.compile(
+    r"^[^\x00-\x7F]+\s+\w+\([^\)]*\)\n\{",
+    re.DOTALL,
+)
 
 
 def _strip_cursor(text: str) -> str:
@@ -135,24 +149,60 @@ class AjiChatAdapter(BasePlatformAdapter):
             on_user_message=self._on_user_message,
         )
         self._running = False
+        # Captured in connect() once the event loop is confirmed running.
+        # hooks.py reads this to submit coroutines from worker threads via
+        # run_coroutine_threadsafe() instead of create_task().
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     # -------------------------------------------------------------------
     # Connection lifecycle
     # -------------------------------------------------------------------
 
     async def connect(self) -> bool:
+        flog_info("connect() called")
+        # Capture the running event loop now — hooks.py needs it to submit
+        # coroutines from ThreadPoolExecutor threads via run_coroutine_threadsafe.
+        self._loop = asyncio.get_running_loop()
+        flog_info("connect() captured event loop %s", self._loop)
         try:
             await self._webhook.start()
-            await self._client.register_webhook(self._webhook.url)
         except Exception as exc:
-            logger.warning("aji-chat connect failed: %s", exc)
-            await self._webhook.stop()
+            logger.warning("aji-chat webhook listener failed to start: %s", exc)
+            flog_warn("connect() webhook.start() failed: %s", exc)
             return False
         self._running = True
+        flog_info("connect() webhook started at %s", self._webhook.url)
+        # Register with the aji-chat server in the background so a slow or
+        # not-yet-started server doesn't block gateway startup or cause
+        # connect() to return False.
+        asyncio.create_task(self._register_with_retry())
         return True
 
+    async def _register_with_retry(self) -> None:
+        """Keep trying to register the webhook until it succeeds or we stop."""
+        delays = [1, 2, 4, 8, 16, 30]
+        attempt = 0
+        while self._running:
+            try:
+                await self._client.register_webhook(self._webhook.url)
+                logger.info("aji-chat webhook registered at %s", self._webhook.url)
+                flog_info("_register_with_retry() succeeded on attempt %d", attempt + 1)
+                return
+            except Exception as exc:
+                delay = delays[min(attempt, len(delays) - 1)]
+                logger.warning(
+                    "aji-chat webhook registration failed (attempt %d): %s — retrying in %ds",
+                    attempt + 1, exc, delay,
+                )
+                flog_warn("_register_with_retry() attempt %d failed: %s — retry in %ds",
+                          attempt + 1, exc, delay)
+                attempt += 1
+                await asyncio.sleep(delay)
+
     async def disconnect(self) -> None:
+        flog_info("disconnect() called")
         if not self._running:
+            flog("disconnect() no-op (not running)")
             return
         self._running = False
         try:
@@ -160,6 +210,7 @@ class AjiChatAdapter(BasePlatformAdapter):
         finally:
             await self._webhook.stop()
             await self._client.close()
+        flog_info("disconnect() complete")
 
     # -------------------------------------------------------------------
     # Inbound: webhook → MessageEvent → handle_message
@@ -167,7 +218,9 @@ class AjiChatAdapter(BasePlatformAdapter):
 
     async def _on_user_message(self, payload: dict[str, Any]) -> None:
         text = str(payload.get("text", "")).strip()
+        flog("_on_user_message() text=%.120r", text)
         if not text:
+            flog("_on_user_message() empty text, ignored")
             return
 
         source = SessionSource(
@@ -201,6 +254,13 @@ class AjiChatAdapter(BasePlatformAdapter):
         metadata: Optional[dict[str, Any]] = None,
     ) -> SendResult:
         cleaned = _strip_cursor(content)
+        flog("send() chat_id=%s content=%.200r", chat_id, content)
+
+        # todo: Determine if if toggable to platform-tool-progress
+        if _TOOL_PROGRESS_RE.match(cleaned):
+            flog("send() suppressed tool-progress text (hooks handle this)")
+            return SendResult(success=True, message_id=f"msg_{uuid.uuid4().hex}")
+
         message_id = f"msg_{uuid.uuid4().hex}"
         turn_id = self._state.current_turn(chat_id)
 
@@ -230,6 +290,8 @@ class AjiChatAdapter(BasePlatformAdapter):
         finalize: bool = False,
     ) -> SendResult:
         cleaned = _strip_cursor(content)
+        flog("edit_message() chat_id=%s msg_id=%.12s finalize=%s content=%.120r",
+             chat_id, message_id, finalize, content)
         previous = self._state.get_sent(message_id)
         turn_id = self._state.current_turn(chat_id)
 
@@ -261,6 +323,7 @@ class AjiChatAdapter(BasePlatformAdapter):
         return SendResult(success=True, message_id=message_id)
 
     async def send_typing(self, chat_id: str, metadata: Optional[dict[str, Any]] = None) -> None:
+        flog("send_typing() chat_id=%s", chat_id)
         # status events don't carry turn_id — they're terminal UI state.
         await self._client.emit({"type": "status", "value": "working"})
 
@@ -286,6 +349,7 @@ class AjiChatAdapter(BasePlatformAdapter):
     async def on_processing_start(self, event: MessageEvent) -> None:
         chat_id = event.source.chat_id if event.source else _DEFAULT_CHAT_ID
         turn_id = f"turn_{uuid.uuid4().hex}"
+        flog_info("on_processing_start() chat_id=%s turn_id=%.12s", chat_id, turn_id)
         self._state.start_turn(chat_id, turn_id)
         await self._client.emit({"type": "status", "value": "thinking"})
 
@@ -293,6 +357,7 @@ class AjiChatAdapter(BasePlatformAdapter):
         self, event: MessageEvent, outcome: ProcessingOutcome
     ) -> None:
         chat_id = event.source.chat_id if event.source else _DEFAULT_CHAT_ID
+        flog_info("on_processing_complete() chat_id=%s outcome=%s", chat_id, outcome)
         self._state.end_turn(chat_id)
         await self._client.emit({"type": "status", "value": "idle"})
 
@@ -307,6 +372,13 @@ class AjiChatAdapter(BasePlatformAdapter):
     @property
     def aji_client(self) -> AjiClient:
         return self._client
+
+    @property
+    def aji_loop(self) -> Optional[asyncio.AbstractEventLoop]:
+        """The event loop captured at connect() time. Used by hooks.py to
+        submit coroutines from ThreadPoolExecutor threads via
+        run_coroutine_threadsafe()."""
+        return self._loop
 
 
 # ---------------------------------------------------------------------------

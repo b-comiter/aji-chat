@@ -24,6 +24,7 @@ from typing import Any, Callable, Coroutine
 from aiohttp import web
 
 from .state import SessionState
+from ._log import flog, flog_info, flog_warn
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,7 @@ class WebhookServer:
         return f"http://{self.host}:{self.port}/inbound"
 
     async def start(self) -> None:
+        flog_info("WebhookServer.start() binding %s", self.url)
         app = web.Application()
         app.router.add_post("/inbound", self._handle_inbound)
         self._runner = web.AppRunner(app)
@@ -60,25 +62,32 @@ class WebhookServer:
         self._site = web.TCPSite(self._runner, self.host, self.port)
         await self._site.start()
         logger.info("aji-chat webhook listener on %s", self.url)
+        flog_info("WebhookServer.start() listening on %s", self.url)
 
     async def stop(self) -> None:
+        flog_info("WebhookServer.stop() called")
         if self._site is not None:
             await self._site.stop()
             self._site = None
         if self._runner is not None:
             await self._runner.cleanup()
             self._runner = None
+        flog_info("WebhookServer.stop() complete")
 
     async def _handle_inbound(self, request: web.Request) -> web.Response:
         try:
             payload: dict[str, Any] = await request.json()
         except Exception as exc:
             logger.warning("aji-chat webhook: bad JSON: %s", exc)
+            flog_warn("_handle_inbound() bad JSON: %s", exc)
             return web.json_response({"ok": False, "error": "bad json"}, status=400)
 
         event_type = payload.get("type")
+        flog("_handle_inbound() type=%s payload=%.200r", event_type, payload)
+
         if event_type == "user_message":
             text = str(payload.get("text", ""))
+            flog_info("_handle_inbound() user_message text=%.120r", text)
             await self.on_user_message({
                 "text": text,
                 "received_at": datetime.utcnow().isoformat(),
@@ -88,6 +97,7 @@ class WebhookServer:
         if event_type == "prompt_response":
             prompt_id = str(payload.get("id", ""))
             choice = str(payload.get("choice", ""))
+            flog("_handle_inbound() prompt_response id=%s choice=%r", prompt_id, choice)
             resolved = self.state.resolve_prompt(prompt_id, choice)
             if not resolved:
                 # Late tap / Hermes already moved on. Silent no-op per design.
@@ -95,7 +105,11 @@ class WebhookServer:
                     "aji-chat webhook: prompt %s response arrived but no future is pending",
                     prompt_id,
                 )
+                flog_warn("_handle_inbound() prompt %s not found/already done", prompt_id)
+            else:
+                flog("_handle_inbound() prompt %s resolved with %r", prompt_id, choice)
             return web.json_response({"ok": True, "resolved": resolved})
 
         logger.debug("aji-chat webhook: ignored event type %s", event_type)
+        flog("_handle_inbound() ignored unknown type=%s", event_type)
         return web.json_response({"ok": True, "ignored": True})

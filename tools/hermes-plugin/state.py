@@ -35,6 +35,13 @@ class SessionState:
     # prompt_id -> Future awaiting the user's choice
     pending_prompts: dict[str, asyncio.Future[str]] = field(default_factory=dict)
 
+    # task_id -> our generated tool_start id.
+    # Hermes's pre_tool_call hook fires with tool_call_id="" (the real UUID
+    # isn't assigned yet at that point), so we generate our own and stash it
+    # here.  post_tool_call looks it up so tool_start and tool_end carry the
+    # same id and mobile can pair them.
+    pending_tool_ids: dict[str, str] = field(default_factory=dict)
+
     # --- turn tracking ---
 
     def start_turn(self, chat_id: str, turn_id: str) -> None:
@@ -76,3 +83,13 @@ class SessionState:
 
     def drop_prompt(self, prompt_id: str) -> None:
         self.pending_prompts.pop(prompt_id, None)
+
+    # --- tool call ID tracking ---
+
+    def store_tool_id(self, task_id: str, tool_id: str) -> None:
+        """Remember a generated tool_id for task_id so post_tool_call can pair it."""
+        self.pending_tool_ids[task_id] = tool_id
+
+    def pop_tool_id(self, task_id: str) -> Optional[str]:
+        """Return and remove the stored tool_id for task_id, or None if absent."""
+        return self.pending_tool_ids.pop(task_id, None)
