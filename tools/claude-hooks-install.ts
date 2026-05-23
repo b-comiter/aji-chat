@@ -2,10 +2,10 @@
  * Install aji-chat hooks into Claude Code's global settings.
  *
  * Adds entries to ~/.claude/settings.json that invoke tools/claude-aji-chat-hook.ts
- * on UserPromptSubmit, PreToolUse, PostToolUse, and Stop. Idempotent: re-running
- * just refreshes the entries. Removes any prior aji-chat hook entries (matched
- * by the `claude-aji-chat-hook` substring in their command) before adding fresh
- * ones.
+ * on UserPromptSubmit, PreToolUse, PermissionRequest, PostToolUse, and Stop.
+ * Idempotent: re-running just refreshes the entries. Removes any prior
+ * aji-chat hook entries (matched by the `claude-aji-chat-hook` substring in
+ * their command) before adding fresh ones.
  *
  * Usage:  pnpm hooks:install
  * Undo:   pnpm hooks:uninstall
@@ -16,7 +16,7 @@ import * as os from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 const SETTINGS_PATH = path.join(os.homedir(), '.claude', 'settings.json')
-const HOOK_EVENTS = ['UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop'] as const
+const HOOK_EVENTS = ['UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'PostToolUse', 'Stop'] as const
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const TSX = path.resolve(__dirname, '..', 'node_modules', '.bin', 'tsx')
