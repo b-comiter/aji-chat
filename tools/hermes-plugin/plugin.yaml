@@ -1,0 +1,29 @@
+name: aji-chat-platform
+label: Aji Chat
+kind: platform
+version: 0.1.0
+description: >
+  Bidirectional Hermes platform adapter for aji-chat mobile. Mirrors agent
+  activity (status, streaming text, tool calls, permission prompts) to the
+  aji-chat WebSocket server, which broadcasts to connected mobile clients.
+  Inbound user messages and prompt responses are forwarded back to Hermes
+  via a local webhook listener.
+author: aji-chat
+requires_env:
+  - name: AJI_SERVER_URL
+    description: HTTP base URL of the aji-chat server (the server reachable from this Hermes process).
+    prompt: aji-chat server URL (e.g. http://localhost:4000)
+    password: false
+optional_env:
+  - name: AJI_PLUGIN_PORT
+    description: Port the plugin's local webhook listener binds to. Defaults to 4001.
+    prompt: Webhook listener port
+    password: false
+  - name: AJI_PLUGIN_HOST
+    description: Interface the webhook listener binds to. Defaults to 127.0.0.1. Use 0.0.0.0 if the aji-chat server runs on another host.
+    prompt: Webhook listener host
+    password: false
+  - name: AJI_HOME_CHANNEL
+    description: Default chat_id for cron-delivered messages. aji-chat is single-tenant for now, so any string works.
+    prompt: Home channel
+    password: false

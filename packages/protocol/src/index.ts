@@ -21,21 +21,33 @@ export type Role = 'assistant' | 'user' | 'system'
 
 export type AgentStatus = 'thinking' | 'working' | 'idle'
 
+/**
+ * Optional grouping ID that ties together every event belonging to a single
+ * agent turn (user message → tool calls → assistant response). Set by adapters
+ * with turn boundaries available (e.g. the Hermes plugin mints one in
+ * `on_processing_start`). The Claude Code hook path leaves this unset and the
+ * mobile UI falls back to chronological ordering.
+ */
+export type TurnId = string
+
 export interface MessageStart {
   type: 'message_start'
   id: string
   role: Role
+  turn_id?: TurnId
 }
 
 export interface TextDelta {
   type: 'text_delta'
   id: string
   text: string
+  turn_id?: TurnId
 }
 
 export interface MessageEnd {
   type: 'message_end'
   id: string
+  turn_id?: TurnId
 }
 
 export interface ToolStart {
@@ -43,6 +55,7 @@ export interface ToolStart {
   id: string
   name: string
   args: Record<string, unknown>
+  turn_id?: TurnId
 }
 
 export interface ToolEnd {
@@ -52,6 +65,7 @@ export interface ToolEnd {
   result: unknown
   /** Set when the tool errored. */
   error?: string
+  turn_id?: TurnId
 }
 
 export interface Status {
@@ -70,6 +84,7 @@ export interface PermissionRequest {
   title: string
   message: string
   options: PromptOption[]
+  turn_id?: TurnId
 }
 
 /**
@@ -81,6 +96,7 @@ export interface Clarify {
   id: string
   question: string
   choices: PromptOption[]
+  turn_id?: TurnId
 }
 
 /**
@@ -97,6 +113,11 @@ export interface PromptOption {
   id: string
   /** Display label */
   label: string
+  /**
+   * When true, render a text input instead of a button. The user's typed text
+   * becomes the value of PromptResponse.choice (the option id is not echoed).
+   */
+  allowText?: boolean
 }
 
 export type ServerEvent =
@@ -165,12 +186,13 @@ export function newId(prefix = 'id'): string {
 /**
  * Construct the three events that make up a complete, non-streaming text
  * message. Useful for "send me a plain message from the server" cases.
+ * Pass `turn_id` to group this message with a wider agent turn.
  */
-export function textMessage(text: string, role: Role = 'assistant'): ServerEvent[] {
+export function textMessage(text: string, role: Role = 'assistant', turn_id?: TurnId): ServerEvent[] {
   const id = newId('msg')
   return [
-    { type: 'message_start', id, role },
-    { type: 'text_delta', id, text },
-    { type: 'message_end', id },
+    { type: 'message_start', id, role, ...(turn_id ? { turn_id } : {}) },
+    { type: 'text_delta', id, text, ...(turn_id ? { turn_id } : {}) },
+    { type: 'message_end', id, ...(turn_id ? { turn_id } : {}) },
   ]
 }

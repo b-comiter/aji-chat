@@ -9,7 +9,9 @@
     "send": "tsx tools/send.ts",
     "simulate": "tsx tools/simulate.ts",
     "hooks:install": "tsx tools/claude-hooks-install.ts",
-    "hooks:uninstall": "tsx tools/claude-hooks-uninstall.ts"
+    "hooks:uninstall": "tsx tools/claude-hooks-uninstall.ts",
+    "hermes:install": "tsx tools/hermes-plugin-install.ts",
+    "hermes:uninstall": "tsx tools/hermes-plugin-uninstall.ts"
   },
   "dependencies": {
     "@aji/protocol": "workspace:*"
