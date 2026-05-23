@@ -38,13 +38,15 @@ coverage/
 .env.*
 
 # React Native
-__pycache__/
 *.keystore
 *.jks
 *.p8
 *.p12
 *.key
 *.mobileprovision
+
+# Python
+__pycache__/
 
 # Misc
 .idea/
