@@ -38,6 +38,7 @@ coverage/
 .env.*
 
 # React Native
+__pycache__/
 *.keystore
 *.jks
 *.p8
