@@ -83,6 +83,15 @@ export interface Clarify {
   choices: PromptOption[]
 }
 
+/**
+ * Remove a previously rendered prompt without requiring the client to answer.
+ * Useful when a mirrored approval flow times out or is resolved elsewhere.
+ */
+export interface PromptDismiss {
+  type: 'prompt_dismiss'
+  id: string
+}
+
 export interface PromptOption {
   /** Stable ID echoed back in PromptResponse.choice */
   id: string
@@ -99,6 +108,7 @@ export type ServerEvent =
   | Status
   | PermissionRequest
   | Clarify
+  | PromptDismiss
 
 // ---------------------------------------------------------------------------
 // Client → Server

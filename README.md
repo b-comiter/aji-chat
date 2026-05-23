@@ -87,6 +87,7 @@ values defined in `packages/protocol/src/index.ts`.
 | `tool_end` | Tool finished (`result` or `error`) |
 | `status` | Agent state: `thinking` \| `working` \| `idle` |
 | `permission_request` | Approval prompt with labelled option buttons |
+| `prompt_dismiss` | Remove a previously shown prompt without answering it |
 | `clarify` | Multi-choice question with labelled option buttons |
 
 **Phone → server:**
@@ -99,6 +100,11 @@ values defined in `packages/protocol/src/index.ts`.
 See [`docs/agent-protocol.md`](./docs/agent-protocol.md) for design rationale
 and a comparison with how Hermes handles the same events on Discord and
 Telegram.
+
+Claude Code permission mirroring uses the `PermissionRequest` hook plus the
+server's `/prompt/wait` endpoint. The hook broadcasts a `permission_request` to
+mobile clients, waits briefly for a `prompt_response`, and falls back to
+Claude Code's native permission dialog when no mobile answer arrives in time.
 
 ## Connecting a real agent
 

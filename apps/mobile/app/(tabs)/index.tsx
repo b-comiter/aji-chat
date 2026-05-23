@@ -11,7 +11,7 @@ import {
   TextInput,
   View,
 } from 'react-native'
-import { useSafeAreaInsets } from 'react-native-safe-area-context'
+import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs'
 import type { AgentStatus, ServerEvent } from '@aji/protocol'
 import { newId } from '@aji/protocol'
 
@@ -21,14 +21,12 @@ const BACKOFF = [1000, 2000, 4000, 8000, 16000, 30000]
 
 type ConnStatus = 'connecting' | 'connected' | 'disconnected'
 
-type PromptOpt = { id: string; label: string; allowText?: boolean }
-
 type Item =
-  | { kind: 'message'; id: string; role: 'assistant' | 'user' | 'system'; text: string; done: boolean; turnId?: string }
-  | { kind: 'tool'; id: string; name: string; args: Record<string, unknown>; result?: unknown; done: boolean; turnId?: string }
-  | { kind: 'prompt'; id: string; title: string; message: string; options: PromptOpt[]; turnId?: string }
+  | { kind: 'message'; id: string; role: 'assistant' | 'user' | 'system'; text: string; done: boolean }
+  | { kind: 'tool'; id: string; name: string; args: Record<string, unknown>; result?: unknown; done: boolean }
+  | { kind: 'prompt'; id: string; title: string; message: string; options: { id: string; label: string }[] }
 
-export default function ChatScreen() {
+export default function HomeScreen() {
   const [items, setItems] = useState<Item[]>([])
   const [conn, setConn] = useState<ConnStatus>('connecting')
   const [agentStatus, setAgentStatus] = useState<AgentStatus>('idle')
@@ -38,32 +36,26 @@ export default function ChatScreen() {
   const attempt = useRef(0)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const mounted = useRef(true)
+  const tabBarHeight = useBottomTabBarHeight()
+  const kbOffset = useRef(new Animated.Value(0)).current
 
-  const { top: safeTop, bottom: safeBottom } = useSafeAreaInsets()
-
-  // kbOffset drives paddingBottom on the root view.
-  // At rest it equals safeBottom so the composer clears the home indicator.
-  // When the keyboard opens it animates to endCoordinates.height (keyboard + home indicator area).
-  const kbOffsetRef = useRef<Animated.Value | null>(null)
-  if (!kbOffsetRef.current) kbOffsetRef.current = new Animated.Value(safeBottom)
-  const kbOffset = kbOffsetRef.current
-
+  // Keyboard animation
   useEffect(() => {
     if (Platform.OS !== 'ios') return
     const onShow = Keyboard.addListener('keyboardWillShow', (e) => {
       Animated.timing(kbOffset, {
-        toValue: e.endCoordinates.height,
+        toValue: Math.max(0, e.endCoordinates.height - tabBarHeight),
         duration: e.duration,
         useNativeDriver: false,
       }).start()
     })
     const onHide = Keyboard.addListener('keyboardWillHide', (e) => {
-      Animated.timing(kbOffset, { toValue: safeBottom, duration: e.duration, useNativeDriver: false }).start()
+      Animated.timing(kbOffset, { toValue: 0, duration: e.duration, useNativeDriver: false }).start()
     })
     return () => { onShow.remove(); onHide.remove() }
-  }, [kbOffset, safeBottom])
+  }, [kbOffset, tabBarHeight])
 
-  // WebSocket with exponential backoff and AppState reconnect
+  // WebSocket
   useEffect(() => {
     function connect() {
       if (!mounted.current) return
@@ -109,12 +101,9 @@ export default function ChatScreen() {
 
   function handleEvent(event: ServerEvent) {
     setItems((prev) => {
-      // turn_id is only present on the seven event types that opt in to it.
-      // We pull it once here so the switch arms can stamp it on new items.
-      const turnId = 'turn_id' in event ? event.turn_id : undefined
       switch (event.type) {
         case 'message_start':
-          return [...prev, { kind: 'message', id: event.id, role: event.role, text: '', done: false, turnId }]
+          return [...prev, { kind: 'message', id: event.id, role: event.role, text: '', done: false }]
         case 'text_delta':
           return prev.map((it) =>
             it.kind === 'message' && it.id === event.id ? { ...it, text: it.text + event.text } : it)
@@ -122,14 +111,14 @@ export default function ChatScreen() {
           return prev.map((it) =>
             it.kind === 'message' && it.id === event.id ? { ...it, done: true } : it)
         case 'tool_start':
-          return [...prev, { kind: 'tool', id: event.id, name: event.name, args: event.args, done: false, turnId }]
+          return [...prev, { kind: 'tool', id: event.id, name: event.name, args: event.args, done: false }]
         case 'tool_end':
           return prev.map((it) =>
             it.kind === 'tool' && it.id === event.id ? { ...it, result: event.result, done: true } : it)
         case 'permission_request':
-          return [...prev, { kind: 'prompt', id: event.id, title: event.title, message: event.message, options: event.options, turnId }]
+          return [...prev, { kind: 'prompt', id: event.id, title: event.title, message: event.message, options: event.options }]
         case 'clarify':
-          return [...prev, { kind: 'prompt', id: event.id, title: 'Clarification', message: event.question, options: event.choices, turnId }]
+          return [...prev, { kind: 'prompt', id: event.id, title: 'Clarification', message: event.question, options: event.choices }]
         case 'prompt_dismiss':
           return prev.filter((it) => !(it.kind === 'prompt' && it.id === event.id))
         default:
@@ -156,7 +145,7 @@ export default function ChatScreen() {
   const canSend = draft.trim().length > 0 && conn === 'connected'
 
   return (
-    <Animated.View style={[styles.screen, { paddingTop: safeTop + 12, paddingBottom: kbOffset }]}>
+    <Animated.View style={[styles.screen, { paddingBottom: kbOffset }]}>
       {/* Header */}
       <View style={styles.header}>
         <Text style={styles.title}>aji-chat</Text>
@@ -198,74 +187,11 @@ export default function ChatScreen() {
   )
 }
 
-function PromptRow({ item, onChoose }: { item: Extract<Item, { kind: 'prompt' }>; onChoose: (id: string, choice: string) => void }) {
-  const [textValues, setTextValues] = useState<Record<string, string>>({})
-
-  const buttonOpts = item.options.filter(o => !o.allowText)
-  const textOpts   = item.options.filter(o => o.allowText)
-
-  return (
-    <View style={styles.promptCard}>
-      <Text style={styles.promptTitle}>{item.title}</Text>
-      <Text style={styles.promptMsg}>{item.message}</Text>
-
-      {/* Button options */}
-      {buttonOpts.length > 0 && (
-        <View style={styles.promptBtns}>
-          {buttonOpts.map((opt, i) => (
-            <Pressable key={opt.id} style={styles.promptBtn} onPress={() => onChoose(item.id, opt.id)}>
-              <Text style={styles.promptBtnNum}>{i + 1}</Text>
-              <Text style={styles.promptBtnText}>{opt.label}</Text>
-            </Pressable>
-          ))}
-        </View>
-      )}
-
-      {/* Text input options */}
-      {textOpts.map((opt) => (
-        <View key={opt.id} style={styles.textOptWrap}>
-          <Text style={styles.textOptLabel}>{opt.label}</Text>
-          <View style={styles.textOptRow}>
-            <TextInput
-              style={styles.textOptInput}
-              value={textValues[opt.id] ?? ''}
-              onChangeText={(v) => setTextValues(prev => ({ ...prev, [opt.id]: v }))}
-              placeholder="Type your answer…"
-              placeholderTextColor="#6e7681"
-              returnKeyType="send"
-              onSubmitEditing={() => {
-                const val = (textValues[opt.id] ?? '').trim()
-                if (val) onChoose(item.id, val)
-              }}
-            />
-            <Pressable
-              style={[styles.textOptBtn, !(textValues[opt.id] ?? '').trim() && styles.textOptBtnOff]}
-              disabled={!(textValues[opt.id] ?? '').trim()}
-              onPress={() => {
-                const val = (textValues[opt.id] ?? '').trim()
-                if (val) onChoose(item.id, val)
-              }}
-            >
-              <Text style={styles.textOptBtnText}>→</Text>
-            </Pressable>
-          </View>
-        </View>
-      ))}
-    </View>
-  )
-}
-
 function Row({ item, onChoose }: { item: Item; onChoose: (id: string, choice: string) => void }) {
-  // Items emitted as part of a Hermes turn carry `turnId`. We render them with
-  // a subtle left rail so the user can visually see "this tool / this message
-  // / this prompt was part of the same conversation turn." Items without
-  // `turnId` (Claude Code path, user bubbles) render unchanged.
-  const inTurn = !!item.turnId
-
   if (item.kind === 'message') {
     const isUser = item.role === 'user'
     return (
-      <View style={[styles.bubbleRow, isUser && styles.bubbleRowUser, inTurn && !isUser && styles.turnRail]}>
+      <View style={[styles.bubbleRow, isUser && styles.bubbleRowUser]}>
         <View style={[styles.bubble, isUser && styles.bubbleUser]}>
           <Text style={[styles.bubbleText, isUser && styles.bubbleTextUser]}>
             {item.text}{!item.done && <Text style={styles.cursor}> ▍</Text>}
@@ -277,7 +203,7 @@ function Row({ item, onChoose }: { item: Item; onChoose: (id: string, choice: st
 
   if (item.kind === 'tool') {
     return (
-      <View style={[styles.toolCard, inTurn && styles.turnRail]}>
+      <View style={styles.toolCard}>
         <Text style={styles.toolLabel}>🔧 {item.name} {item.done ? '✓' : '…'}</Text>
         <Text style={styles.toolMono}>{JSON.stringify(item.args)}</Text>
         {item.done && item.result !== undefined && (
@@ -288,14 +214,22 @@ function Row({ item, onChoose }: { item: Item; onChoose: (id: string, choice: st
   }
 
   return (
-    <View style={inTurn ? styles.turnRail : undefined}>
-      <PromptRow item={item} onChoose={onChoose} />
+    <View style={styles.promptCard}>
+      <Text style={styles.promptTitle}>{item.title}</Text>
+      <Text style={styles.promptMsg}>{item.message}</Text>
+      <View style={styles.promptBtns}>
+        {item.options.map((opt) => (
+          <Pressable key={opt.id} style={styles.promptBtn} onPress={() => onChoose(item.id, opt.id)}>
+            <Text style={styles.promptBtnText}>{opt.label}</Text>
+          </Pressable>
+        ))}
+      </View>
     </View>
   )
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: '#0d1117' },
+  screen: { flex: 1, backgroundColor: '#0d1117', paddingTop: 60 },
   header: {
     flexDirection: 'row', alignItems: 'center',
     paddingHorizontal: 20, paddingBottom: 16,
@@ -308,9 +242,6 @@ const styles = StyleSheet.create({
   emptyWrap: { flex: 1, justifyContent: 'center' },
   empty: { color: '#6e7681', textAlign: 'center', fontSize: 15 },
   list: { padding: 16, gap: 10 },
-  // Turn rail — subtle left border when an item belongs to a Hermes turn.
-  // 30%-opacity accent colour so it reads as grouping, not chrome.
-  turnRail: { borderLeftWidth: 2, borderLeftColor: 'rgba(94, 142, 255, 0.3)', paddingLeft: 10 },
   // Bubbles
   bubbleRow: { flexDirection: 'row' },
   bubbleRowUser: { justifyContent: 'flex-end' },
@@ -338,21 +269,8 @@ const styles = StyleSheet.create({
   promptTitle: { color: '#e6edf3', fontSize: 15, fontWeight: '600', marginBottom: 4 },
   promptMsg: { color: '#8b949e', fontSize: 14, marginBottom: 12 },
   promptBtns: { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
-  promptBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#5e8eff', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8 },
-  promptBtnNum: { color: 'rgba(255,255,255,0.6)', fontSize: 11, fontWeight: '700', minWidth: 14, textAlign: 'center' },
+  promptBtn: { backgroundColor: '#5e8eff', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8 },
   promptBtnText: { color: '#fff', fontSize: 13, fontWeight: '600' },
-  // text-input option
-  textOptWrap: { marginTop: 10, borderTopWidth: 1, borderTopColor: '#3a424d', paddingTop: 10 },
-  textOptLabel: { color: '#8b949e', fontSize: 12, fontWeight: '600', marginBottom: 6 },
-  textOptRow: { flexDirection: 'row', gap: 8, alignItems: 'center' },
-  textOptInput: {
-    flex: 1, backgroundColor: '#161b22', borderRadius: 10,
-    paddingHorizontal: 12, paddingVertical: 8,
-    color: '#e6edf3', fontSize: 14, borderWidth: 1, borderColor: '#3a424d',
-  },
-  textOptBtn: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#5e8eff', alignItems: 'center', justifyContent: 'center' },
-  textOptBtnOff: { backgroundColor: '#21262d' },
-  textOptBtnText: { color: '#fff', fontSize: 18, fontWeight: '700' },
   // Composer
   composer: {
     flexDirection: 'row', alignItems: 'center',

@@ -7,7 +7,9 @@
     "server": "pnpm --filter @aji/server dev",
     "mobile": "pnpm --filter mobile start",
     "send": "tsx tools/send.ts",
-    "simulate": "tsx tools/simulate.ts"
+    "simulate": "tsx tools/simulate.ts",
+    "hooks:install": "tsx tools/claude-hooks-install.ts",
+    "hooks:uninstall": "tsx tools/claude-hooks-uninstall.ts"
   },
   "dependencies": {
     "@aji/protocol": "workspace:*"
