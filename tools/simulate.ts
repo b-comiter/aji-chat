@@ -85,6 +85,75 @@ async function run(): Promise<void> {
 
   await sleep(2000)
   await emit({ type: 'status', value: 'idle' })
+
+  // Add a second simulation with code blocks for testing syntax highlighting
+  await sleep(1000)
+  await emit({ type: 'status', value: 'thinking' })
+  await sleep(400)
+
+  const msg3 = newId('msg')
+  await emit({ type: 'message_start', id: msg3, role: 'assistant' })
+  await streamText(
+    msg3,
+    `Here you go:
+
+**Python:**
+\`\`\`python
+def greet(name: str) -> str:
+    return f"Hello, {name}!"
+
+print(greet("World"))
+\`\`\`
+
+**Rust:**
+\`\`\`rust
+fn main() {
+    let nums = vec![1, 2, 3, 4, 5];
+    let sum: i32 = nums.iter().sum();
+    println!("Sum: {}", sum);
+}
+\`\`\`
+
+**JavaScript:**
+\`\`\`javascript
+const double = (n) => n * 2;
+console.log(double(21));
+\`\`\`
+
+**Bash:**
+\`\`\`bash
+echo "Disk usage:"
+df -h / | tail -1
+\`\`\`
+
+**SQL:**
+\`\`\`sql
+SELECT name, COUNT(*) cnt
+FROM users
+JOIN orders ON users.id = orders.user_id
+GROUP BY name
+ORDER BY cnt DESC
+LIMIT 10;
+\`\`\`
+
+**Go:**
+\`\`\`go
+package main
+
+import "fmt"
+
+func main() {
+    ch := make(chan string, 1)
+    ch <- "ping"
+    fmt.Println(<-ch)
+}
+\`\`\`
+
+Let me know if you'd like more!`,
+  )
+  await emit({ type: 'message_end', id: msg3 })
+  await sleep(500)
+  await emit({ type: 'status', value: 'idle' })
   console.log('simulation complete')
 }
 
