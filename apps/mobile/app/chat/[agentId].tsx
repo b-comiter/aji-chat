@@ -45,7 +45,8 @@ const SERVER_HTTP = `http://${process.env.EXPO_PUBLIC_SERVER_HOST}:4000`
 const LOCAL_COMMANDS: CommandItem[] = [
   { name: 'clear',             description: 'Clear chat history for this agent',              category: 'Dev' },
   { name: 'view-db',           description: 'Dump database contents to server log',           category: 'Dev' },
-  { name: 'view-chat-history', description: 'Log this agent\'s chat messages to server console', category: 'Dev', args_hint: '[-with-tools]' },
+  { name: 'view-chat-history', description: 'Log this agent\'s chat messages to server console', category: 'Dev', args_hint: '[with-tools]' },
+  { name: 'view-last-n-msgs',  description: 'Log the last N messages to server console',      category: 'Dev', args_hint: '<count>' },
   { name: 'wipe-db',           description: 'Wipe ALL history for ALL agents',                category: 'Dev' },
 ]
 
@@ -241,7 +242,7 @@ export default function ChatScreen() {
       }
 
       case 'view-chat-history': {
-        const withTools = args.includes('-with-tools')
+        const withTools = args.includes('with-tools')
         const snapshot = items.filter(
           (it): it is Extract<Item, { kind: 'message' | 'tool' }> =>
             it.kind === 'message' || (withTools && it.kind === 'tool'),
@@ -258,6 +259,25 @@ export default function ChatScreen() {
             body: JSON.stringify({ agentId: agentId ?? 'unknown', items: payload }),
           })
           addSystemMessage(`Chat history sent to server log${withTools ? ' (with tools)' : ''}.`)
+        } catch {
+          addSystemMessage('Could not reach server — is it running?')
+        }
+        return true
+      }
+
+      case 'view-last-n-msgs': {
+        const countStr = args[0] || '10'
+        const count = Math.max(1, parseInt(countStr, 10) || 10)
+        const messages = items
+          .filter((it): it is Extract<Item, { kind: 'message' }> => it.kind === 'message')
+          .slice(-count)
+        try {
+          await fetch(`${SERVER_HTTP}/last-messages/dump`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ agentId: agentId ?? 'unknown', messages }),
+          })
+          addSystemMessage(`Last ${count} message${count !== 1 ? 's' : ''} sent to server log.`)
         } catch {
           addSystemMessage('Could not reach server — is it running?')
         }

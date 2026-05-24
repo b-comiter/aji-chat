@@ -206,7 +206,7 @@ app.post('/db/dump', async (c) => {
 /**
  * Receive a chat history dump from the mobile client and print it to the
  * server console. Triggered by the /view-chat-history slash command.
- * Pass -with-tools on the mobile side to include tool rows.
+ * Pass with-tools on the mobile side to include tool rows.
  */
 app.post('/chat/dump', async (c) => {
   const { agentId, items } = await c.req.json<{
@@ -246,6 +246,38 @@ app.post('/chat/dump', async (c) => {
   console.log(`\n[CHAT DUMP] agent=${agentId}`)
   console.table(rows)
   console.log('')
+
+  return c.json({ logged: true })
+})
+
+/**
+ * Receive the last N messages from the mobile client and print them to the
+ * server console. Triggered by the /view-last-n-msgs slash command.
+ */
+app.post('/last-messages/dump', async (c) => {
+  const { agentId, messages } = await c.req.json<{
+    agentId: string
+    messages: Array<{
+      id: string
+      role: 'assistant' | 'user' | 'system'
+      text: string
+      done: boolean
+    }>
+  }>()
+
+  log(' ', `POST /last-messages/dump  agent=${agentId} messages=${messages.length}`)
+
+  if (messages.length === 0) {
+    console.log(`\n[LAST MESSAGES] No messages for agent "${agentId}".\n`)
+    return c.json({ logged: true })
+  }
+
+  console.log(`\n[LAST MESSAGES] agent=${agentId} (${messages.length} message${messages.length !== 1 ? 's' : ''})`)
+
+  messages.forEach((msg, i) => {
+    console.log(msg)
+    console.log(' ', i)
+  })
 
   return c.json({ logged: true })
 })

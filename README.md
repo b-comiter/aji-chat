@@ -17,7 +17,7 @@ A purpose-built messaging client for chatting with AI agents (Hermes, Claude Cod
 ### Local Slash Commands
 - `/clear` — Delete chat history for current agent
 - `/view-db` — Log database summary (agent rows + item counts) to server console as a formatted table
-- `/view-chat-history [-with-tools]` — Log current agent's messages to server console; use `-with-tools` to include tool calls
+- `/view-chat-history [with-tools]` — Log current agent's messages to server console; use `with-tools` to include tool calls
 - `/wipe-db` — Erase all conversations for all agents and return to home screen
 
 ### Markdown & Code Rendering
