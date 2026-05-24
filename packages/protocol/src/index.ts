@@ -30,11 +30,20 @@ export type AgentStatus = 'thinking' | 'working' | 'idle'
  */
 export type TurnId = string
 
+/**
+ * Identifies which agent sent the event. Set by adapters that know their
+ * identity (e.g. 'claude-code', 'hermes', 'simulate'). Events without this
+ * field are attributed to 'unknown'. Modular — future agent pairing /
+ * registration layers on top without schema changes.
+ */
+export type AgentId = string
+
 export interface MessageStart {
   type: 'message_start'
   id: string
   role: Role
   turn_id?: TurnId
+  agent?: AgentId
 }
 
 export interface TextDelta {
@@ -42,12 +51,14 @@ export interface TextDelta {
   id: string
   text: string
   turn_id?: TurnId
+  agent?: AgentId
 }
 
 export interface MessageEnd {
   type: 'message_end'
   id: string
   turn_id?: TurnId
+  agent?: AgentId
 }
 
 export interface ToolStart {
@@ -56,6 +67,7 @@ export interface ToolStart {
   name: string
   args: Record<string, unknown>
   turn_id?: TurnId
+  agent?: AgentId
 }
 
 export interface ToolEnd {
@@ -66,11 +78,13 @@ export interface ToolEnd {
   /** Set when the tool errored. */
   error?: string
   turn_id?: TurnId
+  agent?: AgentId
 }
 
 export interface Status {
   type: 'status'
   value: AgentStatus
+  agent?: AgentId
 }
 
 /**
@@ -85,6 +99,7 @@ export interface PermissionRequest {
   message: string
   options: PromptOption[]
   turn_id?: TurnId
+  agent?: AgentId
 }
 
 /**
@@ -97,6 +112,7 @@ export interface Clarify {
   question: string
   choices: PromptOption[]
   turn_id?: TurnId
+  agent?: AgentId
 }
 
 /**
@@ -106,6 +122,7 @@ export interface Clarify {
 export interface PromptDismiss {
   type: 'prompt_dismiss'
   id: string
+  agent?: AgentId
 }
 
 /**
@@ -135,6 +152,7 @@ export interface CommandItem {
 export interface Commands {
   type: 'commands'
   commands: CommandItem[]
+  agent?: AgentId
 }
 
 export interface PromptOption {

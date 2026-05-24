@@ -48,8 +48,10 @@ class AjiClient:
         chat_id: Optional[str] = None,
         turn_id: Optional[str] = None,
     ) -> None:
-        """POST a single ServerEvent to /event. Stamps turn_id if available."""
+        """POST a single ServerEvent to /event. Stamps turn_id and agent if available."""
         payload = dict(event)
+        # Always stamp the agent identifier so mobile can route to the right conversation.
+        payload.setdefault("agent", "hermes")
         # Explicit turn_id wins; otherwise look up by chat_id.
         if turn_id is not None:
             payload.setdefault("turn_id", turn_id)
@@ -57,8 +59,8 @@ class AjiClient:
             current = self.state.current_turn(chat_id)
             if current is not None:
                 payload.setdefault("turn_id", current)
-        flog("emit() type=%s id=%s turn_id=%s",
-             payload.get("type"), payload.get("id"), payload.get("turn_id"))
+        flog("emit() type=%s id=%s turn_id=%s agent=%s",
+             payload.get("type"), payload.get("id"), payload.get("turn_id"), payload.get("agent"))
         await self._post("/event", payload)
 
     async def register_webhook(self, url: str) -> None:

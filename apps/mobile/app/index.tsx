@@ -1,461 +1,297 @@
+/**
+ * Home screen — Telegram-style agent list.
+ *
+ * Shows one row per known agent, sorted by last activity. Loads from
+ * SQLite on mount (instant), then patches in-memory state as live WS
+ * events arrive. Tap a row to open that agent's chat history.
+ */
 import { useEffect, useRef, useState } from 'react'
 import {
-  Animated,
-  AppState,
   FlatList,
-  Keyboard,
-  Platform,
+  Modal,
   Pressable,
   StyleSheet,
   Text,
-  TextInput,
   View,
 } from 'react-native'
+import { router } from 'expo-router'
+import { useDB } from '../db/DBProvider'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
-import type { AgentStatus, CommandItem, ServerEvent } from '@aji/protocol'
-import { MarkdownMessage } from '../components/MarkdownMessage'
-import { newId } from '@aji/protocol'
+import { useWS } from '../context/WebSocketContext'
+import { getAllAgents, agentDisplayName, AGENT_DISPLAY_NAMES, type AgentRow } from '../db/database'
+import type { ServerEvent } from '@aji/protocol'
 
-const SERVER_WS = `ws://${process.env.EXPO_PUBLIC_SERVER_HOST}:4000/ws`
+// Agents the user can manually open a chat with (excludes 'unknown')
+const CONNECTABLE_AGENTS = Object.entries(AGENT_DISPLAY_NAMES)
+  .filter(([id]) => id !== 'unknown')
+  .map(([id, label]) => ({ id, label }))
 
-const BACKOFF = [1000, 2000, 4000, 8000, 16000, 30000]
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
-type ConnStatus = 'connecting' | 'connected' | 'disconnected'
+function relativeTime(ts: number | null): string {
+  if (!ts) return ''
+  const diff = Date.now() - ts
+  const mins = Math.floor(diff / 60000)
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `${hours}h ago`
+  const days = Math.floor(hours / 24)
+  if (days === 1) return 'Yesterday'
+  return `${days}d ago`
+}
 
-type PromptOpt = { id: string; label: string; allowText?: boolean }
+function statusColor(status: string): string {
+  switch (status) {
+    case 'thinking':
+    case 'working':
+      return '#d29922' // amber
+    case 'idle':
+      return '#3fb950' // green
+    default:
+      return '#6e7681' // grey
+  }
+}
 
-type Item =
-  | { kind: 'message'; id: string; role: 'assistant' | 'user' | 'system'; text: string; done: boolean; turnId?: string }
-  | { kind: 'tool'; id: string; name: string; args: Record<string, unknown>; result?: unknown; done: boolean; turnId?: string }
-  | { kind: 'prompt'; id: string; title: string; message: string; options: PromptOpt[]; turnId?: string }
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
 
-export default function ChatScreen() {
-  const [items, setItems] = useState<Item[]>([])
-  const [conn, setConn] = useState<ConnStatus>('connecting')
-  const [agentStatus, setAgentStatus] = useState<AgentStatus>('idle')
-  const [draft, setDraft] = useState('')
-  const [commands, setCommands] = useState<CommandItem[]>([])
-  const ws = useRef<WebSocket | null>(null)
-  const listRef = useRef<FlatList>(null)
-  const attempt = useRef(0)
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const mounted = useRef(true)
+export default function HomeScreen() {
+  const db = useDB()
+  const { conn, subscribe } = useWS()
+  const { top: safeTop } = useSafeAreaInsets()
+  const [agents, setAgents] = useState<AgentRow[]>([])
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const mountedRef = useRef(true)
 
-  const { top: safeTop, bottom: safeBottom } = useSafeAreaInsets()
-
-  // kbOffset drives paddingBottom on the root view.
-  // At rest it equals safeBottom so the composer clears the home indicator.
-  // When the keyboard opens it animates to endCoordinates.height (keyboard + home indicator area).
-  const kbOffsetRef = useRef<Animated.Value | null>(null)
-  if (!kbOffsetRef.current) kbOffsetRef.current = new Animated.Value(safeBottom)
-  const kbOffset = kbOffsetRef.current
-
+  // Load agent list from DB on mount
   useEffect(() => {
-    if (Platform.OS !== 'ios') return
-    const onShow = Keyboard.addListener('keyboardWillShow', (e) => {
-      Animated.timing(kbOffset, {
-        toValue: e.endCoordinates.height,
-        duration: e.duration,
-        useNativeDriver: false,
-      }).start()
+    getAllAgents(db).then((rows) => {
+      if (mountedRef.current) setAgents(rows)
     })
-    const onHide = Keyboard.addListener('keyboardWillHide', (e) => {
-      Animated.timing(kbOffset, { toValue: safeBottom, duration: e.duration, useNativeDriver: false }).start()
-    })
-    return () => { onShow.remove(); onHide.remove() }
-  }, [kbOffset, safeBottom])
+    return () => { mountedRef.current = false }
+  }, [db])
 
-  // WebSocket with exponential backoff and AppState reconnect
+  // Subscribe to all WS events to patch in-memory agent rows in real-time
   useEffect(() => {
-    function connect() {
-      if (!mounted.current) return
-      setConn('connecting')
-      const socket = new WebSocket(SERVER_WS)
-      ws.current = socket
+    return subscribe('*', (event: ServerEvent) => {
+      const agentId = event.agent ?? 'unknown'
 
-      socket.onopen = () => {
-        attempt.current = 0
-        setConn('connected')
-        // Request the slash command list. The plugin responds with a `commands`
-        // event (broadcast to all WebSocket clients). This handles the case
-        // where mobile connects after the plugin is already running; the plugin
-        // also pushes the list proactively on its first successful registration,
-        // so whichever fires second wins (both are idempotent).
-        socket.send(JSON.stringify({ type: 'get_commands' }))
-      }
-      socket.onerror = () => socket.close()
-      socket.onclose = () => {
-        if (!mounted.current) return
-        setConn('disconnected')
-        const delay = BACKOFF[Math.min(attempt.current, BACKOFF.length - 1)]
-        attempt.current += 1
-        timer.current = setTimeout(connect, delay)
-      }
-      socket.onmessage = (e) => {
-        try { handleEvent(JSON.parse(e.data as string) as ServerEvent) }
-        catch (err) { console.warn('parse error', err) }
-      }
-    }
+      setAgents((prev) => {
+        switch (event.type) {
+          case 'message_start':
+          case 'tool_start':
+          case 'permission_request':
+          case 'clarify': {
+            // Ensure agent row exists (may arrive before DB upsert completes)
+            const exists = prev.some((a) => a.id === agentId)
+            if (exists) return prev
+            return [
+              {
+                id: agentId,
+                display_name: agentDisplayName(agentId),
+                last_message_preview: null,
+                last_event_at: Date.now(),
+                last_status: 'idle',
+              },
+              ...prev,
+            ]
+          }
 
-    connect()
+          case 'message_end': {
+            // Preview is updated by the context in DB; we update in-memory here
+            // by re-reading from the inFlight text via the event's text accumulation.
+            // Since we don't have the text here, just bump the timestamp.
+            return prev.map((a) =>
+              a.id === agentId ? { ...a, last_event_at: Date.now() } : a,
+            )
+          }
 
-    const appState = AppState.addEventListener('change', (next) => {
-      if (next === 'active') {
-        const s = ws.current?.readyState
-        if (s === WebSocket.CLOSED || s === WebSocket.CLOSING) {
-          if (timer.current) clearTimeout(timer.current)
-          attempt.current = 0
-          connect()
+          case 'status': {
+            const exists = prev.some((a) => a.id === agentId)
+            if (!exists) {
+              return [
+                {
+                  id: agentId,
+                  display_name: agentDisplayName(agentId),
+                  last_message_preview: null,
+                  last_event_at: Date.now(),
+                  last_status: event.value,
+                },
+                ...prev,
+              ]
+            }
+            return prev.map((a) =>
+              a.id === agentId ? { ...a, last_status: event.value } : a,
+            )
+          }
+
+          default:
+            return prev
         }
+      })
+
+      // After message_end, re-read agent row to get updated preview
+      if (event.type === 'message_end') {
+        getAllAgents(db).then((rows) => {
+          if (mountedRef.current) setAgents(rows)
+        })
       }
     })
+  }, [subscribe, db])
 
-    return () => {
-      mounted.current = false
-      appState.remove()
-      if (timer.current) clearTimeout(timer.current)
-      ws.current?.close()
-    }
-  }, [])
-
-  function handleEvent(event: ServerEvent) {
-    setItems((prev) => {
-      // turn_id is only present on the seven event types that opt in to it.
-      // We pull it once here so the switch arms can stamp it on new items.
-      const turnId = 'turn_id' in event ? event.turn_id : undefined
-      switch (event.type) {
-        case 'message_start':
-          return [...prev, { kind: 'message', id: event.id, role: event.role, text: '', done: false, turnId }]
-        case 'text_delta':
-          return prev.map((it) =>
-            it.kind === 'message' && it.id === event.id ? { ...it, text: it.text + event.text } : it)
-        case 'message_end':
-          return prev.map((it) =>
-            it.kind === 'message' && it.id === event.id ? { ...it, done: true } : it)
-        case 'tool_start':
-          return [...prev, { kind: 'tool', id: event.id, name: event.name, args: event.args, done: false, turnId }]
-        case 'tool_end':
-          return prev.map((it) =>
-            it.kind === 'tool' && it.id === event.id ? { ...it, result: event.result, done: true } : it)
-        case 'permission_request':
-          return [...prev, { kind: 'prompt', id: event.id, title: event.title, message: event.message, options: event.options, turnId }]
-        case 'clarify':
-          return [...prev, { kind: 'prompt', id: event.id, title: 'Clarification', message: event.question, options: event.choices, turnId }]
-        case 'prompt_dismiss':
-          return prev.filter((it) => !(it.kind === 'prompt' && it.id === event.id))
-        default:
-          return prev
-      }
-    })
-    if (event.type === 'status') setAgentStatus(event.value)
-    if (event.type === 'commands') setCommands(event.commands)
-  }
-
-  function respond(promptId: string, choice: string) {
-    ws.current?.send(JSON.stringify({ type: 'prompt_response', id: promptId, choice }))
-    setItems((prev) => prev.filter((it) => !(it.kind === 'prompt' && it.id === promptId)))
-  }
-
-  function sendMessage() {
-    const text = draft.trim()
-    if (!text || ws.current?.readyState !== WebSocket.OPEN) return
-    setItems((prev) => [...prev, { kind: 'message', id: newId('msg'), role: 'user', text, done: true }])
-    ws.current.send(JSON.stringify({ type: 'user_message', text }))
-    setDraft('')
-  }
-
-  const connColor = conn === 'connected' ? '#3fb950' : conn === 'connecting' ? '#d29922' : '#f85149'
-  const canSend = draft.trim().length > 0 && conn === 'connected'
-
-  // Slash command picker — visible while the user is typing the command name
-  // (after "/" and before any space). Hides once they start typing arguments.
-  const rawQuery = draft.startsWith('/') ? draft.slice(1) : null
-  const pickerQuery = rawQuery !== null && !rawQuery.includes(' ') ? rawQuery.toLowerCase() : null
-  const pickerItems = pickerQuery !== null
-    ? commands
-        .filter((c) =>
-          c.name.startsWith(pickerQuery) ||
-          (c.aliases ?? []).some((a) => a.startsWith(pickerQuery))
-        )
-        .slice(0, 20)
-    : []
-  const showPicker = pickerItems.length > 0
-
-  function selectCommand(name: string) {
-    setDraft(`/${name} `)
-  }
+  const connColor =
+    conn === 'connected' ? '#3fb950' : conn === 'connecting' ? '#d29922' : '#f85149'
 
   return (
-    <Animated.View style={[styles.screen, { paddingTop: safeTop + 12, paddingBottom: kbOffset }]}>
+    <View style={[styles.screen, { paddingTop: safeTop }]}>
       {/* Header */}
       <View style={styles.header}>
         <Text style={styles.title}>aji-chat</Text>
-        {agentStatus !== 'idle' && <Text style={styles.agentStatus}>{agentStatus}…</Text>}
-        <View style={[styles.dot, { backgroundColor: connColor }]} />
-        <Text style={[styles.connStatus, { color: connColor }]}>{conn}</Text>
-      </View>
-
-      {/* Message list */}
-      {items.length === 0
-        ? <View style={styles.emptyWrap}><Text style={styles.empty}>waiting for messages…</Text></View>
-        : <FlatList
-            ref={listRef}
-            data={items}
-            keyExtractor={(it) => `${it.kind}-${it.id}`}
-            renderItem={({ item }) => <Row item={item} onChoose={respond} />}
-            contentContainerStyle={styles.list}
-            onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
-          />
-      }
-
-      {/* Slash command picker */}
-      {showPicker && (
-        <CommandPicker items={pickerItems} onSelect={selectCommand} />
-      )}
-
-      {/* Composer */}
-      <View style={styles.composer}>
-        <TextInput
-          style={styles.input}
-          value={draft}
-          onChangeText={setDraft}
-          placeholder="Message…"
-          placeholderTextColor="#6e7681"
-          returnKeyType="send"
-          onSubmitEditing={sendMessage}
-          blurOnSubmit={false}
-        />
-        <Pressable style={[styles.sendBtn, !canSend && styles.sendBtnOff]} onPress={sendMessage} disabled={!canSend}>
-          <Text style={styles.sendBtnText}>↑</Text>
+        <View style={[styles.connDot, { backgroundColor: connColor }]} />
+        <Pressable style={styles.addBtn} onPress={() => setPickerOpen(true)} hitSlop={8}>
+          <Text style={styles.addBtnText}>＋</Text>
         </Pressable>
       </View>
-    </Animated.View>
-  )
-}
 
-function PromptRow({ item, onChoose }: { item: Extract<Item, { kind: 'prompt' }>; onChoose: (id: string, choice: string) => void }) {
-  const [textValues, setTextValues] = useState<Record<string, string>>({})
-
-  const buttonOpts = item.options.filter(o => !o.allowText)
-  const textOpts   = item.options.filter(o => o.allowText)
-
-  return (
-    <View style={styles.promptCard}>
-      <Text style={styles.promptTitle}>{item.title}</Text>
-      <Text style={styles.promptMsg}>{item.message}</Text>
-
-      {/* Button options */}
-      {buttonOpts.length > 0 && (
-        <View style={styles.promptBtns}>
-          {buttonOpts.map((opt, i) => (
-            <Pressable key={opt.id} style={styles.promptBtn} onPress={() => onChoose(item.id, opt.id)}>
-              <Text style={styles.promptBtnNum}>{i + 1}</Text>
-              <Text style={styles.promptBtnText}>{opt.label}</Text>
-            </Pressable>
-          ))}
-        </View>
-      )}
-
-      {/* Text input options */}
-      {textOpts.map((opt) => (
-        <View key={opt.id} style={styles.textOptWrap}>
-          <Text style={styles.textOptLabel}>{opt.label}</Text>
-          <View style={styles.textOptRow}>
-            <TextInput
-              style={styles.textOptInput}
-              value={textValues[opt.id] ?? ''}
-              onChangeText={(v) => setTextValues(prev => ({ ...prev, [opt.id]: v }))}
-              placeholder="Type your answer…"
-              placeholderTextColor="#6e7681"
-              returnKeyType="send"
-              onSubmitEditing={() => {
-                const val = (textValues[opt.id] ?? '').trim()
-                if (val) onChoose(item.id, val)
-              }}
-            />
-            <Pressable
-              style={[styles.textOptBtn, !(textValues[opt.id] ?? '').trim() && styles.textOptBtnOff]}
-              disabled={!(textValues[opt.id] ?? '').trim()}
-              onPress={() => {
-                const val = (textValues[opt.id] ?? '').trim()
-                if (val) onChoose(item.id, val)
-              }}
-            >
-              <Text style={styles.textOptBtnText}>→</Text>
-            </Pressable>
+      {/* Agent picker modal */}
+      <Modal
+        visible={pickerOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setPickerOpen(false)}
+      >
+        <Pressable style={styles.modalBackdrop} onPress={() => setPickerOpen(false)}>
+          <View style={styles.pickerCard}>
+            <Text style={styles.pickerTitle}>Open chat with…</Text>
+            {CONNECTABLE_AGENTS.map((agent) => (
+              <Pressable
+                key={agent.id}
+                style={styles.pickerRow}
+                onPress={() => {
+                  setPickerOpen(false)
+                  router.push(`/chat/${agent.id}`)
+                }}
+              >
+                <Text style={styles.pickerLabel}>{agent.label}</Text>
+                <Text style={styles.pickerChevron}>›</Text>
+              </Pressable>
+            ))}
           </View>
+        </Pressable>
+      </Modal>
+
+      {/* Agent list */}
+      {agents.length === 0 ? (
+        <View style={styles.emptyWrap}>
+          <Text style={styles.emptyTitle}>No agents yet</Text>
+          <Text style={styles.emptySub}>
+            Waiting for an agent to connect…{'\n'}
+            Run <Text style={styles.code}>pnpm simulate</Text> to test.
+          </Text>
         </View>
-      ))}
-    </View>
-  )
-}
-
-function CommandPicker({
-  items,
-  onSelect,
-}: {
-  items: CommandItem[]
-  onSelect: (name: string) => void
-}) {
-  return (
-    <View style={styles.pickerWrap}>
-      <FlatList
-        data={items}
-        keyExtractor={(c) => c.name}
-        // Keep the keyboard open when the user taps a suggestion.
-        keyboardShouldPersistTaps="always"
-        style={styles.pickerList}
-        renderItem={({ item: cmd, index }) => (
-          <Pressable
-            style={[styles.pickerRow, index === 0 && styles.pickerRowFirst]}
-            onPress={() => onSelect(cmd.name)}
-          >
-            <View style={styles.pickerLeft}>
-              <Text style={styles.pickerName}>/{cmd.name}</Text>
-              {cmd.args_hint ? (
-                <Text style={styles.pickerHint}> {cmd.args_hint}</Text>
-              ) : null}
-            </View>
-            <Text style={styles.pickerDesc} numberOfLines={1}>
-              {cmd.description}
-            </Text>
-          </Pressable>
-        )}
-      />
-    </View>
-  )
-}
-
-function Row({ item, onChoose }: { item: Item; onChoose: (id: string, choice: string) => void }) {
-  // Items emitted as part of a Hermes turn carry `turnId`. We render them with
-  // a subtle left rail so the user can visually see "this tool / this message
-  // / this prompt was part of the same conversation turn." Items without
-  // `turnId` (Claude Code path, user bubbles) render unchanged.
-  const inTurn = !!item.turnId
-
-  if (item.kind === 'message') {
-    const isUser = item.role === 'user'
-    return (
-      <View style={[styles.bubbleRow, isUser && styles.bubbleRowUser, inTurn && !isUser && styles.turnRail]}>
-        <View style={[styles.bubble, isUser && styles.bubbleUser]}>
-          {isUser || !item.done ? (
-            <Text style={[styles.bubbleText, isUser && styles.bubbleTextUser]}>
-              {item.text}{!item.done && <Text style={styles.cursor}> ▍</Text>}
-            </Text>
-          ) : (
-            <MarkdownMessage content={item.text} />
+      ) : (
+        <FlatList
+          data={agents}
+          keyExtractor={(a) => a.id}
+          renderItem={({ item }) => (
+            <AgentRow agent={item} onPress={() => router.push(`/chat/${item.id}`)} />
           )}
-        </View>
-      </View>
-    )
-  }
-
-  if (item.kind === 'tool') {
-    return (
-      <View style={[styles.toolCard, inTurn && styles.turnRail]}>
-        <Text style={styles.toolLabel}>🔧 {item.name} {item.done ? '✓' : '…'}</Text>
-        <Text style={styles.toolMono}>{JSON.stringify(item.args)}</Text>
-        {item.done && item.result !== undefined && (
-          <Text style={styles.toolMono}>{typeof item.result === 'string' ? item.result : JSON.stringify(item.result)}</Text>
-        )}
-      </View>
-    )
-  }
-
-  return (
-    <View style={inTurn ? styles.turnRail : undefined}>
-      <PromptRow item={item} onChoose={onChoose} />
+          contentContainerStyle={styles.list}
+        />
+      )}
     </View>
   )
 }
+
+// ---------------------------------------------------------------------------
+// AgentRow
+// ---------------------------------------------------------------------------
+
+function AgentRow({ agent, onPress }: { agent: AgentRow; onPress: () => void }) {
+  return (
+    <Pressable style={styles.row} onPress={onPress}>
+      <View style={[styles.statusDot, { backgroundColor: statusColor(agent.last_status) }]} />
+      <View style={styles.rowBody}>
+        <View style={styles.rowTop}>
+          <Text style={styles.agentName}>{agent.display_name}</Text>
+          <Text style={styles.timestamp}>{relativeTime(agent.last_event_at)}</Text>
+        </View>
+        {agent.last_message_preview ? (
+          <Text style={styles.preview} numberOfLines={1}>
+            {agent.last_message_preview}
+          </Text>
+        ) : (
+          <Text style={styles.previewEmpty}>No messages yet</Text>
+        )}
+      </View>
+      <Text style={styles.chevron}>›</Text>
+    </Pressable>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Styles
+// ---------------------------------------------------------------------------
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: '#0d1117' },
   header: {
-    flexDirection: 'row', alignItems: 'center',
-    paddingHorizontal: 20, paddingBottom: 16,
-    borderBottomWidth: 1, borderBottomColor: '#21262d', gap: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#21262d',
+    gap: 8,
   },
-  title: { color: '#e6edf3', fontSize: 18, fontWeight: '600', flex: 1 },
-  agentStatus: { color: '#b392f0', fontSize: 13, fontStyle: 'italic' },
-  dot: { width: 8, height: 8, borderRadius: 4 },
-  connStatus: { fontSize: 13 },
-  emptyWrap: { flex: 1, justifyContent: 'center' },
-  empty: { color: '#6e7681', textAlign: 'center', fontSize: 15 },
-  list: { padding: 16, gap: 10 },
-  // Turn rail — subtle left border when an item belongs to a Hermes turn.
-  // 30%-opacity accent colour so it reads as grouping, not chrome.
-  turnRail: { borderLeftWidth: 2, borderLeftColor: 'rgba(94, 142, 255, 0.3)', paddingLeft: 10 },
-  // Bubbles
-  bubbleRow: { flexDirection: 'row' },
-  bubbleRowUser: { justifyContent: 'flex-end' },
-  bubble: {
-    backgroundColor: '#161b22', borderRadius: 14,
-    paddingHorizontal: 16, paddingVertical: 12,
-    borderWidth: 1, borderColor: '#21262d',
-  },
-  bubbleUser: { backgroundColor: '#5e8eff', borderColor: '#5e8eff', maxWidth: '80%' },
-  bubbleText: { color: '#e6edf3', fontSize: 15, lineHeight: 22 },
-  bubbleTextUser: { color: '#fff' },
-  cursor: { color: '#5e8eff' },
-  // Tool card
-  toolCard: {
-    backgroundColor: '#1c2129', borderRadius: 12, padding: 12,
-    borderLeftWidth: 3, borderLeftColor: '#b392f0',
-  },
-  toolLabel: { color: '#b392f0', fontSize: 13, fontWeight: '600', marginBottom: 4 },
-  toolMono: { color: '#8b949e', fontSize: 12, fontFamily: 'Menlo', marginTop: 2 },
-  // Prompt card
-  promptCard: {
-    backgroundColor: '#242b35', borderRadius: 14, padding: 14,
-    borderWidth: 1, borderColor: '#d29922',
-  },
-  promptTitle: { color: '#e6edf3', fontSize: 15, fontWeight: '600', marginBottom: 4 },
-  promptMsg: { color: '#8b949e', fontSize: 14, marginBottom: 12 },
-  promptBtns: { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
-  promptBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#5e8eff', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8 },
-  promptBtnNum: { color: 'rgba(255,255,255,0.6)', fontSize: 11, fontWeight: '700', minWidth: 14, textAlign: 'center' },
-  promptBtnText: { color: '#fff', fontSize: 13, fontWeight: '600' },
-  // text-input option
-  textOptWrap: { marginTop: 10, borderTopWidth: 1, borderTopColor: '#3a424d', paddingTop: 10 },
-  textOptLabel: { color: '#8b949e', fontSize: 12, fontWeight: '600', marginBottom: 6 },
-  textOptRow: { flexDirection: 'row', gap: 8, alignItems: 'center' },
-  textOptInput: {
-    flex: 1, backgroundColor: '#161b22', borderRadius: 10,
-    paddingHorizontal: 12, paddingVertical: 8,
-    color: '#e6edf3', fontSize: 14, borderWidth: 1, borderColor: '#3a424d',
-  },
-  textOptBtn: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#5e8eff', alignItems: 'center', justifyContent: 'center' },
-  textOptBtnOff: { backgroundColor: '#21262d' },
-  textOptBtnText: { color: '#fff', fontSize: 18, fontWeight: '700' },
-  // Composer
-  composer: {
-    flexDirection: 'row', alignItems: 'center',
-    paddingHorizontal: 12, paddingVertical: 10,
-    borderTopWidth: 1, borderTopColor: '#21262d', gap: 8,
-  },
-  input: {
-    flex: 1, backgroundColor: '#161b22', borderRadius: 20,
-    paddingHorizontal: 16, paddingVertical: 10,
-    color: '#e6edf3', fontSize: 15, borderWidth: 1, borderColor: '#21262d',
-  },
-  sendBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#5e8eff', alignItems: 'center', justifyContent: 'center' },
-  sendBtnOff: { backgroundColor: '#21262d' },
-  sendBtnText: { color: '#fff', fontSize: 18, fontWeight: '700', lineHeight: 22 },
-  // Slash command picker
-  pickerWrap: {
-    maxHeight: 260,
-    borderTopWidth: 1, borderTopColor: '#21262d',
+  title: { color: '#e6edf3', fontSize: 20, fontWeight: '700', flex: 1 },
+  connDot: { width: 8, height: 8, borderRadius: 4 },
+  addBtn: { width: 30, height: 30, borderRadius: 15, backgroundColor: '#21262d', alignItems: 'center', justifyContent: 'center' },
+  addBtnText: { color: '#e6edf3', fontSize: 16, lineHeight: 20 },
+  modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center' },
+  pickerCard: {
+    width: 280,
     backgroundColor: '#161b22',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#21262d',
+    overflow: 'hidden',
   },
-  pickerList: { flexGrow: 0 },
+  pickerTitle: { color: '#6e7681', fontSize: 12, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.8, paddingHorizontal: 16, paddingTop: 14, paddingBottom: 10 },
   pickerRow: {
-    paddingHorizontal: 16, paddingVertical: 10,
-    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#21262d',
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: '#21262d',
   },
-  pickerRowFirst: {},
-  pickerLeft: { flexDirection: 'row', alignItems: 'baseline', marginBottom: 2 },
-  pickerName: { color: '#5e8eff', fontSize: 14, fontWeight: '600' },
-  pickerHint: { color: '#8b949e', fontSize: 12, fontStyle: 'italic' },
-  pickerDesc: { color: '#6e7681', fontSize: 12 },
+  pickerLabel: { color: '#e6edf3', fontSize: 15, flex: 1 },
+  pickerChevron: { color: '#3d444d', fontSize: 20 },
+  emptyWrap: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 32 },
+  emptyTitle: { color: '#e6edf3', fontSize: 17, fontWeight: '600', marginBottom: 8 },
+  emptySub: { color: '#6e7681', fontSize: 14, textAlign: 'center', lineHeight: 22 },
+  code: { fontFamily: 'Menlo', color: '#b392f0' },
+  list: { paddingTop: 8 },
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#21262d',
+    gap: 12,
+  },
+  statusDot: { width: 10, height: 10, borderRadius: 5, flexShrink: 0 },
+  rowBody: { flex: 1 },
+  rowTop: { flexDirection: 'row', alignItems: 'center', marginBottom: 3 },
+  agentName: { color: '#e6edf3', fontSize: 15, fontWeight: '600', flex: 1 },
+  timestamp: { color: '#6e7681', fontSize: 12 },
+  preview: { color: '#8b949e', fontSize: 13 },
+  previewEmpty: { color: '#3d444d', fontSize: 13, fontStyle: 'italic' },
+  chevron: { color: '#3d444d', fontSize: 20 },
 })

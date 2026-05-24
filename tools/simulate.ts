@@ -9,6 +9,7 @@ import type { ServerEvent } from '@aji/protocol'
 import { newId } from '@aji/protocol'
 
 const SERVER = 'http://localhost:4000/event'
+const AGENT = 'simulate'
 
 async function emit(event: ServerEvent): Promise<void> {
   await fetch(SERVER, {
@@ -29,7 +30,7 @@ function chunks(text: string, size = 4): string[] {
 
 async function streamText(id: string, text: string, delayMs = 35): Promise<void> {
   for (const chunk of chunks(text)) {
-    await emit({ type: 'text_delta', id, text: chunk })
+    await emit({ type: 'text_delta', id, text: chunk, agent: AGENT })
     await sleep(delayMs)
   }
 }
@@ -37,38 +38,40 @@ async function streamText(id: string, text: string, delayMs = 35): Promise<void>
 async function run(): Promise<void> {
   console.log('starting simulated agent run…')
 
-  await emit({ type: 'status', value: 'thinking' })
+  await emit({ type: 'status', value: 'thinking', agent: AGENT })
   await sleep(600)
 
   const msg1 = newId('msg')
-  await emit({ type: 'message_start', id: msg1, role: 'assistant' })
+  await emit({ type: 'message_start', id: msg1, role: 'assistant', agent: AGENT })
   await streamText(msg1, 'Let me check what files are in your project.')
-  await emit({ type: 'message_end', id: msg1 })
+  await emit({ type: 'message_end', id: msg1, agent: AGENT })
   await sleep(300)
 
-  await emit({ type: 'status', value: 'working' })
+  await emit({ type: 'status', value: 'working', agent: AGENT })
   const tool1 = newId('tool')
   await emit({
     type: 'tool_start',
     id: tool1,
     name: 'list_files',
     args: { path: '.' },
+    agent: AGENT,
   })
   await sleep(900)
   await emit({
     type: 'tool_end',
     id: tool1,
     result: ['README.md', 'package.json', 'src/index.ts'],
+    agent: AGENT,
   })
   await sleep(400)
 
   const msg2 = newId('msg')
-  await emit({ type: 'message_start', id: msg2, role: 'assistant' })
+  await emit({ type: 'message_start', id: msg2, role: 'assistant', agent: AGENT })
   await streamText(
     msg2,
     "I found three files. I'd like to read src/index.ts — that requires permission.",
   )
-  await emit({ type: 'message_end', id: msg2 })
+  await emit({ type: 'message_end', id: msg2, agent: AGENT })
   await sleep(300)
 
   await emit({
@@ -81,18 +84,19 @@ async function run(): Promise<void> {
       { id: 'always', label: 'Always allow' },
       { id: 'cancel', label: 'Cancel' },
     ],
+    agent: AGENT,
   })
 
   await sleep(2000)
-  await emit({ type: 'status', value: 'idle' })
+  await emit({ type: 'status', value: 'idle', agent: AGENT })
 
-  // Add a second simulation with code blocks for testing syntax highlighting
+  // Second run: code blocks for testing syntax highlighting
   await sleep(1000)
-  await emit({ type: 'status', value: 'thinking' })
+  await emit({ type: 'status', value: 'thinking', agent: AGENT })
   await sleep(400)
 
   const msg3 = newId('msg')
-  await emit({ type: 'message_start', id: msg3, role: 'assistant' })
+  await emit({ type: 'message_start', id: msg3, role: 'assistant', agent: AGENT })
   await streamText(
     msg3,
     `Here you go:
@@ -151,9 +155,9 @@ func main() {
 
 Let me know if you'd like more!`,
   )
-  await emit({ type: 'message_end', id: msg3 })
+  await emit({ type: 'message_end', id: msg3, agent: AGENT })
   await sleep(500)
-  await emit({ type: 'status', value: 'idle' })
+  await emit({ type: 'status', value: 'idle', agent: AGENT })
   console.log('simulation complete')
 }
 
