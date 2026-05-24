@@ -12,7 +12,7 @@ import {
   View,
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
-import type { AgentStatus, ServerEvent } from '@aji/protocol'
+import type { AgentStatus, CommandItem, ServerEvent } from '@aji/protocol'
 import { newId } from '@aji/protocol'
 
 const SERVER_WS = `ws://${process.env.EXPO_PUBLIC_SERVER_HOST}:4000/ws`
@@ -33,6 +33,7 @@ export default function ChatScreen() {
   const [conn, setConn] = useState<ConnStatus>('connecting')
   const [agentStatus, setAgentStatus] = useState<AgentStatus>('idle')
   const [draft, setDraft] = useState('')
+  const [commands, setCommands] = useState<CommandItem[]>([])
   const ws = useRef<WebSocket | null>(null)
   const listRef = useRef<FlatList>(null)
   const attempt = useRef(0)
@@ -71,7 +72,16 @@ export default function ChatScreen() {
       const socket = new WebSocket(SERVER_WS)
       ws.current = socket
 
-      socket.onopen = () => { attempt.current = 0; setConn('connected') }
+      socket.onopen = () => {
+        attempt.current = 0
+        setConn('connected')
+        // Request the slash command list. The plugin responds with a `commands`
+        // event (broadcast to all WebSocket clients). This handles the case
+        // where mobile connects after the plugin is already running; the plugin
+        // also pushes the list proactively on its first successful registration,
+        // so whichever fires second wins (both are idempotent).
+        socket.send(JSON.stringify({ type: 'get_commands' }))
+      }
       socket.onerror = () => socket.close()
       socket.onclose = () => {
         if (!mounted.current) return
@@ -137,6 +147,7 @@ export default function ChatScreen() {
       }
     })
     if (event.type === 'status') setAgentStatus(event.value)
+    if (event.type === 'commands') setCommands(event.commands)
   }
 
   function respond(promptId: string, choice: string) {
@@ -154,6 +165,24 @@ export default function ChatScreen() {
 
   const connColor = conn === 'connected' ? '#3fb950' : conn === 'connecting' ? '#d29922' : '#f85149'
   const canSend = draft.trim().length > 0 && conn === 'connected'
+
+  // Slash command picker — visible while the user is typing the command name
+  // (after "/" and before any space). Hides once they start typing arguments.
+  const rawQuery = draft.startsWith('/') ? draft.slice(1) : null
+  const pickerQuery = rawQuery !== null && !rawQuery.includes(' ') ? rawQuery.toLowerCase() : null
+  const pickerItems = pickerQuery !== null
+    ? commands
+        .filter((c) =>
+          c.name.startsWith(pickerQuery) ||
+          (c.aliases ?? []).some((a) => a.startsWith(pickerQuery))
+        )
+        .slice(0, 20)
+    : []
+  const showPicker = pickerItems.length > 0
+
+  function selectCommand(name: string) {
+    setDraft(`/${name} `)
+  }
 
   return (
     <Animated.View style={[styles.screen, { paddingTop: safeTop + 12, paddingBottom: kbOffset }]}>
@@ -177,6 +206,11 @@ export default function ChatScreen() {
             onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
           />
       }
+
+      {/* Slash command picker */}
+      {showPicker && (
+        <CommandPicker items={pickerItems} onSelect={selectCommand} />
+      )}
 
       {/* Composer */}
       <View style={styles.composer}>
@@ -251,6 +285,42 @@ function PromptRow({ item, onChoose }: { item: Extract<Item, { kind: 'prompt' }>
           </View>
         </View>
       ))}
+    </View>
+  )
+}
+
+function CommandPicker({
+  items,
+  onSelect,
+}: {
+  items: CommandItem[]
+  onSelect: (name: string) => void
+}) {
+  return (
+    <View style={styles.pickerWrap}>
+      <FlatList
+        data={items}
+        keyExtractor={(c) => c.name}
+        // Keep the keyboard open when the user taps a suggestion.
+        keyboardShouldPersistTaps="always"
+        style={styles.pickerList}
+        renderItem={({ item: cmd, index }) => (
+          <Pressable
+            style={[styles.pickerRow, index === 0 && styles.pickerRowFirst]}
+            onPress={() => onSelect(cmd.name)}
+          >
+            <View style={styles.pickerLeft}>
+              <Text style={styles.pickerName}>/{cmd.name}</Text>
+              {cmd.args_hint ? (
+                <Text style={styles.pickerHint}> {cmd.args_hint}</Text>
+              ) : null}
+            </View>
+            <Text style={styles.pickerDesc} numberOfLines={1}>
+              {cmd.description}
+            </Text>
+          </Pressable>
+        )}
+      />
     </View>
   )
 }
@@ -367,4 +437,20 @@ const styles = StyleSheet.create({
   sendBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#5e8eff', alignItems: 'center', justifyContent: 'center' },
   sendBtnOff: { backgroundColor: '#21262d' },
   sendBtnText: { color: '#fff', fontSize: 18, fontWeight: '700', lineHeight: 22 },
+  // Slash command picker
+  pickerWrap: {
+    maxHeight: 260,
+    borderTopWidth: 1, borderTopColor: '#21262d',
+    backgroundColor: '#161b22',
+  },
+  pickerList: { flexGrow: 0 },
+  pickerRow: {
+    paddingHorizontal: 16, paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#21262d',
+  },
+  pickerRowFirst: {},
+  pickerLeft: { flexDirection: 'row', alignItems: 'baseline', marginBottom: 2 },
+  pickerName: { color: '#5e8eff', fontSize: 14, fontWeight: '600' },
+  pickerHint: { color: '#8b949e', fontSize: 12, fontStyle: 'italic' },
+  pickerDesc: { color: '#6e7681', fontSize: 12 },
 })

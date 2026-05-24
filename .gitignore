@@ -45,6 +45,9 @@ coverage/
 *.key
 *.mobileprovision
 
+# Python
+__pycache__/
+
 # Misc
 .idea/
 *.swp
