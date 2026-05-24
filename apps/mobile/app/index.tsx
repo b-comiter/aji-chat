@@ -13,6 +13,7 @@ import {
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import type { AgentStatus, CommandItem, ServerEvent } from '@aji/protocol'
+import { MarkdownMessage } from '../components/MarkdownMessage'
 import { newId } from '@aji/protocol'
 
 const SERVER_WS = `ws://${process.env.EXPO_PUBLIC_SERVER_HOST}:4000/ws`
@@ -337,9 +338,13 @@ function Row({ item, onChoose }: { item: Item; onChoose: (id: string, choice: st
     return (
       <View style={[styles.bubbleRow, isUser && styles.bubbleRowUser, inTurn && !isUser && styles.turnRail]}>
         <View style={[styles.bubble, isUser && styles.bubbleUser]}>
-          <Text style={[styles.bubbleText, isUser && styles.bubbleTextUser]}>
-            {item.text}{!item.done && <Text style={styles.cursor}> ▍</Text>}
-          </Text>
+          {isUser || !item.done ? (
+            <Text style={[styles.bubbleText, isUser && styles.bubbleTextUser]}>
+              {item.text}{!item.done && <Text style={styles.cursor}> ▍</Text>}
+            </Text>
+          ) : (
+            <MarkdownMessage content={item.text} />
+          )}
         </View>
       </View>
     )
@@ -387,9 +392,9 @@ const styles = StyleSheet.create({
   bubble: {
     backgroundColor: '#161b22', borderRadius: 14,
     paddingHorizontal: 16, paddingVertical: 12,
-    borderWidth: 1, borderColor: '#21262d', maxWidth: '80%',
+    borderWidth: 1, borderColor: '#21262d',
   },
-  bubbleUser: { backgroundColor: '#5e8eff', borderColor: '#5e8eff' },
+  bubbleUser: { backgroundColor: '#5e8eff', borderColor: '#5e8eff', maxWidth: '80%' },
   bubbleText: { color: '#e6edf3', fontSize: 15, lineHeight: 22 },
   bubbleTextUser: { color: '#fff' },
   cursor: { color: '#5e8eff' },

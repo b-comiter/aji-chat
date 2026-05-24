@@ -516,9 +516,8 @@ def register(ctx: Any) -> None:
         # auth boundary.  Set AJI_ALLOW_ALL_USERS=true to open the gateway.
         allow_all_env="AJI_ALLOW_ALL_USERS",
         platform_hint=(
-            "You are on aji-chat mobile. Tool calls render as structured cards "
-            "(name, args, result). Use plain text for the conversation; markdown "
-            "is rendered as plain text on the mobile client."
+            "You are on aji-chat. Tool calls render as structured cards "
+            "Aji-chat accepts plain text and Markdown."
         ),
     )
 

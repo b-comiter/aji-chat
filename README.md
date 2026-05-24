@@ -1,5 +1,18 @@
 # Agent Simulator GUI
 
+## Current features
+
+- Monorepo layout with `apps/mobile`, `apps/server`, `packages/protocol`, and `tools`.
+- Mobile app (Expo) client and UI components under `apps/mobile`.
+- `MarkdownMessage` component (`apps/mobile/components/MarkdownMessage.tsx`) that renders Markdown with syntax-highlighted code blocks, language badges, horizontal scrolling, and a Copy button for code blocks.
+- Syntax highlighting using `highlight.js` with a custom `tokenColors` map and `LANG_COLORS` for language badges; handles nested spans and decodes HTML entities.
+- Code block UI provided by a `CustomRenderer` (header, divider, padded code area) and `CopyButton` (copies full code block text with transient feedback).
+- `normalizeNewlines` helper preserves fenced code blocks and works around React Native text nesting quirks.
+- Utility scripts and hooks in `tools/` (including `tools/simulate.ts`, `tools/send.ts`, and agent hook scripts) for testing and integrating with agent adapters.
+- Server implementation in `apps/server` (Hono + WebSocket) for broadcasting `ServerEvent`s to clients.
+- `packages/protocol` is the single source of truth for the wire protocol types (ServerEvent / ClientEvent).
+- Documentation and design notes in `docs/` and a Phase‑1 simulator mockup plan in this README (the `simulate/index.html` visual mockup file is planned but not yet created).
+
 ## Context
 
 The existing `tools/simulate.ts` plays a single hard-coded sequence of events to test the mobile UI. To explore edge cases (different tool args, different permission option lists, sequencing, dismissing a prompt mid-flight, etc.) the developer currently has to edit code and re-run. We want an interactive HTML GUI that lets a developer compose and fire **any** ServerEvent the protocol supports — a manual driver for the same WebSocket router. It lives alongside `simulate.ts`, not replacing it.
