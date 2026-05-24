@@ -1,130 +1,101 @@
-# aji-chat
+# Agent Simulator GUI
 
-A messaging client purpose-built for chatting with AI agents (Hermes, Claude Code, future agents). The chat surface stays conversational; tool calls live in a side pane / bottom sheet, one click away.
+## Context
 
-See [`mobile-mockup.html`](./mobile-mockup.html) for the UI direction.
+The existing `tools/simulate.ts` plays a single hard-coded sequence of events to test the mobile UI. To explore edge cases (different tool args, different permission option lists, sequencing, dismissing a prompt mid-flight, etc.) the developer currently has to edit code and re-run. We want an interactive HTML GUI that lets a developer compose and fire **any** ServerEvent the protocol supports — a manual driver for the same WebSocket router. It lives alongside `simulate.ts`, not replacing it.
 
-## Quick start
+Approach: build the visual mockup first (no network), then wire it up to the server in a follow-up. This plan covers **Phase 1: visual mockup only**.
 
-Install dependencies from the repo root:
+## Phase 1: Visual mockup
 
-```bash
-pnpm install
-```
+### Location
 
-**Set your machine's LAN IP** (required for Expo Go on a physical device):
+- New folder: `/Users/bcom/dev/aji-chat/simulate/`
+- Single file: `simulate/index.html` — self-contained HTML + CSS + JS, no build step (matches `mobile-mockup.html`'s pattern)
+- Opened directly via `file://` for the visual mockup pass. Wiring up to `http://localhost:4000` happens in Phase 2.
 
-```bash
-ipconfig getifaddr en0   # find your IP
-```
+### Design language (reuse existing system)
 
-Create `apps/mobile/.env` (git-ignored) from the included template:
+Copy the `:root` CSS variables and font stacks from `mobile-mockup.html`:
 
-```bash
-cp apps/mobile/.env.example apps/mobile/.env
-# then edit .env and set EXPO_PUBLIC_SERVER_HOST=<your IP>
-```
+- Backgrounds: `--bg #0d1117`, `--surface #161b22`, `--surface-2 #1c2129`, `--surface-3 #242b35`
+- Text: `--text #e6edf3`, `--text-muted #8b949e`, `--text-dim #6e7681`
+- Accents: `--accent #5e8eff`, `--success #3fb950`, `--tool #b392f0`, `--warn #d29922`, `--danger #f85149`
+- Body font: `-apple-system, ...`; monospace: `"SF Mono", ...`
+- 14px radius default, 8px on small elements
 
-Update `.env` any time your IP changes — no code edits needed.
+### Layout
 
-Open three terminals from the repo root:
-
-```bash
-# 1 — start the WebSocket server (port 4000)
-pnpm server
-
-# 2 — start the Expo app (scan QR with Expo Go on iPhone, same Wi-Fi)
-pnpm mobile
-
-# 3 — send a plain text message to the phone
-pnpm send "hello from the server"
-
-# OR replay a full scripted agent run
-pnpm simulate
-```
-
-`pnpm simulate` plays back a realistic sequence — agent status changes,
-streaming text, a tool call, and a tappable permission prompt — so the mobile
-UI can be developed and tested without a live agent.
-
-## Stack at a glance
-
-| Layer | Tech |
-|---|---|
-| Mobile | Expo (React Native), Expo Router, TypeScript |
-| Server | Hono + `ws`, Node.js, TypeScript |
-| Protocol | `@aji/protocol` — shared discriminated-union types |
-| Package manager | pnpm workspaces |
-
-## Workspace layout
+Two-column desktop layout (no mobile responsiveness needed — this is a developer tool):
 
 ```
-apps/
-  mobile/       Expo Go app — renders agent events, handles prompts
-  server/       Hono WebSocket server — routes events to connected clients
-packages/
-  protocol/     Shared wire-format types (ServerEvent, ClientEvent)
-tools/
-  send.ts       One-liner: send a plain text message
-  simulate.ts   Scripted agent-run replay
-docs/
-  agent-protocol.md   Protocol design notes and Hermes comparison
+┌──────────────────────────────────────────────────────────┐
+│ Header: title · connection status · server URL           │
+├────────────────────────────────┬─────────────────────────┤
+│  Action builders (scrollable)  │  Activity log (sticky)  │
+│  ─ Status                      │  timestamp · event JSON │
+│  ─ Message (quick + stream)    │  ...                    │
+│  ─ Tool call (start / end)     │  ...                    │
+│  ─ Permission request          │                         │
+│  ─ Clarify                     │                         │
+│  ─ Dismiss prompt              │                         │
+│  ─ Canned scenarios            │                         │
+└────────────────────────────────┴─────────────────────────┘
 ```
 
-## Wire protocol
+### Sections to build
 
-All WebSocket messages are JSON-serialised `ServerEvent` or `ClientEvent`
-values defined in `packages/protocol/src/index.ts`.
+Each as a card matching the existing mockup style. Maps 1:1 to ServerEvent types from `packages/protocol/src/index.ts`.
 
-**Server → phone:**
+| Card | Inputs | Output |
+|---|---|---|
+| **Status** | 3 pill buttons: `thinking` / `working` / `idle` | `Status` event |
+| **Quick message** | role select (`assistant`/`user`/`system`), text area, "Send" | `MessageStart` → `TextDelta` → `MessageEnd` (one shot, via `/send` shape) |
+| **Stream message** | role select, text area, char-delay number input, "Stream" | Same trio, but `TextDelta` chunked at chosen interval |
+| **Tool call** | name input, args JSON textarea, "Start" / "End" buttons; sticky "active tool ID" badge once started; result JSON textarea + optional error string for End | `ToolStart` then later `ToolEnd` |
+| **Permission request** | title, message, repeatable option rows (id + label, with add/remove); auto-seeds `[Allow once / Always allow / Deny]` | `PermissionRequest` event; placeholder area shows "waiting for response" (real wiring in Phase 2) |
+| **Clarify** | question, repeatable choice rows | `Clarify` event |
+| **Dismiss prompt** | prompt ID text input + a "pick from active prompts" dropdown | `PromptDismiss` event |
+| **Canned scenarios** | List of preset buttons (e.g. "Full simulate.ts replay", "Permission deny flow", "Failing tool") | Plays a sequence |
 
-| Event | Purpose |
-|---|---|
-| `message_start` | Begin a new message (carries `id` and `role`) |
-| `text_delta` | Append a token to the in-progress message |
-| `message_end` | Finalise the message |
-| `tool_start` | A tool call has begun (`name`, `args`) |
-| `tool_end` | Tool finished (`result` or `error`) |
-| `status` | Agent state: `thinking` \| `working` \| `idle` |
-| `permission_request` | Approval prompt with labelled option buttons |
-| `prompt_dismiss` | Remove a previously shown prompt without answering it |
-| `clarify` | Multi-choice question with labelled option buttons |
+### Activity log
 
-**Phone → server:**
+Right column, sticky, monospace. Each entry: timestamp, color-coded event type badge (reuse `--tool` purple for tool events, `--accent` blue for messages, `--warn` for prompts, etc.), and the event JSON. Newest at top. "Clear" button at the top.
 
-| Event | Purpose |
-|---|---|
-| `user_message` | Text sent by the user |
-| `prompt_response` | The user's choice for a `permission_request` or `clarify` |
+In Phase 1 the log is fed by the same JS that *would* call `fetch()` — every click appends the event it would have sent, so the UI feels real without making network calls.
 
-See [`docs/agent-protocol.md`](./docs/agent-protocol.md) for design rationale
-and a comparison with how Hermes handles the same events on Discord and
-Telegram.
+### JS architecture (kept simple)
 
-Claude Code permission mirroring uses the `PermissionRequest` hook plus the
-server's `/prompt/wait` endpoint. The hook broadcasts a `permission_request` to
-mobile clients, waits briefly for a `prompt_response`, and falls back to
-Claude Code's native permission dialog when no mobile answer arrives in time.
+A single `<script>` block with:
 
-## Connecting a real agent
+- `events = []` — array of all events the user has triggered
+- `addEvent(event)` — pushes to `events`, re-renders the log; in Phase 2 this also calls `fetch()`
+- Helper builders mirroring `packages/protocol/src/index.ts`: `buildStatus(value)`, `buildMessage(role, text)`, `buildToolStart(name, args)`, etc.
+- Each card's button hands its form values to a builder, then `addEvent(...)`
+- ID generation: a small `newId(prefix)` helper matching the `newId` in `packages/protocol/src/index.ts`
 
-Build a `BasePlatformAdapter` in Hermes (or equivalent in another harness)
-that translates the harness's internal events into the protocol types above
-and sends them over WebSocket to `ws://<host>:4000/ws`. The mobile client
-will handle them without any changes.
+### Wiring deferred to Phase 2
 
-## Modularity rules
+Stub a single `async function send(event) { /* TODO Phase 2 */ }` that `addEvent` calls. In Phase 2 this will `fetch('http://localhost:4000/event', { method: 'POST', body: JSON.stringify(event) })`. CORS strategy will be decided in Phase 2 (likely add Hono CORS middleware to `apps/server/src/index.ts`, since the simpler approach of file:// → localhost:4000 will be blocked).
 
-- `packages/protocol` is the single source of truth for the wire format.
-  Server, mobile, and any agent adapter must import types from there — no
-  inline type definitions for protocol shapes.
-- The server is a dumb router: it does not parse or transform events, only
-  broadcasts them to connected clients.
-- Platform-specific concerns (Expo APIs, Node APIs) stay inside their
-  respective `apps/` package and never leak into `packages/`.
+## Files to create
 
----
+- `/Users/bcom/dev/aji-chat/simulate/index.html` — the whole mockup (HTML + CSS + JS in one file, matching `mobile-mockup.html`)
 
-## License
+## Files NOT modified in Phase 1
 
-This project is licensed under the [MIT License](./LICENSE).
+- `tools/simulate.ts` — left in place; will keep working
+- `apps/server/src/index.ts` — untouched until Phase 2
+- `packages/protocol/src/index.ts` — protocol types stay the source of truth; we don't re-export, just inline a couple of literal type values in the HTML JS for the role/status dropdowns
+
+## Verification (Phase 1)
+
+1. Open `simulate/index.html` directly in a browser via `file://`
+2. Visual check — all sections render, dark theme matches `mobile-mockup.html`
+3. Form interactions work — clicking "Send" on each card appends the correct event JSON to the activity log
+4. Tool flow — clicking "Start" assigns a tool ID, the End form unlocks and uses the same ID
+5. Permission/clarify option rows can be added/removed
+6. Canned scenario buttons play the right sequence (just to the log)
+7. No console errors
+
+Phase 2 (separate change) will swap the stub `send()` for real `fetch()` calls and add CORS to the server.

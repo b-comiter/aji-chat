@@ -31,6 +31,8 @@ logger = logging.getLogger(__name__)
 # Callback the adapter passes in: receives a fully-constructed event dict
 # (we don't import MessageEvent here to keep this module focused on transport).
 UserMessageHandler = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
+# No-arg async callback; the adapter knows how to build and push the list.
+GetCommandsHandler = Callable[[], Coroutine[Any, Any, None]]
 
 
 class WebhookServer:
@@ -40,11 +42,13 @@ class WebhookServer:
         port: int,
         state: SessionState,
         on_user_message: UserMessageHandler,
+        on_get_commands: "GetCommandsHandler | None" = None,
     ) -> None:
         self.host = host
         self.port = port
         self.state = state
         self.on_user_message = on_user_message
+        self.on_get_commands = on_get_commands
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
 
@@ -109,6 +113,14 @@ class WebhookServer:
             else:
                 flog("_handle_inbound() prompt %s resolved with %r", prompt_id, choice)
             return web.json_response({"ok": True, "resolved": resolved})
+
+        if event_type == "get_commands":
+            flog("_handle_inbound() get_commands — pushing command list")
+            if self.on_get_commands is not None:
+                await self.on_get_commands()
+            else:
+                flog_warn("_handle_inbound() get_commands but no handler registered")
+            return web.json_response({"ok": True})
 
         logger.debug("aji-chat webhook: ignored event type %s", event_type)
         flog("_handle_inbound() ignored unknown type=%s", event_type)

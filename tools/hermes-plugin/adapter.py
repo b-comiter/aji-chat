@@ -147,6 +147,7 @@ class AjiChatAdapter(BasePlatformAdapter):
             port=plugin_port,
             state=self._state,
             on_user_message=self._on_user_message,
+            on_get_commands=self.push_commands,
         )
         self._running = False
         # Captured in connect() once the event loop is confirmed running.
@@ -187,6 +188,8 @@ class AjiChatAdapter(BasePlatformAdapter):
                 await self._client.register_webhook(self._webhook.url)
                 logger.info("aji-chat webhook registered at %s", self._webhook.url)
                 flog_info("_register_with_retry() succeeded on attempt %d", attempt + 1)
+                # Push the command list now that mobile can receive it.
+                await self.push_commands()
                 return
             except Exception as exc:
                 delay = delays[min(attempt, len(delays) - 1)]
@@ -223,6 +226,12 @@ class AjiChatAdapter(BasePlatformAdapter):
             flog("_on_user_message() empty text, ignored")
             return
 
+        # Slash commands are routed as COMMAND type so gateway/run.py dispatches
+        # them through the built-in command handlers (help, model, stop, etc.)
+        # rather than forwarding them to the LLM.
+        msg_type = MessageType.COMMAND if text.startswith("/") else MessageType.TEXT
+        flog("_on_user_message() msg_type=%s", msg_type)
+
         source = SessionSource(
             platform=self.platform,
             chat_id=_DEFAULT_CHAT_ID,
@@ -233,7 +242,7 @@ class AjiChatAdapter(BasePlatformAdapter):
         )
         event = MessageEvent(
             text=text,
-            message_type=MessageType.TEXT,
+            message_type=msg_type,
             source=source,
             message_id=uuid.uuid4().hex,
         )
@@ -241,6 +250,62 @@ class AjiChatAdapter(BasePlatformAdapter):
             await self.handle_message(event)
         except Exception as exc:
             logger.exception("aji-chat: handle_message raised: %s", exc)
+
+    async def push_commands(self) -> None:
+        """Build the full slash command list and push a `commands` event.
+
+        Called after the webhook registers (so mobile gets the list on first
+        connect) and on demand when the mobile sends `get_commands`.
+
+        Sources (priority order, matching Discord):
+          1. COMMAND_REGISTRY built-ins (gateway-available, not cli_only)
+          2. Plugin-registered commands (via ctx.register_command())
+
+        Skills are not included here — they are handled separately as regular
+        messages (the LLM routes /skill-name via skill dispatch).
+        """
+        commands: list[dict[str, Any]] = []
+
+        try:
+            from hermes_cli.commands import (  # type: ignore[import-not-found]
+                COMMAND_REGISTRY,
+                _is_gateway_available,
+                _iter_plugin_command_entries,
+            )
+
+            for cmd in COMMAND_REGISTRY:
+                if not _is_gateway_available(cmd):
+                    continue
+                entry: dict[str, Any] = {
+                    "name": cmd.name,
+                    "description": cmd.description,
+                    "category": cmd.category,
+                }
+                if cmd.args_hint:
+                    entry["args_hint"] = cmd.args_hint
+                if cmd.aliases:
+                    entry["aliases"] = list(cmd.aliases)
+                if cmd.subcommands:
+                    entry["subcommands"] = list(cmd.subcommands)
+                commands.append(entry)
+
+            for name, description, args_hint in _iter_plugin_command_entries():
+                entry = {
+                    "name": name,
+                    "description": description,
+                    "category": "Plugin",
+                }
+                if args_hint:
+                    entry["args_hint"] = args_hint
+                commands.append(entry)
+
+        except Exception as exc:
+            logger.warning("aji-chat: could not build command list: %s", exc)
+            flog_warn("push_commands() failed to build list: %s", exc)
+            return
+
+        flog_info("push_commands() sending %d commands", len(commands))
+        await self._client.emit({"type": "commands", "commands": commands})
 
     # -------------------------------------------------------------------
     # Outbound: send / edit_message → aji-chat events

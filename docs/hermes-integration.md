@@ -1,8 +1,13 @@
 # Hermes Integration
 
+> **Status:** The platform adapter (Option D below) is implemented at
+> `tools/hermes-plugin/`. See [`tools/hermes-plugin/README.md`](../tools/hermes-plugin/README.md)
+> for installation and configuration. This document is preserved as a design
+> reference explaining the architecture decisions and the alternatives considered.
+
 ## Overview
 
-Hermes is a Python agent harness with a `BasePlatformAdapter` pattern. This document describes how Hermes's internal event lifecycle maps to aji-chat's wire protocol, what integration paths exist, and which approach to use for a future `aji.py` adapter.
+Hermes is a Python agent harness with a `BasePlatformAdapter` pattern. This document describes how Hermes's internal event lifecycle maps to aji-chat's wire protocol, the integration paths that were considered, and which one was implemented.
 
 ---
 

@@ -125,43 +125,69 @@ vocabulary.
 
 ### Server → Phone events
 
+Seven of the ten event types carry an optional `turn_id` that groups everything
+belonging to one agent turn. The Hermes adapter mints a UUID in
+`on_processing_start` and stamps it on every outbound event until
+`on_processing_complete`. The Claude Code hook path leaves `turn_id` unset;
+mobile falls back to chronological ordering.
+
 ```ts
 // Message lifecycle
-{ type: "message_start", id: "msg_1", role: "assistant" }
-{ type: "text_delta",    id: "msg_1", text: "Hello " }
-{ type: "text_delta",    id: "msg_1", text: "world" }
-{ type: "message_end",   id: "msg_1" }
+{ type: "message_start", id: "msg_1", role: "assistant", turn_id?: "turn_abc" }
+{ type: "text_delta",    id: "msg_1", text: "Hello ",    turn_id?: "turn_abc" }
+{ type: "text_delta",    id: "msg_1", text: "world",     turn_id?: "turn_abc" }
+{ type: "message_end",   id: "msg_1",                    turn_id?: "turn_abc" }
 
-// Tool calls (matches Hermes tool.started / tool.completed)
-{ type: "tool_start", id: "tool_1", name: "write_file", args: {...} }
-{ type: "tool_end",   id: "tool_1", result: {...} }
+// Tool calls
+{ type: "tool_start", id: "tool_1", name: "write_file", args: {...}, turn_id?: "turn_abc" }
+{ type: "tool_end",   id: "tool_1", result: {...},                    turn_id?: "turn_abc" }
 
-// Agent status (matches Hermes thinking_cb)
+// Agent status (no turn_id — it's terminal UI state, not turn-scoped)
 { type: "status", value: "thinking" | "working" | "idle" }
 
-// Interactive prompts (matches send_slash_confirm / send_clarify / send_exec_approval)
-{ type: "permission_request", id: "p1", title, message, options: ["once","always","cancel"] }
-{ type: "clarify",            id: "c1", question, choices }
+// Interactive prompts
+{ type: "permission_request", id: "p1", title, message, options: [...], turn_id?: "turn_abc" }
+{ type: "clarify",            id: "c1", question, choices: [...],        turn_id?: "turn_abc" }
+{ type: "prompt_dismiss",     id: "p1" }
+
+// Slash command list — pushed by the agent adapter after connecting and
+// on demand in response to get_commands. Mobile renders a "/" picker from it.
+{ type: "commands", commands: [
+    { name: "model",  description: "Switch model",  args_hint: "[model]", category: "Configuration" },
+    { name: "help",   description: "Show commands",                        category: "Info" },
+    ...
+  ]
+}
 ```
 
 ### Phone → Server events
 
 ```ts
-{ type: "user_message",    text: "..." }
+{ type: "user_message",    text: "..." }          // "/" prefix routes as slash command
 { type: "prompt_response", id: "p1", choice: "once" }
+{ type: "get_commands" }                           // request the slash command list
 ```
 
 ---
 
 ## Architectural takeaway
 
-When we eventually connect Hermes to aji-chat, we'd build it as another
-`BasePlatformAdapter` inside Hermes (alongside `discord.py`, `telegram.py`).
-Call it `aji.py`. It would translate Hermes's internal events into this
-schema and ship them over WebSocket — same pattern as the existing adapters,
-no special-casing needed.
+The Hermes adapter is built at `tools/hermes-plugin/` as a `BasePlatformAdapter`
+subclass — the same pattern as `discord.py` and `telegram.py`. It installs as a
+Hermes plugin (symlink into `~/.hermes/plugins/`), with zero changes to Hermes
+core.
 
-This also means the schema is what other agent harnesses (Openclaw, Claude
-Code dispatch) would target. Define it once in `packages/protocol/`; every
-adapter — Hermes, Openclaw, a simulator — emits events in this format and the
-mobile client renders them.
+The schema is what any agent harness targets. Define it once in
+`packages/protocol/`; every adapter — Hermes plugin, Claude Code hook script,
+simulator — emits events in this format and the mobile client renders them
+without modification.
+
+### Slash commands
+
+The Hermes adapter pushes the full slash command list as a `commands` event
+after registering its webhook. The list is built from Hermes's `COMMAND_REGISTRY`
+(all gateway-available built-ins) plus any plugin-registered commands. Mobile
+caches the list and renders a "/" picker in the composer. Messages starting with
+"/" are routed to Hermes as `MessageType.COMMAND`, which dispatches them through
+the built-in command handlers (`/help`, `/model`, `/stop`, etc.) rather than
+forwarding to the LLM.

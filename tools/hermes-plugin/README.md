@@ -5,6 +5,7 @@ A Hermes platform adapter that mirrors agent activity into the aji-chat mobile a
 ## What you get
 
 - **Bidirectional messaging.** Type on mobile → Hermes receives it as a user message. Hermes responds → mobile sees it stream in.
+- **Slash commands.** Type `/` in the mobile composer to see a live-filtered picker of every Hermes command (`/help`, `/model`, `/stop`, `/new`, …) and any plugin-registered commands. Selecting one fills the composer; sending routes it through Hermes's built-in command dispatch rather than the LLM.
 - **Structured tool cards.** Tool calls appear as discrete cards (name, args, result), not formatted text.
 - **Turn grouping.** Each user turn gets a unique `turn_id` stamped on its events; the mobile UI groups them visually.
 - **Approval prompts.** When Hermes needs permission, a card appears on mobile with the option buttons — tapping resolves the awaiting hook.
@@ -77,11 +78,47 @@ Hermes gateway → agent → LLM
 - `on_processing_complete` emits `status:idle`, clears `turn_id`
 
 **Inbound** (mobile → Hermes):
-- Mobile sends `user_message` over WebSocket
-- aji-chat server POSTs it to the plugin's local webhook listener
-- Plugin constructs a `MessageEvent`, calls `self.handle_message()` — Hermes routes to the agent
+- Mobile sends `user_message` over WebSocket; aji-chat server forwards it to the plugin's webhook listener
+- If text starts with `/`, the plugin sets `MessageType.COMMAND` — Hermes dispatches through its built-in command handlers
+- Otherwise the plugin constructs a `MessageType.TEXT` event and calls `self.handle_message()` — Hermes routes to the agent
+- Mobile sends `get_commands` on connect; the plugin responds with the full `commands` event (built from `COMMAND_REGISTRY` + plugin commands)
 
 ## Design notes
+
+### Tool hooks and the event loop
+
+Hermes's `invoke_hook()` is synchronous and fires tool hooks from a
+`ThreadPoolExecutor` thread — not the main asyncio event loop. The plugin
+captures the running event loop in `connect()` (`asyncio.get_running_loop()`)
+and uses `asyncio.run_coroutine_threadsafe(coro, loop)` to schedule hook
+coroutines safely from those threads. This is the correct cross-thread primitive;
+`create_task()` would silently fail with `RuntimeError: no running event loop`.
+
+Hermes does not assign `tool_call_id` until after a tool runs, so the value is
+always `""` at `pre_tool_call` time. The plugin generates its own UUID for each
+`tool_start`, stores it in `SessionState.pending_tool_ids[task_id]`, and
+retrieves it in `post_tool_call` so `tool_start` and `tool_end` carry matching
+IDs and mobile can pair them.
+
+### Tool progress text suppression
+
+Hermes also calls `send()` with a formatted text representation of each tool
+call (e.g. `💻 terminal(['command'])\n{...json...}`), produced by
+`send_progress_messages()` in `gateway/run.py` for text-only platforms like
+Telegram. The plugin detects this pattern and suppresses it — the hook path
+already delivers the same information as structured `tool_start` / `tool_end`
+events. The detection regex matches `{emoji} {name}([args])\n{json}` at the
+start of the content.
+
+### Slash commands
+
+`push_commands()` is called after the webhook registers and in response to
+`get_commands` ClientEvents. It queries `COMMAND_REGISTRY` (filtered to
+gateway-available commands) and `_iter_plugin_command_entries()`, serialises
+them into `CommandItem` objects, and broadcasts a `commands` event. Mobile
+caches the list and shows a live-filtered picker when the user types `/`.
+Messages starting with `/` are routed as `MessageType.COMMAND` so Hermes's
+built-in dispatch handles them — they never reach the LLM.
 
 ### No timeouts on prompts
 
@@ -107,22 +144,42 @@ A `turn_id` (UUID) is minted in `on_processing_start` and cleared in `on_process
 
 For events emitted outside a turn (e.g. cron-delivered messages), `turn_id` is omitted and the mobile UI just shows the message standalone.
 
-## Open questions
+## Debugging
 
-These are explicitly TBD and documented for future iteration:
+The plugin writes detailed logs to `~/Desktop/hermes-aji.log` — every method
+call, every event emitted, every hook firing. Useful when diagnosing why a tool
+card or command isn't appearing on mobile:
 
-1. **Approval hook return contract.** `on_pre_approval` returns `{"behavior": "allow"|"deny", "choice": <option_id>}`. Whether Hermes uses one field or the other for the decision is TBD until tested. We return both for safety.
-2. **Clarify tool detection.** A future enhancement could intercept `pre_tool_call` when `tool_name == "clarify"` to render a structured choice card instead of letting the question flow as a plain message. Depends on whether `register_hook` allows the hook to override the tool result.
-3. **Image rendering.** `send_image` currently falls back to sending the URL/caption as text. The mobile app doesn't render images yet.
+```bash
+tail -f ~/Desktop/hermes-aji.log
+```
+
+The logger (`aji_chat_plugin`) is isolated from Hermes's own log stream
+(`propagate=False`), so it never pollutes the gateway console output.
+
+## Open questions / future work
+
+1. **Clarify tool detection.** A future enhancement could intercept
+   `pre_tool_call` when `tool_name == "clarify"` to render a structured choice
+   card instead of letting the question flow as a plain message. Depends on
+   whether `register_hook` allows the hook to override the tool result.
+2. **Image rendering.** `send_image` currently falls back to sending the
+   URL/caption as text. The mobile app doesn't render images yet.
+3. **Skill commands in the picker.** `push_commands()` currently includes only
+   `COMMAND_REGISTRY` built-ins and plugin-registered commands. Skills (e.g.
+   `/code-review`) are reachable by typing but don't appear in the `/` picker.
+   Adding them requires querying `get_skill_commands()` — straightforward but
+   deferred to avoid a long startup scan.
 
 ## Files
 
 | File | Purpose |
 |---|---|
 | `plugin.yaml` | Hermes manifest |
-| `__init__.py` | Re-exports `register` |
+| `__init__.py` | Re-exports `register`; initialises the file logger |
 | `adapter.py` | `AjiChatAdapter(BasePlatformAdapter)` + `register(ctx)` |
-| `client.py` | HTTP client to aji-chat server |
-| `webhook_server.py` | aiohttp inbound listener |
-| `state.py` | Per-chat `turn_id`, streaming `last_sent`, `pending_prompts` futures |
+| `client.py` | HTTP client to aji-chat server (`POST /event`, `/webhook`) |
+| `webhook_server.py` | aiohttp inbound listener (`/inbound`) |
+| `state.py` | Per-chat `turn_id`, streaming `last_sent`, `pending_prompts` futures, `pending_tool_ids` |
 | `hooks.py` | `pre_tool_call`, `post_tool_call`, `pre_approval_request`, `post_approval_response` |
+| `_log.py` | Shared file logger → `~/Desktop/hermes-aji.log` |

@@ -108,6 +108,35 @@ export interface PromptDismiss {
   id: string
 }
 
+/**
+ * A single slash command the agent supports.
+ * Used inside `Commands` events.
+ */
+export interface CommandItem {
+  /** Canonical name without the slash, e.g. "model" */
+  name: string
+  /** Human-readable description shown in the picker */
+  description: string
+  /** Argument placeholder shown after the name, e.g. "<prompt>" or "[on|off]" */
+  args_hint?: string
+  /** Grouping label, e.g. "Session", "Configuration" */
+  category?: string
+  /** Alternative names (shown as grey hint, not separate picker rows) */
+  aliases?: string[]
+  /** Tappable sub-options for commands like /reasoning, /voice */
+  subcommands?: string[]
+}
+
+/**
+ * Full slash command list. The adapter pushes this proactively after connecting
+ * and in response to a `get_commands` request. The mobile caches it and renders
+ * a "/" picker from it.
+ */
+export interface Commands {
+  type: 'commands'
+  commands: CommandItem[]
+}
+
 export interface PromptOption {
   /** Stable ID echoed back in PromptResponse.choice */
   id: string
@@ -130,6 +159,7 @@ export type ServerEvent =
   | PermissionRequest
   | Clarify
   | PromptDismiss
+  | Commands
 
 // ---------------------------------------------------------------------------
 // Client → Server
@@ -148,7 +178,16 @@ export interface PromptResponse {
   choice: string
 }
 
-export type ClientEvent = UserMessage | PromptResponse
+/**
+ * Request the current slash command list. The adapter responds with a `Commands`
+ * event broadcast to all clients. Mobile sends this on first connect and
+ * whenever the "/" picker is opened before the list has arrived.
+ */
+export interface GetCommands {
+  type: 'get_commands'
+}
+
+export type ClientEvent = UserMessage | PromptResponse | GetCommands
 
 // ---------------------------------------------------------------------------
 // Helpers
