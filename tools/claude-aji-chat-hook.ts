@@ -14,6 +14,7 @@ import { randomUUID } from 'node:crypto'
 import type { PermissionRequest, PromptOption, ServerEvent } from '@aji/protocol'
 
 const SERVER = process.env.AJI_SERVER ?? 'http://localhost:4000/event'
+const AGENT = 'claude-code'
 const PROMPT_SERVER = process.env.AJI_PROMPT_SERVER ?? 'http://localhost:4000/prompt/wait'
 const PERMISSION_WAIT_MS = readTimeoutMs('AJI_PERMISSION_WAIT_MS', 30000)
 
@@ -161,21 +162,22 @@ async function main(): Promise<void> {
   switch (event) {
     case 'UserPromptSubmit': {
       const id = randomUUID()
-      await emit({ type: 'message_start', id, role: 'user' })
-      await emit({ type: 'text_delta', id, text: String(payload.prompt ?? '') })
-      await emit({ type: 'message_end', id })
-      await emit({ type: 'status', value: 'thinking' })
+      await emit({ type: 'message_start', id, role: 'user', agent: AGENT })
+      await emit({ type: 'text_delta', id, text: String(payload.prompt ?? ''), agent: AGENT })
+      await emit({ type: 'message_end', id, agent: AGENT })
+      await emit({ type: 'status', value: 'thinking', agent: AGENT })
       break
     }
     case 'PreToolUse': {
       // tool_use_id is stable across PreToolUse / PostToolUse for the same call
       const id = String(payload.tool_use_id ?? randomUUID())
-      await emit({ type: 'status', value: 'working' })
+      await emit({ type: 'status', value: 'working', agent: AGENT })
       await emit({
         type: 'tool_start',
         id,
         name: String(payload.tool_name ?? 'unknown'),
         args: (payload.tool_input as Record<string, unknown>) ?? {},
+        agent: AGENT,
       })
       break
     }
@@ -187,6 +189,7 @@ async function main(): Promise<void> {
         title: `${String(payload.tool_name ?? 'Tool')} permission`,
         message: permissionMessage(payload),
         options,
+        agent: AGENT,
       })
 
       if (!response) break
@@ -232,7 +235,7 @@ async function main(): Promise<void> {
     }
     case 'PostToolUse': {
       const id = String(payload.tool_use_id ?? randomUUID())
-      await emit({ type: 'tool_end', id, result: payload.tool_response })
+      await emit({ type: 'tool_end', id, result: payload.tool_response, agent: AGENT })
       break
     }
     case 'Stop': {
@@ -240,11 +243,11 @@ async function main(): Promise<void> {
       const text = path ? lastAssistantText(path) : null
       if (text) {
         const id = randomUUID()
-        await emit({ type: 'message_start', id, role: 'assistant' })
-        await emit({ type: 'text_delta', id, text })
-        await emit({ type: 'message_end', id })
+        await emit({ type: 'message_start', id, role: 'assistant', agent: AGENT })
+        await emit({ type: 'text_delta', id, text, agent: AGENT })
+        await emit({ type: 'message_end', id, agent: AGENT })
       }
-      await emit({ type: 'status', value: 'idle' })
+      await emit({ type: 'status', value: 'idle', agent: AGENT })
       break
     }
     default:

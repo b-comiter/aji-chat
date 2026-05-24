@@ -160,6 +160,96 @@ app.post('/prompt/cancel/:id', (c) => {
   return c.json({ cancelled: !!waiter })
 })
 
+/**
+ * Receive a DB dump from the mobile client and print it to the server console.
+ * Triggered by the /view-db slash command in the chat screen.
+ */
+app.post('/db/dump', async (c) => {
+  const { agents, itemCounts } = await c.req.json<{
+    agents: Array<{
+      id: string
+      display_name: string
+      last_status: string
+      last_message_preview: string | null
+      last_event_at: number | null
+    }>
+    itemCounts: Record<string, { messages: number; tools: number; prompts: number }>
+  }>()
+
+  log(' ', 'POST /db/dump')
+
+  if (agents.length === 0) {
+    console.log('\n[DB DUMP] No agents in database.\n')
+    return c.json({ logged: true })
+  }
+
+  const rows = agents.map((a) => {
+    const counts = itemCounts[a.id] ?? { messages: 0, tools: 0, prompts: 0 }
+    return {
+      id:          a.id,
+      name:        a.display_name,
+      status:      a.last_status,
+      messages:    counts.messages,
+      tools:       counts.tools,
+      prompts:     counts.prompts,
+      preview:     (a.last_message_preview ?? '').slice(0, 40) || '—',
+    }
+  })
+
+  console.log('\n[DB DUMP]')
+  console.table(rows)
+  console.log('')
+
+  return c.json({ logged: true })
+})
+
+/**
+ * Receive a chat history dump from the mobile client and print it to the
+ * server console. Triggered by the /view-chat-history slash command.
+ * Pass -with-tools on the mobile side to include tool rows.
+ */
+app.post('/chat/dump', async (c) => {
+  const { agentId, items } = await c.req.json<{
+    agentId: string
+    items: Array<{
+      kind: 'message' | 'tool'
+      role?: string
+      text?: string
+      name?: string
+      args?: Record<string, unknown>
+      result?: unknown
+      done: boolean
+    }>
+  }>()
+
+  log(' ', `POST /chat/dump  agent=${agentId} items=${items.length}`)
+
+  if (items.length === 0) {
+    console.log(`\n[CHAT DUMP] No items for agent "${agentId}".\n`)
+    return c.json({ logged: true })
+  }
+
+  const rows = items.map((it, i) => {
+    if (it.kind === 'tool') {
+      const argsStr = JSON.stringify(it.args ?? {})
+      const preview = `${it.name}(${argsStr})`.slice(0, 100)
+      return { '#': i + 1, role: '(tool)', content: preview, done: it.done ? '✓' : '…' }
+    }
+    return {
+      '#': i + 1,
+      role: it.role ?? '—',
+      content: (it.text ?? '').replace(/\n/g, ' ').slice(0, 100) || '—',
+      done: it.done ? '✓' : '…',
+    }
+  })
+
+  console.log(`\n[CHAT DUMP] agent=${agentId}`)
+  console.table(rows)
+  console.log('')
+
+  return c.json({ logged: true })
+})
+
 /** Connected client count — used by the simulator UI for status polling. */
 app.get('/status', (c) => {
   const connected = [...clients].filter(ws => ws.readyState === WebSocket.OPEN).length

@@ -1,114 +1,146 @@
-# Agent Simulator GUI
+# aji-chat
 
-## Current features
+A purpose-built messaging client for chatting with AI agents (Hermes, Claude Code, and future agents). The mobile app mirrors agent output in real-time, handles tool calls and permissions, and persists conversations locally.
 
-- Monorepo layout with `apps/mobile`, `apps/server`, `packages/protocol`, and `tools`.
-- Mobile app (Expo) client and UI components under `apps/mobile`.
-- `MarkdownMessage` component (`apps/mobile/components/MarkdownMessage.tsx`) that renders Markdown with syntax-highlighted code blocks, language badges, horizontal scrolling, and a Copy button for code blocks.
-- Syntax highlighting using `highlight.js` with a custom `tokenColors` map and `LANG_COLORS` for language badges; handles nested spans and decodes HTML entities.
-- Code block UI provided by a `CustomRenderer` (header, divider, padded code area) and `CopyButton` (copies full code block text with transient feedback).
-- `normalizeNewlines` helper preserves fenced code blocks and works around React Native text nesting quirks.
-- Utility scripts and hooks in `tools/` (including `tools/simulate.ts`, `tools/send.ts`, and agent hook scripts) for testing and integrating with agent adapters.
-- Server implementation in `apps/server` (Hono + WebSocket) for broadcasting `ServerEvent`s to clients.
-- `packages/protocol` is the single source of truth for the wire protocol types (ServerEvent / ClientEvent).
-- Documentation and design notes in `docs/` and a Phase‑1 simulator mockup plan in this README (the `simulate/index.html` visual mockup file is planned but not yet created).
+## Features
 
-## Context
+### Persistent Storage
+- **SQLite database** (`expo-sqlite`) stores all conversations locally, indexed by agent
+- Chat history loads instantly on app open; new events stream in and append live
+- Conversations survive app restart — each agent has its own persistent history
 
-The existing `tools/simulate.ts` plays a single hard-coded sequence of events to test the mobile UI. To explore edge cases (different tool args, different permission option lists, sequencing, dismissing a prompt mid-flight, etc.) the developer currently has to edit code and re-run. We want an interactive HTML GUI that lets a developer compose and fire **any** ServerEvent the protocol supports — a manual driver for the same WebSocket router. It lives alongside `simulate.ts`, not replacing it.
+### Multi-Agent Navigation
+- **Home screen** lists all connected agents (Telegram-style rows with preview text and timestamps)
+- Tap an agent to open its full chat history
+- Connect to an agent before it starts sending events with the "＋" button (shows known agents: Claude Code, Hermes, Simulator)
 
-Approach: build the visual mockup first (no network), then wire it up to the server in a follow-up. This plan covers **Phase 1: visual mockup only**.
+### Local Slash Commands
+- `/clear` — Delete chat history for current agent
+- `/view-db` — Log database summary (agent rows + item counts) to server console as a formatted table
+- `/view-chat-history [-with-tools]` — Log current agent's messages to server console; use `-with-tools` to include tool calls
+- `/wipe-db` — Erase all conversations for all agents and return to home screen
 
-## Phase 1: Visual mockup
+### Markdown & Code Rendering
+- Finished assistant messages render as **formatted Markdown** (tables, bold, lists, headings, links)
+- **Syntax-highlighted code blocks** with language badges (Python, Rust, JavaScript, Bash, SQL, Go, etc.)
+- Streaming messages show as plain text with cursor; formatting applies after `message_end`
+- Code blocks scroll horizontally so wide tables don't clip
 
-### Location
+### Turn Grouping
+- Events belonging to the same agent turn (user message → tool calls → assistant response) are visually linked with a left-border tint
+- Works via optional `turn_id` field on all events (set by Hermes plugin or Claude Code hook)
 
-- New folder: `/Users/bcom/dev/aji-chat/simulate/`
-- Single file: `simulate/index.html` — self-contained HTML + CSS + JS, no build step (matches `mobile-mockup.html`'s pattern)
-- Opened directly via `file://` for the visual mockup pass. Wiring up to `http://localhost:4000` happens in Phase 2.
+### Event Resilience
+- Defensive ordering guards handle `message_start`, `text_delta`, `message_end` arriving out of sequence
+- If `text_delta` arrives before `message_start`, the message item is created on the fly
+- If `message_end` arrives before other events, a placeholder is created so subsequent deltas still render correctly
+- No stuck cursors or missing messages regardless of event arrival order
 
-### Design language (reuse existing system)
+### Hermes Platform Integration
+- Plugin at `tools/hermes-plugin/` makes Hermes a full bidirectional platform
+- Messages from mobile reach Hermes; Hermes responses stream back as `text_delta` events
+- Tool calls appear as structured cards in real-time
+- Permission requests (approvals) render as buttons — tap to resolve and Hermes continues with your choice
 
-Copy the `:root` CSS variables and font stacks from `mobile-mockup.html`:
+### Web Compatibility
+- App runs in the browser for development testing (Expo Go or web build)
+- Uses platform-specific files: `DBProvider.tsx` (native with SQLite) and `DBProvider.web.tsx` (no-op mock)
+- No `wa-sqlite.wasm` bundler errors on web — web has no persistence (acceptable for dev-only use)
 
-- Backgrounds: `--bg #0d1117`, `--surface #161b22`, `--surface-2 #1c2129`, `--surface-3 #242b35`
-- Text: `--text #e6edf3`, `--text-muted #8b949e`, `--text-dim #6e7681`
-- Accents: `--accent #5e8eff`, `--success #3fb950`, `--tool #b392f0`, `--warn #d29922`, `--danger #f85149`
-- Body font: `-apple-system, ...`; monospace: `"SF Mono", ...`
-- 14px radius default, 8px on small elements
+### Architecture
+- **Monorepo**: `apps/mobile` (Expo), `apps/server` (Hono + WebSocket), `packages/protocol` (wire types), `tools/` (hooks, simulators, plugins)
+- **Dumb server** — broadcasts `ServerEvent`s to all clients, forwards `ClientEvent`s to webhooks. No parsing or transformation.
+- **Single protocol** — all semantic meaning lives in discriminated-union `ServerEvent` and `ClientEvent` types
+- **Agent identity** — optional `agent?: AgentId` field on all events so mobile knows who said what
 
-### Layout
+## Quick Start
 
-Two-column desktop layout (no mobile responsiveness needed — this is a developer tool):
+```bash
+# Install dependencies
+pnpm install
 
+# Start server (port 4000)
+pnpm server
+
+# Start mobile app (Expo Go)
+pnpm mobile
+
+# (In another terminal) Send a test message
+pnpm send "hello from the server"
+
+# Replay a canned agent run (status, streaming text, tool, permission)
+pnpm simulate
+
+# Register Claude Code hooks (mirrors mobile permissions to desktop Claude Code)
+pnpm hooks:install
+
+# Install Hermes plugin (symlinks into ~/.hermes/plugins/)
+pnpm hermes:install
 ```
-┌──────────────────────────────────────────────────────────┐
-│ Header: title · connection status · server URL           │
-├────────────────────────────────┬─────────────────────────┤
-│  Action builders (scrollable)  │  Activity log (sticky)  │
-│  ─ Status                      │  timestamp · event JSON │
-│  ─ Message (quick + stream)    │  ...                    │
-│  ─ Tool call (start / end)     │  ...                    │
-│  ─ Permission request          │                         │
-│  ─ Clarify                     │                         │
-│  ─ Dismiss prompt              │                         │
-│  ─ Canned scenarios            │                         │
-└────────────────────────────────┴─────────────────────────┘
+
+Set up mobile env first: copy `apps/mobile/.env.example` to `.env` and set `EXPO_PUBLIC_SERVER_HOST` to your LAN IP.
+
+## Agent Integration
+
+### Claude Code
+Hooks at `tools/claude-aji-chat-hook.ts` integrate with Claude Code's lifecycle. Hook settings are registered via `pnpm hooks:install` into `~/.claude/settings.json`. When Claude Code executes tools, the hook stamps `agent: 'claude-code'` on all emitted events.
+
+### Hermes
+Plugin at `tools/hermes-plugin/` enables Hermes as a platform. Install via `pnpm hermes:install`. Set `AJI_SERVER_URL=http://localhost:4000` before starting the gateway. The plugin:
+- Emits `message_start` + progressive `text_delta` + `message_end` during streaming
+- Handles tool calls via pre/post hooks
+- Routes permission requests as modals; awaits user response
+- Stamps `agent: 'hermes'` on all events
+
+Enable streaming on aji-chat platform in `~/.hermes/config.yaml`:
+```yaml
+display:
+  platforms:
+    aji-chat:
+      streaming: true
 ```
 
-### Sections to build
+## Protocol
 
-Each as a card matching the existing mockup style. Maps 1:1 to ServerEvent types from `packages/protocol/src/index.ts`.
+See `packages/protocol/src/index.ts` for the authoritative wire types. Key shapes:
 
-| Card | Inputs | Output |
-|---|---|---|
-| **Status** | 3 pill buttons: `thinking` / `working` / `idle` | `Status` event |
-| **Quick message** | role select (`assistant`/`user`/`system`), text area, "Send" | `MessageStart` → `TextDelta` → `MessageEnd` (one shot, via `/send` shape) |
-| **Stream message** | role select, text area, char-delay number input, "Stream" | Same trio, but `TextDelta` chunked at chosen interval |
-| **Tool call** | name input, args JSON textarea, "Start" / "End" buttons; sticky "active tool ID" badge once started; result JSON textarea + optional error string for End | `ToolStart` then later `ToolEnd` |
-| **Permission request** | title, message, repeatable option rows (id + label, with add/remove); auto-seeds `[Allow once / Always allow / Deny]` | `PermissionRequest` event; placeholder area shows "waiting for response" (real wiring in Phase 2) |
-| **Clarify** | question, repeatable choice rows | `Clarify` event |
-| **Dismiss prompt** | prompt ID text input + a "pick from active prompts" dropdown | `PromptDismiss` event |
-| **Canned scenarios** | List of preset buttons (e.g. "Full simulate.ts replay", "Permission deny flow", "Failing tool") | Plays a sequence |
+**Server → Phone** (`ServerEvent`):
+- `message_start / text_delta / message_end` — streamed assistant text
+- `tool_start / tool_end` — structured tool calls with args and results
+- `status` — agent state (`thinking`, `working`, `idle`)
+- `permission_request / clarify` — interactive prompts
+- `prompt_dismiss` — remove a prompt from mobile UI
+- `commands` — slash command list for the picker
 
-### Activity log
+**Phone → Server** (`ClientEvent`):
+- `user_message` — text typed on mobile
+- `prompt_response` — user's choice in a permission/clarify prompt
+- `get_commands` — request updated command list
 
-Right column, sticky, monospace. Each entry: timestamp, color-coded event type badge (reuse `--tool` purple for tool events, `--accent` blue for messages, `--warn` for prompts, etc.), and the event JSON. Newest at top. "Clear" button at the top.
+Optional fields:
+- `turn_id?: string` — groups related events (user message + tools + response)
+- `agent?: AgentId` — identifies which agent sent it (added by adapter, not user)
 
-In Phase 1 the log is fed by the same JS that *would* call `fetch()` — every click appends the event it would have sent, so the UI feels real without making network calls.
+## Development
 
-### JS architecture (kept simple)
+### Type checking
+```bash
+pnpm --filter mobile exec tsc --noEmit
+pnpm --filter server exec tsc --noEmit
+```
 
-A single `<script>` block with:
+### Inspect database
+On mobile, send `/view-db` in any chat. The server logs a formatted table of all agents and per-agent item counts.
 
-- `events = []` — array of all events the user has triggered
-- `addEvent(event)` — pushes to `events`, re-renders the log; in Phase 2 this also calls `fetch()`
-- Helper builders mirroring `packages/protocol/src/index.ts`: `buildStatus(value)`, `buildMessage(role, text)`, `buildToolStart(name, args)`, etc.
-- Each card's button hands its form values to a builder, then `addEvent(...)`
-- ID generation: a small `newId(prefix)` helper matching the `newId` in `packages/protocol/src/index.ts`
+### Test out-of-order events
+Mobile's event handler is defensive. Send events via `pnpm send` or the simulator in any sequence — messages still render correctly.
 
-### Wiring deferred to Phase 2
+### Code blocks
+`MarkdownMessage.tsx` uses `react-native-marked` for rendering and `highlight.js` for syntax highlighting. Language detection is automatic; `LANG_COLORS` map at the top of the component controls badge colors.
 
-Stub a single `async function send(event) { /* TODO Phase 2 */ }` that `addEvent` calls. In Phase 2 this will `fetch('http://localhost:4000/event', { method: 'POST', body: JSON.stringify(event) })`. CORS strategy will be decided in Phase 2 (likely add Hono CORS middleware to `apps/server/src/index.ts`, since the simpler approach of file:// → localhost:4000 will be blocked).
+## Known Limitations
 
-## Files to create
-
-- `/Users/bcom/dev/aji-chat/simulate/index.html` — the whole mockup (HTML + CSS + JS in one file, matching `mobile-mockup.html`)
-
-## Files NOT modified in Phase 1
-
-- `tools/simulate.ts` — left in place; will keep working
-- `apps/server/src/index.ts` — untouched until Phase 2
-- `packages/protocol/src/index.ts` — protocol types stay the source of truth; we don't re-export, just inline a couple of literal type values in the HTML JS for the role/status dropdowns
-
-## Verification (Phase 1)
-
-1. Open `simulate/index.html` directly in a browser via `file://`
-2. Visual check — all sections render, dark theme matches `mobile-mockup.html`
-3. Form interactions work — clicking "Send" on each card appends the correct event JSON to the activity log
-4. Tool flow — clicking "Start" assigns a tool ID, the End form unlocks and uses the same ID
-5. Permission/clarify option rows can be added/removed
-6. Canned scenario buttons play the right sequence (just to the log)
-7. No console errors
-
-Phase 2 (separate change) will swap the stub `send()` for real `fetch()` calls and add CORS to the server.
+- **Web**: no persistence (Hermes integration is native-only anyway)
+- **Permissions**: timeout is 15 seconds (configurable via `AJI_PERMISSION_WAIT_MS` env var)
+- **Mobile UI**: no image rendering yet (text fallback only)
+- **Streaming**: depends on Hermes config; off by default — add `streaming: true` to `display.platforms.aji-chat` in config.yaml
