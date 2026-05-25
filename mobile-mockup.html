@@ -5,12 +5,13 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>aji-chat — mobile mockup</title>
   <style>
-    :root {
+    /* Dark theme (default) */
+    :root[data-theme="dark"] {
       --bg: #0d1117;
       --surface: #161b22;
       --surface-2: #1c2129;
       --surface-3: #242b35;
-      --border: #2a3038;
+      --border: #21262d;
       --border-2: #3a424d;
       --text: #e6edf3;
       --text-muted: #8b949e;
@@ -22,12 +23,40 @@
       --tool-dim: #4c3b73;
       --warn: #d29922;
       --danger: #f85149;
+    }
+
+    /* Light theme */
+    :root[data-theme="light"] {
+      --bg: #ffffff;
+      --surface: #f6f8fa;
+      --surface-2: #eaeef2;
+      --surface-3: #e0e4e9;
+      --border: #d0d7de;
+      --border-2: #adb5bd;
+      --text: #1f2328;
+      --text-muted: #636c76;
+      --text-dim: #818b98;
+      --accent: #0969da;
+      --accent-dim: #dde6f5;
+      --success: #1a7f37;
+      --tool: #8250df;
+      --tool-dim: #f1e8ff;
+      --warn: #9a6700;
+      --danger: #d1242f;
+    }
+
+    /* Shared tokens */
+    :root {
       --radius: 14px;
       --radius-sm: 8px;
       --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
         Roboto, sans-serif;
       --mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
     }
+
+    /* Default to dark theme */
+    html { --theme: 'dark'; }
+    html:not([data-theme]) { --bg: #0d1117; --surface: #161b22; --surface-2: #1c2129; --surface-3: #242b35; --border: #21262d; --border-2: #3a424d; --text: #e6edf3; --text-muted: #8b949e; --text-dim: #6e7681; --accent: #5e8eff; --accent-dim: #2d4380; --success: #3fb950; --tool: #b392f0; --tool-dim: #4c3b73; --warn: #d29922; --danger: #f85149; }
 
     * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
     html, body { margin: 0; padding: 0; }
@@ -45,11 +74,45 @@
     }
 
     /* ---------- chrome above the phones ---------- */
+    .page-header {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 24px;
+      margin-bottom: 12px;
+    }
     h1 {
-      margin: 0 0 6px;
+      margin: 0;
       font-size: 22px;
       font-weight: 600;
       letter-spacing: -0.01em;
+      color: var(--text);
+    }
+    .theme-toggle {
+      display: flex;
+      gap: 6px;
+      background: var(--surface-2);
+      padding: 4px;
+      border-radius: 6px;
+    }
+    .theme-btn {
+      padding: 6px 12px;
+      border: none;
+      background: transparent;
+      color: var(--text-muted);
+      cursor: pointer;
+      border-radius: 4px;
+      font-size: 13px;
+      font-weight: 500;
+      transition: all 0.15s;
+    }
+    .theme-btn:hover {
+      color: var(--text);
+    }
+    .theme-btn.active {
+      background: var(--accent);
+      color: white;
+      font-weight: 600;
     }
     .tagline {
       color: var(--text-muted);
@@ -305,8 +368,58 @@
     }
     .msg {
       display: flex;
-      gap: 10px;
+      flex-direction: column;
+      gap: 6px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .msg:last-child {
+      border-bottom: none;
+      padding-bottom: 0;
+    }
+    /* User messages: right-aligned with accent background */
+    .msg.msg-user {
+      align-items: flex-end;
+    }
+    .msg.msg-user .msg-avatar {
+      order: -1;
+      margin-bottom: 4px;
+    }
+    .msg.msg-user .msg-body {
+      background: var(--accent);
+      color: white;
+      border-radius: 12px;
+      padding: 10px 12px;
+      max-width: 85%;
+    }
+    .msg.msg-user .msg-head {
+      display: none;
+    }
+    .msg.msg-user .msg-text {
+      color: white;
+    }
+    /* Agent messages: show avatar above body */
+    .msg:not(.msg-user) {
       align-items: flex-start;
+      flex-direction: column;
+    }
+    .msg:not(.msg-user) .msg-avatar {
+      margin-bottom: 4px;
+    }
+    /* Consecutive messages: hide avatar and author/time */
+    .msg.msg-group-continue {
+      padding-top: 0;
+    }
+    .msg.msg-group-continue .msg-body {
+      margin-bottom: 8px;
+    }
+    .msg.msg-group-continue .msg-head {
+      display: none;
+    }
+    /* Messages with only text (no tool calls): minimal styling */
+    .msg:not(.msg-user) .msg-body:not(:has(.toolcall-badge)):not(:has(.media-attach)) {
+      background: transparent;
+      padding: 0;
     }
     .msg-avatar {
       width: 28px; height: 28px;
@@ -319,7 +432,11 @@
       font-size: 13px;
       color: white;
     }
-    .msg-body { flex: 1; min-width: 0; }
+    .msg-body {
+      flex: 1;
+      min-width: 0;
+      width: 100%;
+    }
     .msg-head {
       display: flex;
       align-items: baseline;
@@ -496,6 +613,117 @@
       font-size: 12.5px;
       font-weight: 500;
       cursor: pointer;
+    }
+
+    /* ---------- settings screen ---------- */
+    .settings-screen {
+      display: flex;
+      flex-direction: column;
+      background: var(--bg);
+    }
+    .settings-header {
+      display: flex;
+      align-items: center;
+      padding: 10px 14px 12px;
+      border-bottom: 1px solid var(--border);
+      gap: 10px;
+    }
+    .settings-header .back {
+      font-size: 28px;
+      line-height: 32px;
+      color: var(--accent);
+      cursor: pointer;
+    }
+    .settings-header .title {
+      font-size: 17px;
+      font-weight: 600;
+      flex: 1;
+      color: var(--text);
+    }
+    .settings-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 4px 0;
+    }
+    .settings-section-label {
+      padding: 16px 16px 8px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .settings-card {
+      margin: 8px 12px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    .settings-row {
+      display: flex;
+      align-items: center;
+      padding: 12px 16px;
+      gap: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .settings-row:last-child {
+      border-bottom: none;
+    }
+    .settings-row-label {
+      flex: 1;
+      color: var(--text);
+      font-size: 15px;
+      font-weight: 400;
+    }
+    .settings-row-value {
+      color: var(--text-muted);
+      font-size: 13px;
+      text-align: right;
+      flex-shrink: 1;
+      max-width: 150px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .segmented-control {
+      display: flex;
+      background: var(--surface-2);
+      border-radius: 6px;
+      padding: 3px;
+      gap: 2px;
+    }
+    .segmented-control button {
+      flex: 1;
+      padding: 5px 8px;
+      border: none;
+      background: transparent;
+      color: var(--text-muted);
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .segmented-control button:hover {
+      color: var(--text);
+    }
+    .segmented-control button.active {
+      background: var(--accent);
+      color: white;
+      font-weight: 600;
+    }
+    .destructive-row {
+      padding: 12px 16px;
+      cursor: pointer;
+    }
+    .destructive-row:hover {
+      background: var(--surface-2);
+    }
+    .destructive-label {
+      color: var(--danger);
+      font-size: 15px;
+      font-weight: 600;
     }
 
     /* ---------- bottom sheet ---------- */
@@ -862,7 +1090,13 @@
   </style>
 </head>
 <body>
-  <h1>aji-chat — mobile mockup</h1>
+  <div class="page-header">
+    <h1>aji-chat — mobile mockup</h1>
+    <div class="theme-toggle">
+      <button class="theme-btn active" data-theme="dark">Dark</button>
+      <button class="theme-btn" data-theme="light">Light</button>
+    </div>
+  </div>
   <p class="tagline">A clean chat surface for AI agents. Tool calls hide in a bottom sheet, so the conversation reads like a conversation.</p>
   <p class="legend">
     Click <kbd>🔧</kbd> badges to open the tool-call sheet ·
@@ -988,52 +1222,102 @@
           </div>
 
           <div class="messages">
-            <div class="msg">
+            <div class="msg msg-user">
+              <div class="msg-avatar" style="background:linear-gradient(135deg,#2d4380,#5e8eff)">You</div>
+              <div class="msg-body">
+                <div class="msg-head">
+                  <span class="msg-author">You</span>
+                  <span class="msg-time">20:10</span>
+                </div>
+                <div class="msg-text">How's the hermes briefing task progressing?</div>
+              </div>
+            </div>
+
+            <div class="msg msg-group-start">
               <div class="msg-avatar">CC</div>
               <div class="msg-body">
                 <div class="msg-head">
                   <span class="msg-author">Claude Code</span>
-                  <span class="msg-time">20:14</span>
+                  <span class="msg-time">20:12</span>
                 </div>
-                <div class="msg-text">Still the same latest file at 20:18. The scheduler is coalescing — it won't start a new run while one is active. Let me poll again.</div>
+                <div class="msg-text">The task is running well. I've been monitoring the scheduler and made some optimizations to the pipeline.</div>
+              </div>
+            </div>
+
+            <div class="msg msg-group-continue">
+              <div class="msg-body">
+                <div class="msg-text">The main improvement is in the TTS generation — we switched from the older voice model to the new neural voices, which produce much more natural-sounding output.</div>
                 <div class="toolcall-badge" onclick="openSheet('run1')">
-                  🔧 <span>2 tool calls</span><span class="chev">›</span>
+                  🔧 <span>3 tool calls</span><span class="chev">›</span>
                 </div>
               </div>
             </div>
 
-            <div class="msg">
+            <div class="msg msg-group-continue">
+              <div class="msg-body">
+                <div class="msg-text">I've also optimized the content extraction to handle edge cases better, like when articles have multiple headlines or unusual formatting.</div>
+              </div>
+            </div>
+
+            <div class="msg msg-group-continue">
+              <div class="msg-body">
+                <div class="msg-text">The next scheduled run is set for 4 PM tomorrow. I think we're in good shape, but let me verify a few more things to ensure stability.</div>
+              </div>
+            </div>
+
+            <div class="msg msg-user">
+              <div class="msg-avatar" style="background:linear-gradient(135deg,#2d4380,#5e8eff)">You</div>
+              <div class="msg-body">
+                <div class="msg-head">
+                  <span class="msg-author">You</span>
+                  <span class="msg-time">20:20</span>
+                </div>
+                <div class="msg-text">Great! Any concerns or known issues?</div>
+              </div>
+            </div>
+
+            <div class="msg msg-group-start">
               <div class="msg-avatar">CC</div>
               <div class="msg-body">
                 <div class="msg-head">
                   <span class="msg-author">Claude Code</span>
-                  <span class="msg-time">20:23</span>
+                  <span class="msg-time">20:22</span>
                 </div>
-                <div class="msg-text">The scheduler settled on the next run at <b>4 PM tomorrow</b>. The prompt update is in place and will fire then.</div>
-                <div class="toolcall-badge" onclick="openSheet('run2')">
-                  🔧 <span>4 tool calls</span><span class="chev">›</span>
-                </div>
+                <div class="msg-text">Just one minor thing — the audio file duration calculation was slightly off in edge cases. I fixed that in the last update.</div>
               </div>
             </div>
 
-            <div class="msg">
+            <div class="msg msg-group-continue">
+              <div class="msg-body">
+                <div class="msg-text">Performance-wise, everything looks solid. The pipeline processes articles in about 15-20 seconds each, which is well within our targets.</div>
+              </div>
+            </div>
+
+            <div class="msg msg-group-continue">
+              <div class="msg-body">
+                <div class="msg-text">I'd recommend monitoring the first few runs after deployment to catch any issues early, but I'm confident this will work smoothly.</div>
+              </div>
+            </div>
+
+            <div class="msg msg-user">
+              <div class="msg-avatar" style="background:linear-gradient(135deg,#2d4380,#5e8eff)">You</div>
+              <div class="msg-body">
+                <div class="msg-head">
+                  <span class="msg-author">You</span>
+                  <span class="msg-time">20:25</span>
+                </div>
+                <div class="msg-text">Sounds good. Let me know when the next run completes.</div>
+              </div>
+            </div>
+
+            <div class="msg msg-group-start">
               <div class="msg-avatar">CC</div>
               <div class="msg-body">
                 <div class="msg-head">
                   <span class="msg-author">Claude Code</span>
                   <span class="msg-time">20:26</span>
                 </div>
-                <div class="msg-text">To verify the podcast-style TTS works before the next run, here's a sample I generated locally:</div>
-                <div class="media-attach">
-                  <div class="media-play">▶</div>
-                  <div class="media-meta">
-                    <div class="media-name">briefing.mp3</div>
-                    <div class="media-sub">2:14 · edge-tts</div>
-                  </div>
-                </div>
-                <div class="toolcall-badge" onclick="openSheet('run3')">
-                  🔧 <span>3 tool calls</span><span class="chev">›</span>
-                </div>
+                <div class="msg-text">Will do! I'll send you a notification once it finishes and the briefing is ready.</div>
               </div>
             </div>
           </div>
@@ -1069,67 +1353,70 @@
           </div>
         </div>
       </div>
-      <div class="phone-label">2. Channel chat — narration only. Tool calls and "still working" pings stay out of the conversation.</div>
+      <div class="phone-label">2. Chat — Improved message separation (agent left/surface, user right/accent)</div>
     </div>
 
-    <!-- ============ PHONE 3: COMPOSER EXPANDED ============ -->
+    <!-- ============ PHONE 3: SETTINGS ============ -->
     <div class="phone-wrap">
       <div class="phone">
-        <div class="screen">
+        <div class="screen settings-screen">
           <div class="status-bar">
             <span>9:41</span>
             <span class="right">●●● 5G ▮</span>
           </div>
-          <div class="app-header">
-            <button class="icon-btn chat-back">‹</button>
-            <div class="chat-title-block">
-              <div class="chat-title"># code-tasks</div>
-              <div class="chat-status">
-                <span style="width:7px;height:7px;border-radius:50%;background:var(--text-dim);display:inline-block"></span>
-                <span>Claude Code idle</span>
-              </div>
-            </div>
-            <button class="icon-btn">⋯</button>
+
+          <div class="settings-header">
+            <span class="back">‹</span>
+            <span class="title">Settings</span>
           </div>
 
-          <div class="messages" style="flex-grow:0; max-height:160px;">
-            <div class="msg">
-              <div class="msg-avatar" style="background:linear-gradient(135deg,#2d4380,#5e8eff)">B</div>
-              <div class="msg-body">
-                <div class="msg-head">
-                  <span class="msg-author">You</span>
-                  <span class="msg-time">9:38</span>
+          <div class="settings-content">
+            <!-- Appearance Section -->
+            <div class="settings-section-label">Appearance</div>
+            <div class="settings-card">
+              <div class="settings-row">
+                <div class="settings-row-label">Theme</div>
+                <div class="segmented-control">
+                  <button class="active">Auto</button>
+                  <button>Light</button>
+                  <button>Dark</button>
                 </div>
-                <div class="msg-text">Refactor this and add a docstring please:</div>
               </div>
             </div>
-          </div>
 
-          <div class="composer-expanded">
-            <div class="composer-tabs">
-              <div class="composer-tab active">Edit</div>
-              <div class="composer-tab">Preview</div>
+            <!-- Connection Section -->
+            <div class="settings-section-label">Connection</div>
+            <div class="settings-card">
+              <div class="settings-row">
+                <div class="settings-row-label">Server</div>
+                <div class="settings-row-value">ws://192.168.1.x:4000</div>
+              </div>
             </div>
-            <textarea class="composer-textarea" spellcheck="false">```python
-def hello(name):
-    print(f"hi {name}")
-```
 
-Can you refactor this — add a type hint and a one-line docstring?</textarea>
-            <div class="composer-attach-row">
-              <div class="attach-chip">📎 screenshot.png <span class="x">✕</span></div>
-              <div class="attach-chip">📎 trace.log <span class="x">✕</span></div>
+            <!-- Data Section -->
+            <div class="settings-section-label">Data</div>
+            <div class="settings-card">
+              <div class="destructive-row">
+                <div class="destructive-label">Clear All History</div>
+              </div>
             </div>
-            <div class="composer-actions">
-              <button class="ghost-btn">📎 Attach</button>
-              <button class="ghost-btn">/ Slash</button>
-              <div class="spacer"></div>
-              <button class="primary-btn">Send ➤</button>
+
+            <!-- About Section -->
+            <div class="settings-section-label">About</div>
+            <div class="settings-card">
+              <div class="settings-row">
+                <div class="settings-row-label">Version</div>
+                <div class="settings-row-value">1.0.0</div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label">SDK</div>
+                <div class="settings-row-value">Expo 54</div>
+              </div>
             </div>
           </div>
         </div>
       </div>
-      <div class="phone-label">3. Composer expanded — markdown input with fenced code blocks, attachment chips, Edit / Preview toggle.</div>
+      <div class="phone-label">3. Settings — Theme toggle, Connection, Data, About sections.</div>
     </div>
 
     <!-- ============ PHONE 4: PROMPTS INLINE ============ -->
@@ -1405,6 +1692,26 @@ Can you refactor this — add a type hint and a one-line docstring?</textarea>
 
     // initialize the sheet content so it's ready
     renderSheet("run1");
+
+    // ============ Theme toggle ============
+    document.querySelectorAll('.theme-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const theme = btn.dataset.theme;
+        document.documentElement.setAttribute('data-theme', theme);
+        document.querySelectorAll('.theme-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        localStorage.setItem('mockupTheme', theme);
+      });
+    });
+
+    // Load saved theme preference
+    const saved = localStorage.getItem('mockupTheme') || 'dark';
+    document.documentElement.setAttribute('data-theme', saved);
+    const savedBtn = document.querySelector(`[data-theme="${saved}"]`);
+    if (savedBtn) {
+      document.querySelectorAll('.theme-btn').forEach(b => b.classList.remove('active'));
+      savedBtn.classList.add('active');
+    }
   </script>
 </body>
 </html>
