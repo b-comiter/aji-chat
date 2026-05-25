@@ -5,11 +5,6 @@
  *  agents — one row per known agent, tracks preview text and last status
  *  items  — all messages, tool calls, and prompts, stored as JSON blobs
  *            keyed by chat_id (= the agent identity, e.g. 'claude-code')
- *
- * Called via SQLiteProvider / useSQLiteContext (expo-sqlite v15+).
- *
- * Schema versions:
- *  0→2  dropped agent_id, introduced chat_id (dev reset — no data migration)
  */
 import type { SQLiteDatabase } from 'expo-sqlite'
 
