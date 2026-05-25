@@ -51,6 +51,94 @@ const LOCAL_COMMANDS: CommandItem[] = [
 ]
 
 // ---------------------------------------------------------------------------
+// Local command handler factories
+// ---------------------------------------------------------------------------
+// These factories are called with necessary closures (db, items, setItems, etc.)
+// and return async handler functions for each command.
+
+type CommandHandler = (args: string[]) => Promise<void>
+
+interface LocalCommandHandlers {
+  [name: string]: (ctx: {
+    agentId?: string
+    db: any
+    items: Item[]
+    setItems: (updater: (prev: Item[]) => Item[]) => void
+    addSystemMessage: (text: string) => void
+    router: any
+  }) => CommandHandler
+}
+
+const createLocalCommandHandlers = (): LocalCommandHandlers => ({
+  clear: (ctx) => async () => {
+    await clearAgentHistory(ctx.db, ctx.agentId ?? 'unknown')
+    ctx.setItems(() => [])
+    ctx.addSystemMessage('Chat history cleared.')
+  },
+
+  ['view-db']: (ctx) => async () => {
+    const dump = await getDbDump(ctx.db)
+    try {
+      await fetch(`${SERVER_HTTP}/db/dump`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(dump),
+      })
+      ctx.addSystemMessage('DB dump sent to server log.')
+    } catch {
+      ctx.addSystemMessage('Could not reach server — is it running?')
+    }
+  },
+
+  ['view-chat-history']: (ctx) => async (args: string[]) => {
+    const withTools = args.includes('with-tools')
+    const snapshot = ctx.items.filter(
+      (it): it is Extract<Item, { kind: 'message' | 'tool' }> =>
+        it.kind === 'message' || (withTools && it.kind === 'tool'),
+    )
+    const payload = snapshot.map((it) =>
+      it.kind === 'tool'
+        ? { kind: 'tool' as const, name: it.name, args: it.args, result: it.result, done: it.done }
+        : { kind: 'message' as const, role: it.role, text: it.text, done: it.done },
+    )
+    try {
+      await fetch(`${SERVER_HTTP}/chat/dump`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agentId: ctx.agentId ?? 'unknown', items: payload }),
+      })
+      ctx.addSystemMessage(`Chat history sent to server log${withTools ? ' (with tools)' : ''}.`)
+    } catch {
+      ctx.addSystemMessage('Could not reach server — is it running?')
+    }
+  },
+
+  ['view-last-n-msgs']: (ctx) => async (args: string[]) => {
+    const countStr = args[0] || '10'
+    const count = Math.max(1, parseInt(countStr, 10) || 10)
+    const messages = ctx.items
+      .filter((it): it is Extract<Item, { kind: 'message' }> => it.kind === 'message')
+      .slice(-count)
+    try {
+      await fetch(`${SERVER_HTTP}/last-messages/dump`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agentId: ctx.agentId ?? 'unknown', messages }),
+      })
+      ctx.addSystemMessage(`Last ${count} message${count !== 1 ? 's' : ''} sent to server log.`)
+    } catch {
+      ctx.addSystemMessage('Could not reach server — is it running?')
+    }
+  },
+
+  ['wipe-db']: (ctx) => async () => {
+    await wipeAllHistory(ctx.db)
+    ctx.setItems(() => [])
+    ctx.router.replace('/')
+  },
+})
+
+// ---------------------------------------------------------------------------
 // Item types (in-memory, deserialized from DB JSON blobs)
 // ---------------------------------------------------------------------------
 
@@ -63,6 +151,34 @@ type Item =
 
 function rowToItem(row: ItemRow): Item {
   return JSON.parse(row.data) as Item
+}
+
+// ---------------------------------------------------------------------------
+// Out-of-order event resilience helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Ensure a message exists in the items array. If it doesn't exist, create it.
+ * Used by message_start, text_delta, and message_end handlers to be defensive
+ * against events arriving out of sequence.
+ */
+function ensureMessageExists(
+  items: Item[],
+  messageId: string,
+  turnId: string | undefined,
+  done: boolean = false,
+): Item[] {
+  const exists = items.some((it) => it.kind === 'message' && it.id === messageId)
+  if (exists) return items
+  const newItem: Item = {
+    kind: 'message',
+    id: messageId,
+    role: 'assistant',
+    text: '',
+    done,
+    turnId,
+  }
+  return [...items, newItem]
 }
 
 // ---------------------------------------------------------------------------
@@ -124,32 +240,26 @@ export default function ChatScreen() {
   // Event handler — defensively resilient to out-of-order arrivals
   // ---------------------------------------------------------------------------
   // Events may arrive out of sequence due to HTTP request reordering or
-  // async scheduling in the adapter. Handled cases:
-  //   • text_delta before message_start: creates item on the fly with role='assistant'
+  // async scheduling in the adapter. The ensureMessageExists() helper guards
+  // against all permutations:
+  //   • text_delta before message_start: creates item on the fly
   //   • message_end before message_start: creates done:true placeholder
-  //   • message_start after text_delta: skips duplicate (item already exists)
-  //   • message_start after message_end: skips duplicate
+  //   • message_start after text_delta: skips (item already exists)
+  //   • message_start after message_end: skips (item already exists)
   //   • Normal order (start → delta → end): works as expected
-  // text_delta appended to done:true items preserves done=true, so no cursor flicker.
   function handleEvent(event: ServerEvent) {
-    const turnId = 'turn_id' in event ? (event.turn_id as string | undefined) : undefined
     console.log('Received event:', event)
+    const turnId = 'turn_id' in event ? (event.turn_id as string | undefined) : undefined
+
     setItems((prev) => {
       switch (event.type) {
         case 'message_start': {
-          // Guard: text_delta may have already created this item if it arrived first
-          const exists = prev.some((it) => it.kind === 'message' && it.id === event.id)
-          if (exists) return prev
-          return [...prev, { kind: 'message', id: event.id, role: event.role, text: '', done: false, turnId }]
+          return ensureMessageExists(prev, event.id, turnId, false)
         }
 
         case 'text_delta': {
-          const exists = prev.some((it) => it.kind === 'message' && it.id === event.id)
-          if (!exists) {
-            // message_start hasn't arrived yet — create the item on the fly
-            return [...prev, { kind: 'message', id: event.id, role: 'assistant', text: event.text, done: false, turnId }]
-          }
-          return prev.map((it) =>
+          let updated = ensureMessageExists(prev, event.id, turnId, false)
+          return updated.map((it) =>
             it.kind === 'message' && it.id === event.id
               ? { ...it, text: it.text + event.text }
               : it,
@@ -157,16 +267,7 @@ export default function ChatScreen() {
         }
 
         case 'message_end': {
-          const exists = prev.some((it) => it.kind === 'message' && it.id === event.id)
-          if (!exists) {
-            // message_start (and maybe text_delta) haven't arrived yet.
-            // Create a completed placeholder so any subsequent text_delta can
-            // still append to it; done:true is preserved by the text_delta guard.
-            return [...prev, { kind: 'message', id: event.id, role: 'assistant', text: '', done: true, turnId }]
-          }
-          return prev.map((it) =>
-            it.kind === 'message' && it.id === event.id ? { ...it, done: true } : it,
-          )
+          return ensureMessageExists(prev, event.id, turnId, true)
         }
 
         case 'tool_start':
@@ -207,92 +308,36 @@ export default function ChatScreen() {
   }
 
   // ---------------------------------------------------------------------------
-  // Local command handlers
+  // Local command handlers (initialized with current context)
   // ---------------------------------------------------------------------------
 
-  function addSystemMessage(text: string) {
+  const addSystemMessage = (text: string) => {
     setItems((prev) => [
       ...prev,
       { kind: 'message', id: newId('sys'), role: 'system', text, done: true },
     ])
   }
 
-  async function handleLocalCommand(cmd: string, args: string[] = []): Promise<boolean> {
-    switch (cmd) {
-      case 'clear': {
-        await clearAgentHistory(db, agentId ?? 'unknown')
-        setItems([])
-        addSystemMessage('Chat history cleared.')
-        return true
-      }
+  const handleLocalCommand = async (cmd: string, args: string[] = []): Promise<boolean> => {
+    const handlers = createLocalCommandHandlers()
+    const handler = handlers[cmd]
+    if (!handler) return false
 
-      case 'view-db': {
-        const dump = await getDbDump(db)
-        try {
-          await fetch(`${SERVER_HTTP}/db/dump`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(dump),
-          })
-          addSystemMessage('DB dump sent to server log.')
-        } catch {
-          addSystemMessage('Could not reach server — is it running?')
-        }
-        return true
-      }
-
-      case 'view-chat-history': {
-        const withTools = args.includes('with-tools')
-        const snapshot = items.filter(
-          (it): it is Extract<Item, { kind: 'message' | 'tool' }> =>
-            it.kind === 'message' || (withTools && it.kind === 'tool'),
-        )
-        const payload = snapshot.map((it) =>
-          it.kind === 'tool'
-            ? { kind: 'tool' as const, name: it.name, args: it.args, result: it.result, done: it.done }
-            : { kind: 'message' as const, role: it.role, text: it.text, done: it.done },
-        )
-        try {
-          await fetch(`${SERVER_HTTP}/chat/dump`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ agentId: agentId ?? 'unknown', items: payload }),
-          })
-          addSystemMessage(`Chat history sent to server log${withTools ? ' (with tools)' : ''}.`)
-        } catch {
-          addSystemMessage('Could not reach server — is it running?')
-        }
-        return true
-      }
-
-      case 'view-last-n-msgs': {
-        const countStr = args[0] || '10'
-        const count = Math.max(1, parseInt(countStr, 10) || 10)
-        const messages = items
-          .filter((it): it is Extract<Item, { kind: 'message' }> => it.kind === 'message')
-          .slice(-count)
-        try {
-          await fetch(`${SERVER_HTTP}/last-messages/dump`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ agentId: agentId ?? 'unknown', messages }),
-          })
-          addSystemMessage(`Last ${count} message${count !== 1 ? 's' : ''} sent to server log.`)
-        } catch {
-          addSystemMessage('Could not reach server — is it running?')
-        }
-        return true
-      }
-
-      case 'wipe-db': {
-        await wipeAllHistory(db)
-        setItems([])
-        router.replace('/')
-        return true
-      }
-
-      default:
-        return false
+    const context = {
+      agentId,
+      db,
+      items,
+      setItems,
+      addSystemMessage,
+      router,
+    }
+    try {
+      await handler(context)(args)
+      return true
+    } catch (err) {
+      console.error(`Command /${cmd} failed:`, err)
+      addSystemMessage(`Error running /${cmd}: ${err instanceof Error ? err.message : 'unknown error'}`)
+      return true
     }
   }
 

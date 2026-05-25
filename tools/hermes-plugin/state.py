@@ -61,6 +61,9 @@ class SessionState:
     def get_sent(self, message_id: str) -> str:
         return self.last_sent.get(message_id, "")
 
+    def is_tracked(self, message_id: str) -> bool:
+        return message_id in self.last_sent
+
     def forget_sent(self, message_id: str) -> None:
         self.last_sent.pop(message_id, None)
 
