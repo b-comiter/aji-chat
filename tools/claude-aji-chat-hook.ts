@@ -4,19 +4,23 @@
  * Registered via tools/claude-hooks-install.ts. Called by Claude Code for each
  * lifecycle event (UserPromptSubmit, PreToolUse, PermissionRequest,
  * PostToolUse, Stop). Reads the event payload from stdin, translates it to one
- * or more aji-chat ServerEvents, and POSTs them to the local server. For
- * permission requests it can briefly wait for a mirrored mobile approval before
- * falling back to Claude Code's native permission dialog. Fails silently if the
- * server isn't running — never wants to break a Claude Code session.
+ * or more aji-chat ServerEvents, and POSTs them to the local server. Permission
+ * requests block indefinitely until the user responds on mobile. Fails silently
+ * if the server isn't running — never wants to break a Claude Code session.
+ *
+ * Turn ID persistence: UserPromptSubmit mints a turn_id and writes it to a
+ * temp file keyed by session_id. Subsequent events within the same session read
+ * it so tool calls and the final assistant message are grouped together.
  */
 import * as fs from 'node:fs'
 import { randomUUID } from 'node:crypto'
+import * as os from 'node:os'
+import * as path from 'node:path'
 import type { PermissionRequest, PromptOption, ServerEvent } from '@aji/protocol'
 
 const SERVER = process.env.AJI_SERVER ?? 'http://localhost:4000/event'
 const AGENT = 'claude-code'
 const PROMPT_SERVER = process.env.AJI_PROMPT_SERVER ?? 'http://localhost:4000/prompt/wait'
-const PERMISSION_WAIT_MS = readTimeoutMs('AJI_PERMISSION_WAIT_MS', 30000)
 
 interface PromptResponse {
   type: 'prompt_response'
@@ -31,17 +35,33 @@ interface PermissionSuggestion {
   rules?: Array<{ toolName?: string; ruleContent?: string }>
 }
 
-interface WaitPromptResult {
-  response?: PromptResponse | null
-  timedOut?: boolean
+// ---------------------------------------------------------------------------
+// Turn ID persistence (file-based, keyed by Claude Code session_id)
+// ---------------------------------------------------------------------------
+
+function turnStatePath(sessionId: string): string {
+  return path.join(os.tmpdir(), `aji-turn-${sessionId}`)
 }
 
-function readTimeoutMs(name: string, fallback: number): number {
-  const raw = process.env[name]
-  if (!raw) return fallback
-  const value = Number(raw)
-  return Number.isFinite(value) && value >= 0 ? value : fallback
+function readTurnId(sessionId: string): string | undefined {
+  try {
+    return fs.readFileSync(turnStatePath(sessionId), 'utf-8').trim() || undefined
+  } catch {
+    return undefined
+  }
 }
+
+function writeTurnId(sessionId: string, turnId: string): void {
+  try { fs.writeFileSync(turnStatePath(sessionId), turnId, 'utf-8') } catch { /* ignore */ }
+}
+
+function clearTurnId(sessionId: string): void {
+  try { fs.unlinkSync(turnStatePath(sessionId)) } catch { /* ignore */ }
+}
+
+// ---------------------------------------------------------------------------
+// HTTP helpers
+// ---------------------------------------------------------------------------
 
 async function postJson(url: string, body: unknown): Promise<unknown | null> {
   try {
@@ -141,11 +161,7 @@ function permissionMessage(payload: Record<string, unknown>): string {
 }
 
 async function waitForPermission(prompt: PermissionRequest): Promise<PromptResponse | null> {
-  const result = await postJson(PROMPT_SERVER, {
-    prompt,
-    timeoutMs: PERMISSION_WAIT_MS,
-  }) as WaitPromptResult | null
-
+  const result = await postJson(PROMPT_SERVER, { prompt }) as { response: PromptResponse | null } | null
   return result?.response ?? null
 }
 
@@ -158,19 +174,23 @@ async function main(): Promise<void> {
   if (!payload) return
 
   const event = payload.hook_event_name as string | undefined
+  const sessionId = String(payload.session_id ?? 'default')
 
   switch (event) {
     case 'UserPromptSubmit': {
       const id = randomUUID()
-      await emit({ type: 'message_start', id, role: 'user', agent: AGENT })
-      await emit({ type: 'text_delta', id, text: String(payload.prompt ?? ''), agent: AGENT })
-      await emit({ type: 'message_end', id, agent: AGENT })
+      const turnId = randomUUID()
+      writeTurnId(sessionId, turnId)
+      await emit({ type: 'message_start', id, role: 'user', agent: AGENT, turn_id: turnId })
+      await emit({ type: 'text_delta', id, text: String(payload.prompt ?? ''), agent: AGENT, turn_id: turnId })
+      await emit({ type: 'message_end', id, agent: AGENT, turn_id: turnId })
       await emit({ type: 'status', value: 'thinking', agent: AGENT })
       break
     }
     case 'PreToolUse': {
       // tool_use_id is stable across PreToolUse / PostToolUse for the same call
       const id = String(payload.tool_use_id ?? randomUUID())
+      const turnId = readTurnId(sessionId)
       await emit({ type: 'status', value: 'working', agent: AGENT })
       await emit({
         type: 'tool_start',
@@ -178,6 +198,7 @@ async function main(): Promise<void> {
         name: String(payload.tool_name ?? 'unknown'),
         args: (payload.tool_input as Record<string, unknown>) ?? {},
         agent: AGENT,
+        ...(turnId ? { turn_id: turnId } : {}),
       })
       break
     }
@@ -235,18 +256,21 @@ async function main(): Promise<void> {
     }
     case 'PostToolUse': {
       const id = String(payload.tool_use_id ?? randomUUID())
-      await emit({ type: 'tool_end', id, result: payload.tool_response, agent: AGENT })
+      const turnId = readTurnId(sessionId)
+      await emit({ type: 'tool_end', id, result: payload.tool_response, agent: AGENT, ...(turnId ? { turn_id: turnId } : {}) })
       break
     }
     case 'Stop': {
-      const path = payload.transcript_path as string | undefined
-      const text = path ? lastAssistantText(path) : null
+      const transcriptPath = payload.transcript_path as string | undefined
+      const text = transcriptPath ? lastAssistantText(transcriptPath) : null
+      const turnId = readTurnId(sessionId)
       if (text) {
         const id = randomUUID()
-        await emit({ type: 'message_start', id, role: 'assistant', agent: AGENT })
-        await emit({ type: 'text_delta', id, text, agent: AGENT })
-        await emit({ type: 'message_end', id, agent: AGENT })
+        await emit({ type: 'message_start', id, role: 'assistant', agent: AGENT, ...(turnId ? { turn_id: turnId } : {}) })
+        await emit({ type: 'text_delta', id, text, agent: AGENT, ...(turnId ? { turn_id: turnId } : {}) })
+        await emit({ type: 'message_end', id, agent: AGENT, ...(turnId ? { turn_id: turnId } : {}) })
       }
+      clearTurnId(sessionId)
       await emit({ type: 'status', value: 'idle', agent: AGENT })
       break
     }
