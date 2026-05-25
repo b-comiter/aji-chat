@@ -388,7 +388,7 @@ export default function ChatScreen() {
     sendEvent({ type: 'user_message', text })
     setDraft('')
 
-        // Persist to DB so the message survives navigation (fire-and-forget)
+    // Persist to DB so the message survives navigation (fire-and-forget)
     if (chatId) {
       upsertAgent(db, chatId)
         .then(() => insertItem(db, { id: msgId, chatId, kind: 'message', data: msgData }))
