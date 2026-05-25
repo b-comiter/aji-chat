@@ -31,10 +31,8 @@ export type AgentStatus = 'thinking' | 'working' | 'idle'
 export type TurnId = string
 
 /**
- * Identifies which agent sent the event. Set by adapters that know their
- * identity (e.g. 'claude-code', 'hermes', 'simulate'). Events without this
- * field are attributed to 'unknown'. Modular — future agent pairing /
- * registration layers on top without schema changes.
+ * Identifies which agent *sent* the event ('claude-code', 'hermes', 'simulate').
+ * Events without this field are attributed to 'unknown'.
  */
 export type AgentId = string
 

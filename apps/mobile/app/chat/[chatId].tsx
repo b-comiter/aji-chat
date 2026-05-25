@@ -23,7 +23,7 @@ import {
 import { router, useLocalSearchParams } from 'expo-router'
 import { useDB } from '../../db/DBProvider'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
-import type { AgentStatus, CommandItem, ServerEvent } from '@aji/protocol'
+import type { AgentStatus, CommandItem, PromptOption, ServerEvent } from '@aji/protocol'
 import { newId } from '@aji/protocol'
 import { MarkdownMessage } from '../../components/MarkdownMessage'
 import { useWS } from '../../context/WebSocketContext'
@@ -60,7 +60,7 @@ type CommandHandler = (args: string[]) => Promise<void>
 
 interface LocalCommandHandlers {
   [name: string]: (ctx: {
-    agentId?: string
+    chatId?: string
     db: any
     items: Item[]
     setItems: (updater: (prev: Item[]) => Item[]) => void
@@ -71,7 +71,7 @@ interface LocalCommandHandlers {
 
 const createLocalCommandHandlers = (): LocalCommandHandlers => ({
   clear: (ctx) => async () => {
-    await clearAgentHistory(ctx.db, ctx.agentId ?? 'unknown')
+    await clearAgentHistory(ctx.db, ctx.chatId ?? 'unknown')
     ctx.setItems(() => [])
     ctx.addSystemMessage('Chat history cleared.')
   },
@@ -105,7 +105,7 @@ const createLocalCommandHandlers = (): LocalCommandHandlers => ({
       await fetch(`${SERVER_HTTP}/chat/dump`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agentId: ctx.agentId ?? 'unknown', items: payload }),
+        body: JSON.stringify({ chatId: ctx.chatId ?? 'unknown', items: payload }),
       })
       ctx.addSystemMessage(`Chat history sent to server log${withTools ? ' (with tools)' : ''}.`)
     } catch {
@@ -123,7 +123,7 @@ const createLocalCommandHandlers = (): LocalCommandHandlers => ({
       await fetch(`${SERVER_HTTP}/last-messages/dump`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agentId: ctx.agentId ?? 'unknown', messages }),
+        body: JSON.stringify({ chatId: ctx.chatId ?? 'unknown', messages }),
       })
       ctx.addSystemMessage(`Last ${count} message${count !== 1 ? 's' : ''} sent to server log.`)
     } catch {
@@ -142,12 +142,10 @@ const createLocalCommandHandlers = (): LocalCommandHandlers => ({
 // Item types (in-memory, deserialized from DB JSON blobs)
 // ---------------------------------------------------------------------------
 
-type PromptOpt = { id: string; label: string; allowText?: boolean }
-
 type Item =
   | { kind: 'message'; id: string; role: 'assistant' | 'user' | 'system'; text: string; done: boolean; turnId?: string }
   | { kind: 'tool'; id: string; name: string; args: Record<string, unknown>; result?: unknown; done: boolean; turnId?: string }
-  | { kind: 'prompt'; id: string; title: string; message: string; options: PromptOpt[]; turnId?: string }
+  | { kind: 'prompt'; id: string; title: string; message: string; options: PromptOption[]; turnId?: string }
 
 function rowToItem(row: ItemRow): Item {
   return JSON.parse(row.data) as Item
@@ -186,7 +184,7 @@ function ensureMessageExists(
 // ---------------------------------------------------------------------------
 
 export default function ChatScreen() {
-  const { agentId } = useLocalSearchParams<{ agentId: string }>()
+  const { chatId } = useLocalSearchParams<{ chatId: string }>()
   const db = useDB()
   const { conn, sendEvent, subscribe } = useWS()
 
@@ -220,21 +218,17 @@ export default function ChatScreen() {
 
   // Load history from SQLite on mount
   useEffect(() => {
-    if (!agentId) return
-    getItemsForAgent(db, agentId).then((rows) => {
+    if (!chatId) return
+    getItemsForAgent(db, chatId).then((rows) => {
       setItems(rows.map(rowToItem))
     })
-  }, [db, agentId])
+  }, [db, chatId])
 
-  // Subscribe to live events for this agent
+  // Subscribe to live events for this chat
   useEffect(() => {
-    if (!agentId) return
-    return subscribe(agentId, handleEvent)
-  }, [agentId, subscribe])
-
-  // ---------------------------------------------------------------------------
-  // Event handler (live events only — history comes from DB)
-  // ---------------------------------------------------------------------------
+    if (!chatId) return
+    return subscribe(chatId, handleEvent)
+  }, [chatId, subscribe])
 
   // ---------------------------------------------------------------------------
   // Event handler — defensively resilient to out-of-order arrivals
@@ -324,7 +318,7 @@ export default function ChatScreen() {
     if (!handler) return false
 
     const context = {
-      agentId,
+      chatId,
       db,
       items,
       setItems,
@@ -383,7 +377,7 @@ export default function ChatScreen() {
   const connColor =
     conn === 'connected' ? '#3fb950' : conn === 'connecting' ? '#d29922' : '#f85149'
   const canSend = draft.trim().length > 0 && conn === 'connected'
-  const displayName = agentId ? agentDisplayName(agentId) : 'Chat'
+  const displayName = chatId ? agentDisplayName(chatId) : 'Chat'
 
   return (
     <Animated.View style={[styles.screen, { paddingTop: safeTop + 12, paddingBottom: kbOffset }]}>

@@ -10,7 +10,7 @@
  *  - Fans out raw ServerEvents to per-agent subscribers so chat screens can
  *    update their live state without re-querying the database on every delta
  *
- * Each subscriber is keyed by agentId. Pass '*' to receive every event
+ * Each subscriber is keyed by chatId. Pass '*' to receive every event
  * regardless of agent (used by the home screen to update previews/status).
  */
 import {
@@ -48,8 +48,8 @@ export type ConnStatus = 'connecting' | 'connected' | 'disconnected'
 interface WSContextValue {
   conn: ConnStatus
   sendEvent: (e: ClientEvent) => void
-  /** Subscribe to events for a specific agent. Pass '*' for all events. */
-  subscribe: (agentId: string, handler: (e: ServerEvent) => void) => () => void
+  /** Subscribe to events for a specific chat (agent id). Pass '*' for all events. */
+  subscribe: (chatId: string, handler: (e: ServerEvent) => void) => () => void
 }
 
 const WSContext = createContext<WSContextValue>({
@@ -68,7 +68,7 @@ export function useWS(): WSContextValue {
 
 type InFlight = {
   kind: 'message' | 'tool'
-  agentId: string
+  chatId: string
   turnId?: string
   // message-specific
   role?: string
@@ -91,7 +91,7 @@ export function WSProvider({ children }: { children: ReactNode }) {
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const mounted = useRef(true)
 
-  // Per-agent subscriber sets. Key '*' = all-events listener.
+  // Per-chat subscriber sets. Key '*' = all-events listener.
   const subscribers = useRef<Map<string, Set<(e: ServerEvent) => void>>>(new Map())
 
   // Tracks in-flight messages/tools so we can accumulate text and write the
@@ -102,8 +102,8 @@ export function WSProvider({ children }: { children: ReactNode }) {
   // Fan-out helpers
   // ---------------------------------------------------------------------------
 
-  function notify(agentId: string, event: ServerEvent) {
-    subscribers.current.get(agentId)?.forEach((h) => h(event))
+  function notify(chatId: string, event: ServerEvent) {
+    subscribers.current.get(chatId)?.forEach((h) => h(event))
     subscribers.current.get('*')?.forEach((h) => h(event))
   }
 
@@ -112,17 +112,17 @@ export function WSProvider({ children }: { children: ReactNode }) {
   // ---------------------------------------------------------------------------
 
   async function handleEvent(event: ServerEvent): Promise<void> {
-    const agentId: string = event.agent ?? 'unknown'
+    const chatId: string = event.agent ?? 'unknown'
     const turnId: string | undefined =
       'turn_id' in event ? (event.turn_id as string | undefined) : undefined
 
     try {
       switch (event.type) {
         case 'message_start': {
-          await upsertAgent(db, agentId)
+          await upsertAgent(db, chatId)
           const item: InFlight = {
             kind: 'message',
-            agentId,
+            chatId,
             turnId,
             role: event.role,
             text: '',
@@ -130,7 +130,7 @@ export function WSProvider({ children }: { children: ReactNode }) {
           inFlight.current.set(event.id, item)
           await insertItem(db, {
             id: event.id,
-            agentId,
+            chatId,
             kind: 'message',
             data: { kind: 'message', id: event.id, role: event.role, text: '', done: false, turnId },
             turnId,
@@ -157,24 +157,24 @@ export function WSProvider({ children }: { children: ReactNode }) {
               turnId: inf.turnId,
             }
             await markItemDone(db, event.id, finalItem)
-            await updateAgentPreview(db, agentId, inf.text ?? '')
+            await updateAgentPreview(db, chatId, inf.text ?? '')
             inFlight.current.delete(event.id)
           }
           break
         }
 
         case 'tool_start': {
-          await upsertAgent(db, agentId)
+          await upsertAgent(db, chatId)
           inFlight.current.set(event.id, {
             kind: 'tool',
-            agentId,
+            chatId,
             turnId,
             name: event.name,
             args: event.args,
           })
           await insertItem(db, {
             id: event.id,
-            agentId,
+            chatId,
             kind: 'tool',
             data: { kind: 'tool', id: event.id, name: event.name, args: event.args, done: false, turnId },
             turnId,
@@ -205,10 +205,10 @@ export function WSProvider({ children }: { children: ReactNode }) {
         }
 
         case 'permission_request': {
-          await upsertAgent(db, agentId)
+          await upsertAgent(db, chatId)
           await insertItem(db, {
             id: event.id,
-            agentId,
+            chatId,
             kind: 'prompt',
             data: {
               kind: 'prompt',
@@ -224,10 +224,10 @@ export function WSProvider({ children }: { children: ReactNode }) {
         }
 
         case 'clarify': {
-          await upsertAgent(db, agentId)
+          await upsertAgent(db, chatId)
           await insertItem(db, {
             id: event.id,
-            agentId,
+            chatId,
             kind: 'prompt',
             data: {
               kind: 'prompt',
@@ -248,7 +248,7 @@ export function WSProvider({ children }: { children: ReactNode }) {
         }
 
         case 'status': {
-          await updateAgentStatus(db, agentId, event.value)
+          await updateAgentStatus(db, chatId, event.value)
           break
         }
 
@@ -260,7 +260,7 @@ export function WSProvider({ children }: { children: ReactNode }) {
     }
 
     // Fan out to subscribers regardless of DB success
-    notify(agentId, event)
+    notify(chatId, event)
   }
 
   // ---------------------------------------------------------------------------
@@ -330,13 +330,13 @@ export function WSProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const subscribe = useCallback(
-    (agentId: string, handler: (e: ServerEvent) => void): (() => void) => {
-      const set = subscribers.current.get(agentId) ?? new Set()
+    (chatId: string, handler: (e: ServerEvent) => void): (() => void) => {
+      const set = subscribers.current.get(chatId) ?? new Set()
       set.add(handler)
-      subscribers.current.set(agentId, set)
+      subscribers.current.set(chatId, set)
       return () => {
         set.delete(handler)
-        if (set.size === 0) subscribers.current.delete(agentId)
+        if (set.size === 0) subscribers.current.delete(chatId)
       }
     },
     [],

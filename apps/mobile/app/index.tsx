@@ -78,7 +78,7 @@ export default function HomeScreen() {
   // Subscribe to all WS events to patch in-memory agent rows in real-time
   useEffect(() => {
     return subscribe('*', (event: ServerEvent) => {
-      const agentId = event.agent ?? 'unknown'
+      const chatId = event.agent ?? 'unknown'
 
       setAgents((prev) => {
         switch (event.type) {
@@ -87,12 +87,12 @@ export default function HomeScreen() {
           case 'permission_request':
           case 'clarify': {
             // Ensure agent row exists (may arrive before DB upsert completes)
-            const exists = prev.some((a) => a.id === agentId)
+            const exists = prev.some((a) => a.id === chatId)
             if (exists) return prev
             return [
               {
-                id: agentId,
-                display_name: agentDisplayName(agentId),
+                id: chatId,
+                display_name: agentDisplayName(chatId),
                 last_message_preview: null,
                 last_event_at: Date.now(),
                 last_status: 'idle',
@@ -106,17 +106,17 @@ export default function HomeScreen() {
             // by re-reading from the inFlight text via the event's text accumulation.
             // Since we don't have the text here, just bump the timestamp.
             return prev.map((a) =>
-              a.id === agentId ? { ...a, last_event_at: Date.now() } : a,
+              a.id === chatId ? { ...a, last_event_at: Date.now() } : a,
             )
           }
 
           case 'status': {
-            const exists = prev.some((a) => a.id === agentId)
+            const exists = prev.some((a) => a.id === chatId)
             if (!exists) {
               return [
                 {
-                  id: agentId,
-                  display_name: agentDisplayName(agentId),
+                  id: chatId,
+                  display_name: agentDisplayName(chatId),
                   last_message_preview: null,
                   last_event_at: Date.now(),
                   last_status: event.value,
@@ -125,7 +125,7 @@ export default function HomeScreen() {
               ]
             }
             return prev.map((a) =>
-              a.id === agentId ? { ...a, last_status: event.value } : a,
+              a.id === chatId ? { ...a, last_status: event.value } : a,
             )
           }
 
