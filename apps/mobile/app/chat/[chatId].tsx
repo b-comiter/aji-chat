@@ -32,6 +32,9 @@ import {
   clearAgentHistory,
   getDbDump,
   getItemsForAgent,
+  insertItem,
+  updateAgentPreview,
+  upsertAgent,
   wipeAllHistory,
   type ItemRow,
 } from '../../db/database'
@@ -156,15 +159,14 @@ function rowToItem(row: ItemRow): Item {
 // ---------------------------------------------------------------------------
 
 /**
- * Ensure a message exists in the items array. If it doesn't exist, create it.
- * Used by message_start, text_delta, and message_end handlers to be defensive
- * against events arriving out of sequence.
+ * Ensure a message exists in the items array. Creates it if missing.
+ * Used only for out-of-order guards on message_start and text_delta — NOT for
+ * message_end (which must update an existing item, not just create one).
  */
 function ensureMessageExists(
   items: Item[],
   messageId: string,
   turnId: string | undefined,
-  done: boolean = false,
 ): Item[] {
   const exists = items.some((it) => it.kind === 'message' && it.id === messageId)
   if (exists) return items
@@ -173,7 +175,7 @@ function ensureMessageExists(
     id: messageId,
     role: 'assistant',
     text: '',
-    done,
+    done: false,
     turnId,
   }
   return [...items, newItem]
@@ -216,11 +218,29 @@ export default function ChatScreen() {
     return () => { onShow.remove(); onHide.remove() }
   }, [kbOffset, safeBottom])
 
-  // Load history from SQLite on mount
+  // Load history from SQLite on mount.
+  // Uses a functional update so that any in-flight items that arrived via WS
+  // while the async DB read was in progress are not clobbered.
+  // Filters out incomplete streaming messages (done: false on assistant/system)
+  // to avoid rehydrating orphaned cursors when the user navigates back.
   useEffect(() => {
     if (!chatId) return
     getItemsForAgent(db, chatId).then((rows) => {
-      setItems(rows.map(rowToItem))
+      setItems((current) => {
+        const dbItems = rows.map(rowToItem).filter((item) => {
+          // Keep all completed items, user messages, tools, and prompts.
+          // Filter out incomplete assistant/system messages (streaming artifacts).
+          if (item.kind === 'message' && item.role !== 'user' && !item.done) {
+            return false
+          }
+          return true
+        })
+        if (current.length === 0) return dbItems
+        // Preserve items that arrived via WS before the DB read completed
+        const dbIds = new Set(dbItems.map((i) => i.id))
+        const inFlight = current.filter((i) => !dbIds.has(i.id))
+        return [...dbItems, ...inFlight]
+      })
     })
   }, [db, chatId])
 
@@ -234,25 +254,23 @@ export default function ChatScreen() {
   // Event handler — defensively resilient to out-of-order arrivals
   // ---------------------------------------------------------------------------
   // Events may arrive out of sequence due to HTTP request reordering or
-  // async scheduling in the adapter. The ensureMessageExists() helper guards
-  // against all permutations:
-  //   • text_delta before message_start: creates item on the fly
-  //   • message_end before message_start: creates done:true placeholder
-  //   • message_start after text_delta: skips (item already exists)
-  //   • message_start after message_end: skips (item already exists)
-  //   • Normal order (start → delta → end): works as expected
+  // async scheduling in the adapter. ensureMessageExists() guards against
+  // missing message_start events:
+  //   • text_delta before message_start → creates placeholder on the fly
+  //   • message_start after text_delta → skips (item already exists)
+  //   • message_end before message_start → creates done:true placeholder
+  //   • Normal order (start → delta(s) → end) → works as expected
   function handleEvent(event: ServerEvent) {
-    console.log('Received event:', event)
     const turnId = 'turn_id' in event ? (event.turn_id as string | undefined) : undefined
 
     setItems((prev) => {
       switch (event.type) {
         case 'message_start': {
-          return ensureMessageExists(prev, event.id, turnId, false)
+          return ensureMessageExists(prev, event.id, turnId)
         }
 
         case 'text_delta': {
-          let updated = ensureMessageExists(prev, event.id, turnId, false)
+          const updated = ensureMessageExists(prev, event.id, turnId)
           return updated.map((it) =>
             it.kind === 'message' && it.id === event.id
               ? { ...it, text: it.text + event.text }
@@ -261,7 +279,16 @@ export default function ChatScreen() {
         }
 
         case 'message_end': {
-          return ensureMessageExists(prev, event.id, turnId, true)
+          // If the message exists, mark it done — triggers markdown render.
+          // If it arrived before message_start (out-of-order), create a
+          // done:true placeholder so later text_deltas have somewhere to land.
+          const exists = prev.some((it) => it.kind === 'message' && it.id === event.id)
+          if (exists) {
+            return prev.map((it) =>
+              it.kind === 'message' && it.id === event.id ? { ...it, done: true } : it
+            )
+          }
+          return [...prev, { kind: 'message', id: event.id, role: 'assistant', text: '', done: true, turnId }]
         }
 
         case 'tool_start':
@@ -352,9 +379,22 @@ export default function ChatScreen() {
     }
 
     if (conn !== 'connected') return
-    setItems((prev) => [...prev, { kind: 'message', id: newId('msg'), role: 'user', text, done: true }])
+
+    // Generate ID up-front so both in-memory state and DB use the same one
+    const msgId = newId('msg')
+    const msgData = { kind: 'message' as const, id: msgId, role: 'user' as const, text, done: true }
+
+    setItems((prev) => [...prev, msgData])
     sendEvent({ type: 'user_message', text })
     setDraft('')
+
+        // Persist to DB so the message survives navigation (fire-and-forget)
+    if (chatId) {
+      upsertAgent(db, chatId)
+        .then(() => insertItem(db, { id: msgId, chatId, kind: 'message', data: msgData }))
+        .then(() => updateAgentPreview(db, chatId, text))
+        .catch(console.warn)
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -539,6 +579,16 @@ function CommandPicker({
   )
 }
 
+// Regex matching common streaming cursor glyphs and simple ANSI show/hide sequences
+// - ▉, ▍, █, ▌: block/vertical cursor glyphs seen in different adapters
+// - |, _: simple ASCII cursors
+// - ANSI `\x1b[?25l` / `\x1b[?25h`: hide/show cursor sequences
+const STREAM_CURSOR_RE = /\s*(?:▉|▍|█|▌|\||_|\x1b\[\?25[lh])\s*$/
+
+function stripStreamingCursor(text: string): string {
+  return text.replace(STREAM_CURSOR_RE, '')
+}
+
 function Row({
   item,
   onChoose,
@@ -550,15 +600,17 @@ function Row({
 
   if (item.kind === 'message') {
     const isUser = item.role === 'user'
+    // Strip cursor before rendering; it's a streaming artifact
+    const displayText = isUser ? item.text : stripStreamingCursor(item.text)
     return (
       <View style={[styles.bubbleRow, isUser && styles.bubbleRowUser, inTurn && !isUser && styles.turnRail]}>
         <View style={[styles.bubble, isUser && styles.bubbleUser]}>
           {isUser || !item.done ? (
             <Text style={[styles.bubbleText, isUser && styles.bubbleTextUser]}>
-              {item.text}{!item.done && <Text style={styles.cursor}> ▍</Text>}
+              {displayText}{!item.done && <Text style={styles.cursor}> ▍</Text>}
             </Text>
           ) : (
-            <MarkdownMessage content={item.text} />
+            <MarkdownMessage content={displayText} />
           )}
         </View>
       </View>

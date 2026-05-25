@@ -29,10 +29,8 @@ import { useDB } from '../db/DBProvider'
 import {
   deleteItem,
   insertItem,
-  markItemDone,
   updateAgentPreview,
   updateAgentStatus,
-  updateItemData,
   upsertAgent,
 } from '../db/database'
 
@@ -119,36 +117,31 @@ export function WSProvider({ children }: { children: ReactNode }) {
     try {
       switch (event.type) {
         case 'message_start': {
-          await upsertAgent(db, chatId)
-          const item: InFlight = {
+          inFlight.current.set(event.id, {
             kind: 'message',
             chatId,
             turnId,
             role: event.role,
             text: '',
-          }
-          inFlight.current.set(event.id, item)
-          await insertItem(db, {
-            id: event.id,
-            chatId,
-            kind: 'message',
-            data: { kind: 'message', id: event.id, role: event.role, text: '', done: false, turnId },
-            turnId,
           })
+
+          upsertAgent(db, chatId).catch((err) =>
+            console.warn('[WSContext] upsertAgent error', err),
+          )
           break
         }
 
         case 'text_delta': {
           const inf = inFlight.current.get(event.id)
           if (inf) inf.text = (inf.text ?? '') + event.text
-          // No DB write here — we write the accumulated text on message_end
           break
         }
 
         case 'message_end': {
           const inf = inFlight.current.get(event.id)
           if (inf) {
-            const finalItem = {
+            inFlight.current.delete(event.id)
+            const finalData = {
               kind: 'message' as const,
               id: event.id,
               role: inf.role ?? 'assistant',
@@ -156,15 +149,23 @@ export function WSProvider({ children }: { children: ReactNode }) {
               done: true,
               turnId: inf.turnId,
             }
-            await markItemDone(db, event.id, finalItem)
-            await updateAgentPreview(db, chatId, inf.text ?? '')
-            inFlight.current.delete(event.id)
+            // Upsert agent first (FK dependency), then insert the complete row.
+            await upsertAgent(db, inf.chatId)
+            await insertItem(db, {
+              id: event.id,
+              chatId: inf.chatId,
+              kind: 'message',
+              data: finalData,
+              turnId: inf.turnId,
+            })
+            await updateAgentPreview(db, inf.chatId, inf.text ?? '')
           }
           break
         }
 
         case 'tool_start': {
-          await upsertAgent(db, chatId)
+          // Same pattern as message_start — register inFlight synchronously,
+          // no DB write until tool_end delivers the complete result.
           inFlight.current.set(event.id, {
             kind: 'tool',
             chatId,
@@ -172,35 +173,34 @@ export function WSProvider({ children }: { children: ReactNode }) {
             name: event.name,
             args: event.args,
           })
-          await insertItem(db, {
-            id: event.id,
-            chatId,
-            kind: 'tool',
-            data: { kind: 'tool', id: event.id, name: event.name, args: event.args, done: false, turnId },
-            turnId,
-          })
+          upsertAgent(db, chatId).catch((err) =>
+            console.warn('[WSContext] upsertAgent error', err),
+          )
           break
         }
 
         case 'tool_end': {
           const inf = inFlight.current.get(event.id)
           if (inf) {
-            await markItemDone(db, event.id, {
-              kind: 'tool',
+            inFlight.current.delete(event.id)
+            await upsertAgent(db, inf.chatId)
+            await insertItem(db, {
               id: event.id,
-              name: inf.name ?? 'unknown',
-              args: inf.args ?? {},
-              result: event.result,
-              done: true,
+              chatId: inf.chatId,
+              kind: 'tool',
+              data: {
+                kind: 'tool',
+                id: event.id,
+                name: inf.name ?? 'unknown',
+                args: inf.args ?? {},
+                result: event.result,
+                done: true,
+                turnId: inf.turnId,
+              },
               turnId: inf.turnId,
             })
-            inFlight.current.delete(event.id)
-          } else {
-            // tool_start may have arrived before we started listening; just update
-            await updateItemData(db, event.id, {
-              kind: 'tool', id: event.id, result: event.result, done: true, turnId,
-            })
           }
+          // If there's no inFlight entry, tool_start was missed entirely — skip.
           break
         }
 
