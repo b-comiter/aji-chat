@@ -4,8 +4,12 @@
  * Two tables:
  *  agents — one row per known agent, tracks preview text and last status
  *  items  — all messages, tool calls, and prompts, stored as JSON blobs
+ *            keyed by chat_id (= the agent identity, e.g. 'claude-code')
  *
  * Called via SQLiteProvider / useSQLiteContext (expo-sqlite v15+).
+ *
+ * Schema versions:
+ *  0→2  dropped agent_id, introduced chat_id (dev reset — no data migration)
  */
 import type { SQLiteDatabase } from 'expo-sqlite'
 
@@ -29,9 +33,17 @@ export function agentDisplayName(id: string): string {
 // ---------------------------------------------------------------------------
 
 export async function migrateDb(db: SQLiteDatabase): Promise<void> {
-  await db.execAsync(`
-    PRAGMA journal_mode = WAL;
+  await db.execAsync('PRAGMA journal_mode = WAL;')
 
+  const [{ user_version: version }] = await db.getAllAsync<{ user_version: number }>('PRAGMA user_version')
+
+  if (version < 2) {
+    // v0→v2: agent_id renamed to chat_id. Dev project — drop and recreate.
+    await db.execAsync('DROP TABLE IF EXISTS items; DROP TABLE IF EXISTS agents;')
+    await db.execAsync('PRAGMA user_version = 2')
+  }
+
+  await db.execAsync(`
     CREATE TABLE IF NOT EXISTS agents (
       id                   TEXT PRIMARY KEY,
       display_name         TEXT NOT NULL,
@@ -43,7 +55,7 @@ export async function migrateDb(db: SQLiteDatabase): Promise<void> {
     CREATE TABLE IF NOT EXISTS items (
       local_id   INTEGER PRIMARY KEY AUTOINCREMENT,
       id         TEXT    NOT NULL,
-      agent_id   TEXT    NOT NULL REFERENCES agents(id),
+      chat_id    TEXT    NOT NULL REFERENCES agents(id),
       kind       TEXT    NOT NULL,
       data       TEXT    NOT NULL,
       turn_id    TEXT,
@@ -51,7 +63,7 @@ export async function migrateDb(db: SQLiteDatabase): Promise<void> {
       created_at INTEGER NOT NULL
     );
 
-    CREATE INDEX IF NOT EXISTS items_by_agent ON items(agent_id, created_at);
+    CREATE INDEX IF NOT EXISTS items_by_chat ON items(chat_id, created_at);
   `)
 }
 
@@ -70,7 +82,7 @@ export type AgentRow = {
 export type ItemRow = {
   local_id: number
   id: string
-  agent_id: string
+  chat_id: string
   kind: string
   data: string        // JSON — deserialise with JSON.parse
   turn_id: string | null
@@ -136,17 +148,17 @@ export async function insertItem(
   db: SQLiteDatabase,
   opts: {
     id: string
-    agentId: string
+    chatId: string
     kind: string
     data: object
     turnId?: string
   },
 ): Promise<void> {
   await db.runAsync(
-    `INSERT INTO items (id, agent_id, kind, data, turn_id, done, created_at)
+    `INSERT INTO items (id, chat_id, kind, data, turn_id, done, created_at)
      VALUES (?, ?, ?, ?, ?, 0, ?)`,
     opts.id,
-    opts.agentId,
+    opts.chatId,
     opts.kind,
     JSON.stringify(opts.data),
     opts.turnId ?? null,
@@ -184,11 +196,11 @@ export async function deleteItem(db: SQLiteDatabase, id: string): Promise<void> 
 
 export async function getItemsForAgent(
   db: SQLiteDatabase,
-  agentId: string,
+  chatId: string,
 ): Promise<ItemRow[]> {
   return db.getAllAsync<ItemRow>(
-    `SELECT * FROM items WHERE agent_id = ? ORDER BY created_at ASC`,
-    agentId,
+    `SELECT * FROM items WHERE chat_id = ? ORDER BY created_at ASC`,
+    chatId,
   )
 }
 
@@ -199,9 +211,9 @@ export async function getItemsForAgent(
 /** Delete all items for one agent. Keeps the agent row (preserves preview/status). */
 export async function clearAgentHistory(
   db: SQLiteDatabase,
-  agentId: string,
+  chatId: string,
 ): Promise<void> {
-  await db.runAsync(`DELETE FROM items WHERE agent_id = ?`, agentId)
+  await db.runAsync(`DELETE FROM items WHERE chat_id = ?`, chatId)
 }
 
 /** Delete every item and every agent row — full DB reset. */
@@ -221,7 +233,7 @@ export async function getDbDump(db: SQLiteDatabase): Promise<DbDumpResult> {
 
   for (const agent of agents) {
     const rows = await db.getAllAsync<{ kind: string; cnt: number }>(
-      `SELECT kind, COUNT(*) as cnt FROM items WHERE agent_id = ? GROUP BY kind`,
+      `SELECT kind, COUNT(*) as cnt FROM items WHERE chat_id = ? GROUP BY kind`,
       agent.id,
     )
     itemCounts[agent.id] = { messages: 0, tools: 0, prompts: 0 }
