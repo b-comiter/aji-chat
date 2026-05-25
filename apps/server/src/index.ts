@@ -1,3 +1,4 @@
+import type { Server as HttpServer } from 'node:http'
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { serve } from '@hono/node-server'
@@ -5,11 +6,13 @@ import { WebSocketServer, WebSocket } from 'ws'
 import type { ClientEvent, PermissionRequest, PromptResponse, ServerEvent } from '@aji/protocol'
 import { textMessage } from '@aji/protocol'
 
+const PORT = 4000
+
 const app = new Hono()
 app.use('*', cors())
 const clients = new Set<WebSocket>()
 const webhooks = new Set<string>()
-const promptWaiters = new Map<string, { resolve: (event: PromptResponse | null) => void; timer: ReturnType<typeof setTimeout> }>()
+const promptWaiters = new Map<string, { resolve: (event: PromptResponse | null) => void }>()
 
 // ---------------------------------------------------------------------------
 // Logging
@@ -30,10 +33,6 @@ function log(direction: '→' | '←' | ' ', tag: string, detail?: unknown): voi
   }
 }
 
-interface WaitForPromptBody {
-  prompt: PermissionRequest
-  timeoutMs?: number
-}
 
 // ---------------------------------------------------------------------------
 // Broadcast helpers
@@ -70,24 +69,16 @@ function dismissPrompt(id: string): void {
 function resolvePrompt(event: PromptResponse): boolean {
   const waiter = promptWaiters.get(event.id)
   if (!waiter) return false
-  clearTimeout(waiter.timer)
   promptWaiters.delete(event.id)
   dismissPrompt(event.id)
   waiter.resolve(event)
   return true
 }
 
-function waitForPrompt(prompt: PermissionRequest, timeoutMs: number): Promise<PromptResponse | null> {
+function waitForPrompt(prompt: PermissionRequest): Promise<PromptResponse | null> {
   broadcast(prompt)
-
   return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      promptWaiters.delete(prompt.id)
-      dismissPrompt(prompt.id)
-      resolve(null)
-    }, timeoutMs)
-
-    promptWaiters.set(prompt.id, { resolve, timer })
+    promptWaiters.set(prompt.id, { resolve })
   })
 }
 
@@ -114,31 +105,30 @@ app.post('/send', async (c) => {
   return c.json({ sent })
 })
 
-/** Broadcast a permission prompt and wait for the first client response. */
+/** Broadcast a permission prompt and wait indefinitely for the first client response. */
 app.post('/prompt/wait', async (c) => {
-  const { prompt, timeoutMs = 15000 } = await c.req.json<WaitForPromptBody>()
-  log(' ', `POST /prompt/wait  id=${prompt.id} timeout=${timeoutMs}ms title="${prompt.title}"`)
+  const { prompt } = await c.req.json<{ prompt: PermissionRequest }>()
+  log(' ', `POST /prompt/wait  id=${prompt.id} title="${prompt.title}"`)
 
-  // If the hook process exits mid-wait (e.g. desktop native dialog was
-  // approved and Claude Code killed the hook), the HTTP connection drops and
-  // the abort signal fires. Cancel immediately so mobile doesn't linger.
+  // If the hook process exits mid-wait (e.g. desktop native dialog was approved
+  // and Claude Code killed the hook), the HTTP connection drops and the abort
+  // signal fires. Cancel immediately so mobile doesn't linger.
   c.req.raw.signal.addEventListener('abort', () => {
     const waiter = promptWaiters.get(prompt.id)
     if (waiter) {
-      clearTimeout(waiter.timer)
       promptWaiters.delete(prompt.id)
       waiter.resolve(null)
     }
     dismissPrompt(prompt.id)
   })
 
-  const response = await waitForPrompt(prompt, timeoutMs)
+  const response = await waitForPrompt(prompt)
   if (response) {
     log('←', `prompt/wait resolved  id=${prompt.id} choice=${response.choice}`)
   } else {
-    log(' ', `prompt/wait timed out or aborted  id=${prompt.id}`)
+    log(' ', `prompt/wait aborted  id=${prompt.id}`)
   }
-  return c.json({ response, timedOut: response === null })
+  return c.json({ response })
 })
 
 /**
@@ -152,7 +142,6 @@ app.post('/prompt/cancel/:id', (c) => {
   log(' ', `POST /prompt/cancel  id=${id}`)
   const waiter = promptWaiters.get(id)
   if (waiter) {
-    clearTimeout(waiter.timer)
     promptWaiters.delete(id)
     waiter.resolve(null)
   }
@@ -209,8 +198,8 @@ app.post('/db/dump', async (c) => {
  * Pass with-tools on the mobile side to include tool rows.
  */
 app.post('/chat/dump', async (c) => {
-  const { agentId, items } = await c.req.json<{
-    agentId: string
+  const { chatId, items } = await c.req.json<{
+    chatId: string
     items: Array<{
       kind: 'message' | 'tool'
       role?: string
@@ -222,10 +211,10 @@ app.post('/chat/dump', async (c) => {
     }>
   }>()
 
-  log(' ', `POST /chat/dump  agent=${agentId} items=${items.length}`)
+  log(' ', `POST /chat/dump  chat=${chatId} items=${items.length}`)
 
   if (items.length === 0) {
-    console.log(`\n[CHAT DUMP] No items for agent "${agentId}".\n`)
+    console.log(`\n[CHAT DUMP] No items for chat "${chatId}".\n`)
     return c.json({ logged: true })
   }
 
@@ -243,7 +232,7 @@ app.post('/chat/dump', async (c) => {
     }
   })
 
-  console.log(`\n[CHAT DUMP] agent=${agentId}`)
+  console.log(`\n[CHAT DUMP] chat=${chatId}`)
   console.table(rows)
   console.log('')
 
@@ -255,8 +244,8 @@ app.post('/chat/dump', async (c) => {
  * server console. Triggered by the /view-last-n-msgs slash command.
  */
 app.post('/last-messages/dump', async (c) => {
-  const { agentId, messages } = await c.req.json<{
-    agentId: string
+  const { chatId, messages } = await c.req.json<{
+    chatId: string
     messages: Array<{
       id: string
       role: 'assistant' | 'user' | 'system'
@@ -265,14 +254,14 @@ app.post('/last-messages/dump', async (c) => {
     }>
   }>()
 
-  log(' ', `POST /last-messages/dump  agent=${agentId} messages=${messages.length}`)
+  log(' ', `POST /last-messages/dump  chat=${chatId} messages=${messages.length}`)
 
   if (messages.length === 0) {
-    console.log(`\n[LAST MESSAGES] No messages for agent "${agentId}".\n`)
+    console.log(`\n[LAST MESSAGES] No messages for chat "${chatId}".\n`)
     return c.json({ logged: true })
   }
 
-  console.log(`\n[LAST MESSAGES] agent=${agentId} (${messages.length} message${messages.length !== 1 ? 's' : ''})`)
+  console.log(`\n[LAST MESSAGES] chat=${chatId} (${messages.length} message${messages.length !== 1 ? 's' : ''})`)
 
   messages.forEach((msg, i) => {
     console.log(msg)
@@ -320,12 +309,11 @@ app.delete('/webhook', async (c) => {
 // WebSocket server — phone-facing
 // ---------------------------------------------------------------------------
 
-const server = serve({ fetch: app.fetch, port: 4000 }, (info) => {
+const server = serve({ fetch: app.fetch, port: PORT }, (info) => {
   console.log(`server listening on port ${info.port}`)
-})
+}) as HttpServer
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const wss = new WebSocketServer({ server: server as any, path: '/ws' })
+const wss = new WebSocketServer({ server, path: '/ws' })
 
 wss.on('connection', (ws) => {
   clients.add(ws)
