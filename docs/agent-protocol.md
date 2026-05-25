@@ -128,8 +128,9 @@ vocabulary.
 Seven of the ten event types carry an optional `turn_id` that groups everything
 belonging to one agent turn. The Hermes adapter mints a UUID in
 `on_processing_start` and stamps it on every outbound event until
-`on_processing_complete`. The Claude Code hook path leaves `turn_id` unset;
-mobile falls back to chronological ordering.
+`on_processing_complete`. The Claude Code hook mints a UUID on `UserPromptSubmit`,
+persists it per-session, and attaches it to all subsequent tool and message events
+in that turn. If unset (e.g. from the simulator), mobile falls back to chronological ordering.
 
 ```ts
 // Message lifecycle
@@ -167,6 +168,23 @@ mobile falls back to chronological ordering.
 { type: "prompt_response", id: "p1", choice: "once" }
 { type: "get_commands" }                           // request the slash command list
 ```
+
+---
+
+## Identifier Glossary
+
+Every event and DB row uses identifiers with specific, distinct meanings:
+
+| Identifier | Type | Layer | Meaning |
+|---|---|---|---|
+| `id` | `string` | Protocol — most events | Opaque string minted by `newId()` (format: `"msg_lk3p9q_4"`). Shared across a message triplet (`message_start` / `text_delta` / `message_end`) and a tool pair (`tool_start` / `tool_end`). Echoed back in `PromptResponse.id`. |
+| `turn_id` (`TurnId`) | `string` | Protocol — optional | Groups all events from one agent turn (user prompt → tool calls → assistant reply). Hermes mints a UUID in `on_processing_start`. The Claude Code hook mints one on `UserPromptSubmit` and writes it to a temp file so subsequent `PreToolUse`, `PostToolUse`, and `Stop` events carry the same value. If unset, mobile falls back to chronological ordering. |
+| `agent` (`AgentId`) | `string` | Protocol — optional | Identifies the *sending system* (`'claude-code'`, `'hermes'`, `'simulate'`). If absent, attributed to `'unknown'`. This is distinct from `chat_id` — it names who sent the event, not which conversation it belongs to. |
+| `chat_id` | `string` | DB — `items.chat_id` | Foreign key into `agents.id`. Groups all messages, tool calls, and prompts under one conversation thread. Equivalent to `chat_id` in Hermes (`adapter.py`, `client.py`, `state.py`). In the current one-agent-one-chat model, `chat_id` equals the agent identity (`'claude-code'`, `'hermes'`). |
+| `local_id` | `integer` | DB only | SQLite `AUTOINCREMENT` row ID in the `items` table. Never appears in the protocol or any API response — purely internal to the DB layer. |
+| broadcast | _(concept)_ | Server | Every `ServerEvent` posted to `/event` is forwarded to **all** connected WebSocket clients simultaneously. No per-client routing or filtering. |
+
+> **Hermes callers:** aji-chat's `chat_id` maps directly to Hermes's `chat_id` from `SessionSource`. The difference: in Hermes it's a platform chat identifier (e.g. a Telegram chat ID); in aji-chat it's the agent identity string. Both serve as the conversation-grouping key.
 
 ---
 

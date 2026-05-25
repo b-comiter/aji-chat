@@ -46,8 +46,6 @@ Claude Code Desktop
 
 ## Permission Request Flow (Dual-Endpoint)
 
-### Current State (After Hook Reinstall)
-
 When Claude Code needs a permission (e.g., "Allow read file?"):
 
 ```
@@ -55,7 +53,7 @@ Claude Code Desktop          Hook                 Server              Mobile
         │                     │                     │                   │
         ├─ PermissionRequest──>│                     │                   │
         │                     ├─ POST /prompt/wait──>│                   │
-        │                     │  (timeoutMs: 5000)   ├─ broadcast ──────>│
+        │                     │  (waits indefinitely)├─ broadcast ──────>│
         │                     │                     │  permission        │
         │    Shows native     │                     │                    │
         │    permission       │                     │  Shows prompt      │
@@ -63,35 +61,28 @@ Claude Code Desktop          Hook                 Server              Mobile
         │                     │                     │                    │
         │   [Case 1: Mobile responds first]         │                    │
         │                     │                     │<─ prompt_response──┤
-        │                     │<─ response ─────────┤                    │
-        │<─ decision ─────────┤                     │                    │
-        │ (allow/deny)        │  ⚠️ ISSUE:         │                    │
-        │ (✅ dismisses)      │  Hook does NOT     │                    │
-        │                     │  cancel mobile     │ (❌ NOT dismissed) │
+        │                     │<─ response ─────────┤  resolvePrompt()   │
+        │<─ decision ─────────┤                     ├─ prompt_dismiss ──>│
+        │ (allow/deny)        │                     │  (dismissed ✓)     │
         │                     │                     │                    │
         │   [Case 2: Desktop responds first]        │                    │
         │                     │                     │                    │
         ├─ user chooses ─────>│                     │                    │
-        │ Allow/Deny/Suggest  │                     │                    │
-        │ in native dialog    │                     │                    │
-        │                     │ (hook outputs       │                    │
-        │                     │  decision)          │                    │
-        │                     │                     │                    │
-        │                     │ ⚠️ MISSING:        │                    │
-        │                     │ Should call        │ (❌ still pending) │
-        │                     │ /prompt/cancel     │                    │
-        │                     │                     │                    │
+        │ Allow/Deny/Suggest  │ hook outputs        │                    │
+        │ in native dialog    │ decision + aborts   │                    │
+        │                     │ the fetch           │<── still pending ──┤
+        │                     │                     │  (abort cleans up  │
+        │                     │                     │   server waiter,   │
+        │                     │                     │   but mobile not   │
+        │                     │                     │   dismissed ⚠️)   │
 ```
 
 ### Observed Behavior
 
-✅ **Mobile responds first** → Desktop automatically dismisses  
-❌ **Desktop responds first** → Mobile stays pending (doesn't dismiss)
+✅ **Mobile responds first** → `resolvePrompt()` broadcasts `prompt_dismiss`; desktop gets decision  
+⚠️ **Desktop responds first** → Hook aborts the fetch; server cleans up the waiter via the abort handler; mobile prompt is **not** dismissed
 
-**Why this asymmetry?**
-- When mobile responds, the server's `resolvePrompt()` function (line 48-56 in server/src/index.ts) calls `dismissPrompt()` which broadcasts `prompt_dismiss` to all clients
-- When desktop responds, the hook outputs a decision but **doesn't** notify the server to cancel the mobile prompt
-- Mobile has no way to know the permission was already decided on desktop
+**Known gap:** When desktop responds, the hook does not call `POST /prompt/cancel/:id`. The endpoint is implemented on the server — calling it after a desktop decision would make the behavior symmetrical. This is a future hook improvement.
 
 ---
 
@@ -101,8 +92,7 @@ Claude Code Desktop          Hook                 Server              Mobile
 
 **Key variables:**
 - `SERVER` (env: `AJI_SERVER`, default: `http://localhost:4000/event`) — where to POST events
-- `PROMPT_SERVER` (env: `AJI_PROMPT_SERVER`, default: `http://localhost:4000/prompt/wait`) — where to wait for permission responses
-- `PERMISSION_WAIT_MS` (env: `AJI_PERMISSION_WAIT_MS`, default: `15000`) — timeout for waiting on mobile response
+- `PROMPT_SERVER` (env: `AJI_PROMPT_SERVER`, default: `http://localhost:4000/prompt/wait`) — where to wait for permission responses (waits indefinitely)
 
 **Main function:**
 ```ts
@@ -125,9 +115,9 @@ async function main() {
 **Permission handling:**
 1. Builds permission options from payload
 2. POSTs permission to `/prompt/wait` endpoint
-3. **Waits for response** (default 15s, can be shortened via env var)
+3. **Waits indefinitely** for the user to respond on mobile
 4. If response arrives → translates to Claude Code hook format and outputs
-5. If timeout → outputs nothing, Claude Code falls back to native dialog
+5. If the HTTP connection drops (e.g. desktop native dialog was used) → server abort handler cleans up the waiter
 
 ---
 
@@ -138,9 +128,13 @@ async function main() {
 **HTTP Endpoints (Agent-facing):**
 - `POST /event` — Broadcast a single ServerEvent to all WebSocket clients
 - `POST /send` — Convenience: expand plain string into message events
-- `POST /prompt/wait` — Wait for permission response from mobile, timeout-aware
+- `POST /prompt/wait` — Broadcast permission prompt and wait indefinitely for mobile response
+- `POST /prompt/cancel/:id` — Cancel a pending prompt; dismisses it on mobile and resolves any waiting `/prompt/wait` call
+- `POST /prompt/respond` — Inject a prompt response (used by the simulator UI)
 - `POST /webhook` — Register webhook URL for client events
 - `DELETE /webhook` — Deregister webhook
+- `POST /db/dump`, `POST /chat/dump`, `POST /last-messages/dump` — Debug: receive data from mobile and print to server console
+- `GET /status` — Connected client count (polled by simulator)
 
 **WebSocket Server (Phone-facing):**
 - Maintains `Set<WebSocket>` of connected clients
@@ -149,17 +143,12 @@ async function main() {
 
 **Permission waiting logic:**
 ```ts
-function waitForPrompt(prompt, timeoutMs) {
+function waitForPrompt(prompt) {
   broadcast(prompt)  // Send to all clients
-  
+
+  // No timeout — waits indefinitely until mobile responds or connection drops
   return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      promptWaiters.delete(prompt.id)
-      dismissPrompt(prompt.id)  // ← Broadcasts prompt_dismiss
-      resolve(null)
-    }, timeoutMs)
-    
-    promptWaiters.set(prompt.id, { resolve, timer })
+    promptWaiters.set(prompt.id, { resolve })
   })
 }
 ```
@@ -168,7 +157,7 @@ When mobile responds:
 ```ts
 function resolvePrompt(event) {
   const waiter = promptWaiters.get(event.id)
-  clearTimeout(waiter.timer)
+  promptWaiters.delete(event.id)
   dismissPrompt(event.id)  // ← Broadcasts prompt_dismiss to all clients
   waiter.resolve(event)    // ← Resolves hook's promise
 }
@@ -176,41 +165,9 @@ function resolvePrompt(event) {
 
 ---
 
-## Current Limitations & Next Steps
+## Known Limitation
 
-### Issue: Desktop approval doesn't dismiss mobile
-
-**Root cause:** Hook doesn't call server to cancel the prompt when desktop approves.
-
-**Solution:** Implement two changes:
-
-1. **Add cancellation endpoint** on server:
-   ```ts
-   app.post('/prompt/cancel/:id', (c) => {
-     const { id } = c.req.param()
-     dismissPrompt(id)
-     promptWaiters.delete(id)
-     return c.json({ cancelled: true })
-   })
-   ```
-
-2. **Modify hook** to call cancel after outputting decision:
-   ```ts
-   case 'PermissionRequest':
-     const promptId = randomUUID()
-     const response = await waitForPermission({ ...prompt, id: promptId })
-     
-     if (response) {
-       writeHookJson({ hookSpecificOutput: { decision: ... } })
-       // NEW: Notify server to cancel mobile prompt
-       await fetch(`${SERVER.replace('/event', '')}/prompt/cancel/${promptId}`, {
-         method: 'POST'
-       })
-     }
-     break
-   ```
-
-This will make the behavior **symmetrical**: whichever endpoint responds first will dismiss the other.
+**Desktop approval doesn't dismiss mobile.** When the desktop native dialog is used, the hook aborts the `/prompt/wait` fetch. The server's abort handler cleans up the waiter but does not call `dismissPrompt()`. To make this symmetrical, the hook should call `POST /prompt/cancel/:id` after outputting its decision — the endpoint is already implemented on the server.
 
 ---
 
@@ -235,7 +192,6 @@ Set environment variables to customize behavior:
 ```bash
 export AJI_SERVER=http://localhost:4000/event
 export AJI_PROMPT_SERVER=http://localhost:4000/prompt/wait
-export AJI_PERMISSION_WAIT_MS=5000  # Shorter timeout for faster desktop fallback
 ```
 
 ### Testing
