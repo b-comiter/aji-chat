@@ -38,6 +38,17 @@ export async function migrateDb(db: SQLiteDatabase): Promise<void> {
     await db.execAsync('PRAGMA user_version = 2')
   }
 
+  if (version < 3) {
+    // v2→v3: add key-value settings table for user preferences (e.g. theme).
+    await db.execAsync(`
+      CREATE TABLE IF NOT EXISTS settings (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+    `)
+    await db.execAsync('PRAGMA user_version = 3')
+  }
+
   await db.execAsync(`
     CREATE TABLE IF NOT EXISTS agents (
       id                   TEXT PRIMARY KEY,
@@ -214,6 +225,26 @@ export async function clearAgentHistory(
 /** Delete every item and every agent row — full DB reset. */
 export async function wipeAllHistory(db: SQLiteDatabase): Promise<void> {
   await db.execAsync(`DELETE FROM items; DELETE FROM agents;`)
+}
+
+// ---------------------------------------------------------------------------
+// Settings (key-value store)
+// ---------------------------------------------------------------------------
+export async function getSetting(db: SQLiteDatabase, key: string): Promise<string | null> {
+  const row = await db.getFirstAsync<{ value: string }>(
+    `SELECT value FROM settings WHERE key = ?`,
+    key,
+  )
+  return row?.value ?? null
+}
+
+export async function setSetting(db: SQLiteDatabase, key: string, value: string): Promise<void> {
+  await db.runAsync(
+    `INSERT INTO settings (key, value) VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    key,
+    value,
+  )
 }
 
 export type DbDumpResult = {

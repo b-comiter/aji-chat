@@ -1,4 +1,8 @@
-export const colors = {
+// ---------------------------------------------------------------------------
+// Dark theme — GitHub-inspired dark palette
+// ---------------------------------------------------------------------------
+
+export const darkColors = {
   // Backgrounds — mirrors mobile-mockup.html :root CSS variables
   bg:         '#0d1117',   // --bg
   surface:    '#161b22',   // --surface
@@ -30,9 +34,52 @@ export const colors = {
   toolDim:    '#4c3b73',   // --tool-dim
 } as const
 
-// Syntax highlighting token colors — design tokens, not language brand colors.
-// LANG_COLORS (language brand dots) stays local to MarkdownMessage.
-export const tokenColors: Record<string, string> = {
+// ---------------------------------------------------------------------------
+// Light theme — GitHub Light palette
+// ---------------------------------------------------------------------------
+
+export const lightColors = {
+  // Backgrounds
+  bg:         '#ffffff',
+  surface:    '#f6f8fa',
+  surface2:   '#eaeef2',
+  surface3:   '#e0e4e9',
+
+  // Borders
+  border:     '#d0d7de',
+  borderAlt:  '#adb5bd',
+  borderCode: '#c9d1d9',
+
+  // Text
+  text:       '#1f2328',
+  textMuted:  '#636c76',
+  textDim:    '#818b98',
+  textFaint:  '#c9d1d9',
+
+  // Accent
+  accent:     '#0969da',
+  accentDim:  '#dde6f5',
+
+  // Semantic
+  success:    '#1a7f37',
+  warn:       '#9a6700',
+  danger:     '#d1242f',
+
+  // Tool / AI
+  tool:       '#8250df',
+  toolDim:    '#f1e8ff',
+} as const
+
+/** Shared shape for both themes — use as the parameter type in makeStyles().
+ *  Values are typed as `string` (not literal types) so both palettes are assignable. */
+export type ThemeColors = { readonly [K in keyof typeof darkColors]: string }
+
+// ---------------------------------------------------------------------------
+// Syntax highlighting token colors
+// ---------------------------------------------------------------------------
+
+/** Dark tokens — Atom One Dark inspired */
+export const darkTokenColors: Record<string, string> = {
   keyword:     '#ff6b6b',
   built_in:    '#61afef',
   literal:     '#61afef',
@@ -51,6 +98,39 @@ export const tokenColors: Record<string, string> = {
   symbol:      '#d16d9e',
   name:        '#e5c07b',
 }
+
+/** Light tokens — GitHub Light Colorblind inspired */
+export const lightTokenColors: Record<string, string> = {
+  keyword:     '#cf222e',
+  built_in:    '#0550ae',
+  literal:     '#0550ae',
+  number:      '#0550ae',
+  string:      '#0a3069',
+  attr:        '#116329',
+  function:    '#6639ba',
+  class:       '#953800',
+  comment:     '#6e7781',
+  punctuation: '#24292f',
+  operator:    '#cf222e',
+  variable:    '#24292f',
+  title:       '#6639ba',
+  section:     '#0550ae',
+  meta:        '#116329',
+  symbol:      '#953800',
+  name:        '#953800',
+}
+
+// ---------------------------------------------------------------------------
+// Static aliases — point to dark theme.
+// Non-component code (e.g. utility functions) can import these directly.
+// Component code should call useTheme() instead.
+// ---------------------------------------------------------------------------
+export const colors = darkColors
+export const tokenColors = darkTokenColors
+
+// ---------------------------------------------------------------------------
+// Non-color design tokens (identical across all themes)
+// ---------------------------------------------------------------------------
 
 export const typography = {
   fontMono: 'Menlo',

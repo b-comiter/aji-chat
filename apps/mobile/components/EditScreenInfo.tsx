@@ -3,21 +3,22 @@ import { StyleSheet, Text, View } from 'react-native';
 
 import { ExternalLink } from './ExternalLink';
 import { MonoText } from './StyledText';
-import { colors } from '../constants/theme';
+import { useTheme } from '../context/ThemeContext';
 
 export default function EditScreenInfo({ path }: { path: string }) {
+  const { colors } = useTheme();
   return (
     <View>
       <View style={styles.getStartedContainer}>
-        <Text style={styles.getStartedText}>
+        <Text style={[styles.getStartedText, { color: colors.text }]}>
           Open up the code for this screen:
         </Text>
 
-        <View style={[styles.codeHighlightContainer, styles.homeScreenFilename]}>
+        <View style={styles.codeHighlightContainer}>
           <MonoText>{path}</MonoText>
         </View>
 
-        <Text style={styles.getStartedText}>
+        <Text style={[styles.getStartedText, { color: colors.text }]}>
           Change any of the text, save the file, and your app will automatically update.
         </Text>
       </View>
@@ -26,7 +27,7 @@ export default function EditScreenInfo({ path }: { path: string }) {
         <ExternalLink
           style={styles.helpLink}
           href="https://docs.expo.io/get-started/create-a-new-app/#opening-the-app-on-your-phonetablet">
-          <Text style={styles.helpLinkText}>
+          <Text style={[styles.helpLinkText, { color: colors.accent }]}>
             Tap here if your app doesn't automatically update after making changes
           </Text>
         </ExternalLink>
@@ -40,19 +41,16 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginHorizontal: 50,
   },
-  homeScreenFilename: {
-    marginVertical: 7,
-  },
   codeHighlightContainer: {
     borderRadius: 3,
     paddingHorizontal: 4,
+    marginVertical: 7,
     backgroundColor: 'rgba(255,255,255,0.05)',
   },
   getStartedText: {
     fontSize: 17,
     lineHeight: 24,
     textAlign: 'center',
-    color: colors.text,
   },
   helpContainer: {
     marginTop: 15,
@@ -64,6 +62,5 @@ const styles = StyleSheet.create({
   },
   helpLinkText: {
     textAlign: 'center',
-    color: colors.accent,
   },
 });

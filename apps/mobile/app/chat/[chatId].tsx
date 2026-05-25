@@ -8,7 +8,7 @@
  *
  * No WebSocket management here — that lives in WSProvider (context).
  */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Animated,
   FlatList,
@@ -27,6 +27,7 @@ import type { AgentStatus, CommandItem, PromptOption, ServerEvent } from '@aji/p
 import { newId } from '@aji/protocol'
 import { MarkdownMessage } from '../../components/MarkdownMessage'
 import { useWS } from '../../context/WebSocketContext'
+import { useTheme } from '../../context/ThemeContext'
 import {
   agentDisplayName,
   clearAgentHistory,
@@ -38,7 +39,8 @@ import {
   wipeAllHistory,
   type ItemRow,
 } from '../../db/database'
-import { colors, spacing, typography, radius } from '../../constants/theme'
+import { spacing, typography, radius } from '../../constants/theme'
+import type { ThemeColors } from '../../constants/theme'
 
 const SERVER_HTTP = `http://${process.env.EXPO_PUBLIC_SERVER_HOST}:4000`
 
@@ -190,6 +192,8 @@ export default function ChatScreen() {
   const { chatId } = useLocalSearchParams<{ chatId: string }>()
   const db = useDB()
   const { conn, sendEvent, subscribe } = useWS()
+  const { colors } = useTheme()
+  const styles = useMemo(() => makeStyles(colors), [colors])
 
   const [items, setItems] = useState<Item[]>([])
   const [agentStatus, setAgentStatus] = useState<AgentStatus>('idle')
@@ -480,7 +484,7 @@ export default function ChatScreen() {
 }
 
 // ---------------------------------------------------------------------------
-// Sub-components (PromptRow, CommandPicker, Row) — unchanged from original
+// Sub-components
 // ---------------------------------------------------------------------------
 
 function PromptRow({
@@ -490,6 +494,8 @@ function PromptRow({
   item: Extract<Item, { kind: 'prompt' }>
   onChoose: (id: string, choice: string) => void
 }) {
+  const { colors } = useTheme()
+  const styles = useMemo(() => makeStyles(colors), [colors])
   const [textValues, setTextValues] = useState<Record<string, string>>({})
   const buttonOpts = item.options.filter((o) => !o.allowText)
   const textOpts = item.options.filter((o) => o.allowText)
@@ -555,6 +561,8 @@ function CommandPicker({
   items: CommandItem[]
   onSelect: (name: string) => void
 }) {
+  const { colors } = useTheme()
+  const styles = useMemo(() => makeStyles(colors), [colors])
   return (
     <View style={styles.pickerWrap}>
       <FlatList
@@ -597,6 +605,8 @@ function Row({
   item: Item
   onChoose: (id: string, choice: string) => void
 }) {
+  const { colors } = useTheme()
+  const styles = useMemo(() => makeStyles(colors), [colors])
   const inTurn = !!item.turnId
 
   if (item.kind === 'message') {
@@ -640,123 +650,125 @@ function Row({
 }
 
 // ---------------------------------------------------------------------------
-// Styles
+// Style factory — called once per theme change via useMemo
 // ---------------------------------------------------------------------------
 
-const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: colors.bg },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: spacing.lg,
-    paddingBottom: spacing.lg,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
-    gap: spacing.sm,
-  },
-  backBtn: { paddingRight: spacing.xs },
-  backText: { color: colors.accent, fontSize: 28, lineHeight: 32 },
-  title: { color: colors.text, fontSize: typography.sizeXl, fontWeight: typography.weightSemibold, flex: 1 },
-  agentStatus: { color: colors.tool, fontSize: typography.sizeMd, fontStyle: 'italic' },
-  dot: { width: 8, height: 8, borderRadius: radius.full },
-  emptyWrap: { flex: 1, justifyContent: 'center' },
-  empty: { color: colors.textDim, textAlign: 'center', fontSize: typography.sizeLg },
-  list: { padding: spacing.lg, gap: 10 },
-  turnRail: { borderLeftWidth: 2, borderLeftColor: 'rgba(94, 142, 255, 0.3)', paddingLeft: 10 }, // accent at 30% opacity
-  bubbleRow: { flexDirection: 'row' },
-  bubbleRowUser: { justifyContent: 'flex-end' },
-  bubble: {
-    backgroundColor: colors.surface,
-    borderRadius: radius.xl,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  bubbleUser: { backgroundColor: colors.accent, borderColor: colors.accent, maxWidth: '80%' },
-  bubbleText: { color: colors.text, fontSize: typography.sizeLg, lineHeight: typography.lineHeightNormal },
-  bubbleTextUser: { color: '#fff' },
-  cursor: { color: colors.accent },
-  toolCard: {
-    backgroundColor: colors.surface2,
-    borderRadius: radius.lg,
-    padding: spacing.md,
-    borderLeftWidth: 3,
-    borderLeftColor: colors.tool,
-  },
-  toolLabel: { color: colors.tool, fontSize: typography.sizeMd, fontWeight: typography.weightSemibold, marginBottom: 4 },
-  toolMono: { color: colors.textMuted, fontSize: typography.sizeSm, fontFamily: typography.fontMono, marginTop: 2 },
-  promptCard: {
-    backgroundColor: colors.surface3,
-    borderRadius: radius.xl,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: colors.warn,
-  },
-  promptTitle: { color: colors.text, fontSize: typography.sizeLg, fontWeight: typography.weightSemibold, marginBottom: 4 },
-  promptMsg: { color: colors.textMuted, fontSize: typography.size, marginBottom: spacing.md },
-  promptBtns: { flexDirection: 'row', gap: spacing.sm, flexWrap: 'wrap' },
-  promptBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: colors.accent,
-    paddingHorizontal: 14,
-    paddingVertical: spacing.sm,
-    borderRadius: radius.md,
-  },
-  promptBtnNum: { color: 'rgba(255,255,255,0.6)', fontSize: typography.sizeXs, fontWeight: typography.weightBold, minWidth: 14, textAlign: 'center' },
-  promptBtnText: { color: '#fff', fontSize: typography.sizeMd, fontWeight: typography.weightSemibold },
-  textOptWrap: { marginTop: 10, borderTopWidth: 1, borderTopColor: colors.borderAlt, paddingTop: 10 },
-  textOptLabel: { color: colors.textMuted, fontSize: typography.sizeSm, fontWeight: typography.weightSemibold, marginBottom: 6 },
-  textOptRow: { flexDirection: 'row', gap: spacing.sm, alignItems: 'center' },
-  textOptInput: {
-    flex: 1,
-    backgroundColor: colors.surface,
-    borderRadius: 10,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    color: colors.text,
-    fontSize: typography.size,
-    borderWidth: 1,
-    borderColor: colors.borderAlt,
-  },
-  textOptBtn: { width: 36, height: 36, borderRadius: 18, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
-  textOptBtnOff: { backgroundColor: colors.border },
-  textOptBtnText: { color: '#fff', fontSize: 18, fontWeight: typography.weightBold },
-  composer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: spacing.md,
-    paddingVertical: 10,
-    borderTopWidth: 1,
-    borderTopColor: colors.border,
-    gap: spacing.sm,
-  },
-  input: {
-    flex: 1,
-    backgroundColor: colors.surface,
-    borderRadius: 20,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: 10,
-    color: colors.text,
-    fontSize: typography.sizeLg,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  sendBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
-  sendBtnOff: { backgroundColor: colors.border },
-  sendBtnText: { color: '#fff', fontSize: 18, fontWeight: typography.weightBold, lineHeight: 22 },
-  pickerWrap: { maxHeight: 260, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: colors.surface },
-  pickerList: { flexGrow: 0 },
-  pickerRow: {
-    paddingHorizontal: spacing.lg,
-    paddingVertical: 10,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.border,
-  },
-  pickerLeft: { flexDirection: 'row', alignItems: 'baseline', marginBottom: 2 },
-  pickerName: { color: colors.accent, fontSize: typography.size, fontWeight: typography.weightSemibold },
-  pickerHint: { color: colors.textMuted, fontSize: typography.sizeSm, fontStyle: 'italic' },
-  pickerDesc: { color: colors.textDim, fontSize: typography.sizeSm },
-})
+function makeStyles(colors: ThemeColors) {
+  return StyleSheet.create({
+    screen: { flex: 1, backgroundColor: colors.bg },
+    header: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingHorizontal: spacing.lg,
+      paddingBottom: spacing.lg,
+      borderBottomWidth: 1,
+      borderBottomColor: colors.border,
+      gap: spacing.sm,
+    },
+    backBtn: { paddingRight: spacing.xs },
+    backText: { color: colors.accent, fontSize: 28, lineHeight: 32 },
+    title: { color: colors.text, fontSize: typography.sizeXl, fontWeight: typography.weightSemibold, flex: 1 },
+    agentStatus: { color: colors.tool, fontSize: typography.sizeMd, fontStyle: 'italic' },
+    dot: { width: 8, height: 8, borderRadius: radius.full },
+    emptyWrap: { flex: 1, justifyContent: 'center' },
+    empty: { color: colors.textDim, textAlign: 'center', fontSize: typography.sizeLg },
+    list: { padding: spacing.lg, gap: 10 },
+    turnRail: { borderLeftWidth: 2, borderLeftColor: 'rgba(94, 142, 255, 0.3)', paddingLeft: 10 }, // accent at 30% opacity
+    bubbleRow: { flexDirection: 'row' },
+    bubbleRowUser: { justifyContent: 'flex-end' },
+    bubble: {
+      backgroundColor: colors.surface,
+      borderRadius: radius.xl,
+      paddingHorizontal: spacing.lg,
+      paddingVertical: spacing.md,
+      borderWidth: 1,
+      borderColor: colors.border,
+    },
+    bubbleUser: { backgroundColor: colors.accent, borderColor: colors.accent, maxWidth: '80%' },
+    bubbleText: { color: colors.text, fontSize: typography.sizeLg, lineHeight: typography.lineHeightNormal },
+    bubbleTextUser: { color: '#fff' },
+    cursor: { color: colors.accent },
+    toolCard: {
+      backgroundColor: colors.surface2,
+      borderRadius: radius.lg,
+      padding: spacing.md,
+      borderLeftWidth: 3,
+      borderLeftColor: colors.tool,
+    },
+    toolLabel: { color: colors.tool, fontSize: typography.sizeMd, fontWeight: typography.weightSemibold, marginBottom: 4 },
+    toolMono: { color: colors.textMuted, fontSize: typography.sizeSm, fontFamily: typography.fontMono, marginTop: 2 },
+    promptCard: {
+      backgroundColor: colors.surface3,
+      borderRadius: radius.xl,
+      padding: 14,
+      borderWidth: 1,
+      borderColor: colors.warn,
+    },
+    promptTitle: { color: colors.text, fontSize: typography.sizeLg, fontWeight: typography.weightSemibold, marginBottom: 4 },
+    promptMsg: { color: colors.textMuted, fontSize: typography.size, marginBottom: spacing.md },
+    promptBtns: { flexDirection: 'row', gap: spacing.sm, flexWrap: 'wrap' },
+    promptBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      backgroundColor: colors.accent,
+      paddingHorizontal: 14,
+      paddingVertical: spacing.sm,
+      borderRadius: radius.md,
+    },
+    promptBtnNum: { color: 'rgba(255,255,255,0.6)', fontSize: typography.sizeXs, fontWeight: typography.weightBold, minWidth: 14, textAlign: 'center' },
+    promptBtnText: { color: '#fff', fontSize: typography.sizeMd, fontWeight: typography.weightSemibold },
+    textOptWrap: { marginTop: 10, borderTopWidth: 1, borderTopColor: colors.borderAlt, paddingTop: 10 },
+    textOptLabel: { color: colors.textMuted, fontSize: typography.sizeSm, fontWeight: typography.weightSemibold, marginBottom: 6 },
+    textOptRow: { flexDirection: 'row', gap: spacing.sm, alignItems: 'center' },
+    textOptInput: {
+      flex: 1,
+      backgroundColor: colors.surface,
+      borderRadius: 10,
+      paddingHorizontal: spacing.md,
+      paddingVertical: spacing.sm,
+      color: colors.text,
+      fontSize: typography.size,
+      borderWidth: 1,
+      borderColor: colors.borderAlt,
+    },
+    textOptBtn: { width: 36, height: 36, borderRadius: 18, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
+    textOptBtnOff: { backgroundColor: colors.border },
+    textOptBtnText: { color: '#fff', fontSize: 18, fontWeight: typography.weightBold },
+    composer: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingHorizontal: spacing.md,
+      paddingVertical: 10,
+      borderTopWidth: 1,
+      borderTopColor: colors.border,
+      gap: spacing.sm,
+    },
+    input: {
+      flex: 1,
+      backgroundColor: colors.surface,
+      borderRadius: 20,
+      paddingHorizontal: spacing.lg,
+      paddingVertical: 10,
+      color: colors.text,
+      fontSize: typography.sizeLg,
+      borderWidth: 1,
+      borderColor: colors.border,
+    },
+    sendBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
+    sendBtnOff: { backgroundColor: colors.border },
+    sendBtnText: { color: '#fff', fontSize: 18, fontWeight: typography.weightBold, lineHeight: 22 },
+    pickerWrap: { maxHeight: 260, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: colors.surface },
+    pickerList: { flexGrow: 0 },
+    pickerRow: {
+      paddingHorizontal: spacing.lg,
+      paddingVertical: 10,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: colors.border,
+    },
+    pickerLeft: { flexDirection: 'row', alignItems: 'baseline', marginBottom: 2 },
+    pickerName: { color: colors.accent, fontSize: typography.size, fontWeight: typography.weightSemibold },
+    pickerHint: { color: colors.textMuted, fontSize: typography.sizeSm, fontStyle: 'italic' },
+    pickerDesc: { color: colors.textDim, fontSize: typography.sizeSm },
+  })
+}

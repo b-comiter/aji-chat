@@ -1,12 +1,15 @@
 import * as Clipboard from 'expo-clipboard'
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { Feather } from '@expo/vector-icons'
 import hljs from 'highlight.js'
 import Markdown, { type MarkedStyles, Renderer } from 'react-native-marked'
-import { colors, tokenColors, typography } from '../constants/theme'
+import { typography } from '../constants/theme'
+import type { ThemeColors } from '../constants/theme'
+import { useTheme } from '../context/ThemeContext'
 
-// Brand colors for popular languages — used as the dot indicator in the header
+// Brand colors for popular languages — used as the dot indicator in the header.
+// Intentionally kept local: these are language brand colors, not app design tokens.
 const LANG_COLORS: Record<string, string> = {
   python:     '#3572A5',
   javascript: '#F7DF1E',
@@ -50,7 +53,6 @@ function hexToRgba(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`
 }
 
-
 function decodeHtmlEntities(s: string): string {
   return s
     .replace(/&amp;/g, '&')
@@ -60,7 +62,12 @@ function decodeHtmlEntities(s: string): string {
     .replace(/&#x27;|&#39;|&apos;/g, "'")
 }
 
-function highlightCode(code: string, language?: string): React.ReactNode[] {
+function highlightCode(
+  code: string,
+  language: string | undefined,
+  colors: ThemeColors,
+  tokenColors: Record<string, string>,
+): React.ReactNode[] {
   if (!language) return [code]
   try {
     const { value: html } = hljs.highlight(code, { language, ignoreIllegals: true })
@@ -99,7 +106,7 @@ function highlightCode(code: string, language?: string): React.ReactNode[] {
           if (top.token === 'function' || top.token === 'func' || top.token === 'title' || top.token === 'name') style.fontWeight = '600'
           if (top.token === 'comment') style.fontStyle = 'italic'
 
-          // Emit raw string when using default color to keep tree lightweight
+          // Emit raw string when using default color to keep the tree lightweight
           elements.push(top.color === colors.text ? text : <Text key={key++} style={style}>{text}</Text>)
         }
         i = end === -1 ? n : end
@@ -112,7 +119,18 @@ function highlightCode(code: string, language?: string): React.ReactNode[] {
   }
 }
 
+// ---------------------------------------------------------------------------
+// CopyButton — reads theme from context directly (renders inside Markdown tree)
+// ---------------------------------------------------------------------------
+
+// Non-color styles for the copy button — stable across themes
+const copyBtnStyles = StyleSheet.create({
+  btn:   { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  label: { fontSize: typography.sizeXs },
+})
+
 function CopyButton({ code }: { code: string }) {
+  const { colors } = useTheme()
   const [copied, setCopied] = useState(false)
 
   async function handlePress() {
@@ -121,144 +139,137 @@ function CopyButton({ code }: { code: string }) {
     setTimeout(() => setCopied(false), 2000)
   }
 
+  // #40BF8A — copy-done green, intentionally distinct from colors.success
+  const iconColor  = copied ? '#40BF8A' : colors.textMuted
+  const labelColor = copied ? '#40BF8A' : colors.textMuted
+
   return (
-    <Pressable onPress={handlePress} style={codeStyles.copyBtn} hitSlop={8}>
-      <Feather
-        name={copied ? 'check' : 'copy'}
-        size={14}
-        color={copied ? '#40BF8A' : colors.textMuted} // copy-done green intentionally distinct from colors.success
-      />
-      <Text style={[codeStyles.copyLabel, copied && codeStyles.copyLabelDone]}>
+    <Pressable onPress={handlePress} style={copyBtnStyles.btn} hitSlop={8}>
+      <Feather name={copied ? 'check' : 'copy'} size={14} color={iconColor} />
+      <Text style={[copyBtnStyles.label, { color: labelColor }]}>
         {copied ? 'Copied' : 'Copy'}
       </Text>
     </Pressable>
   )
 }
 
-class CustomRenderer extends Renderer {
-  code(text: string, language?: string, containerStyle?: any, textStyle?: any) {
-    const lang = language?.toLowerCase() ?? ''
-    const dotColor = LANG_COLORS[lang] ?? colors.textDim
-    const displayLang = language ?? 'plaintext'
-    const codeBgColor = hexToRgba(dotColor, 0.08)
-    const highlightedLines = highlightCode(text, language)
+// ---------------------------------------------------------------------------
+// Renderer factory — creates a CustomRenderer instance closed over the theme.
+// Recreated (via useMemo) only when colors/tokenColors change.
+// ---------------------------------------------------------------------------
 
-    return (
-      <View style={codeStyles.block}>
-        <View style={codeStyles.header}>
-          <View style={[codeStyles.dot, { backgroundColor: dotColor }]} />
-          <Text style={codeStyles.lang}>{displayLang}</Text>
-          <CopyButton code={text} />
-        </View>
-        <View style={codeStyles.divider} />
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={{ minWidth: '100%' }}
-        >
-          <View style={[codeStyles.codeContainer, { backgroundColor: codeBgColor }]}>
-            <Text style={codeStyles.code} selectable>
-              {highlightedLines}
-            </Text>
+function makeRenderer(colors: ThemeColors, tokenColors: Record<string, string>) {
+  const codeStyles = StyleSheet.create({
+    block: {
+      backgroundColor: colors.surface,
+      borderRadius: 8,
+      borderWidth: 1,
+      borderColor: colors.borderCode,
+      overflow: 'hidden',
+      marginVertical: 4,
+    },
+    header: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      backgroundColor: colors.bg,
+      gap: 8,
+    },
+    dot: {
+      width: 10,
+      height: 10,
+      borderRadius: 5,
+    },
+    lang: {
+      color: colors.textMuted,
+      fontSize: typography.sizeSm,
+      fontFamily: typography.fontMono,
+      flex: 1,
+    },
+    divider: {
+      height: StyleSheet.hairlineWidth,
+      backgroundColor: colors.borderCode,
+    },
+    codeContainer: {
+      paddingHorizontal: 14,
+      paddingVertical: 14,
+      width: '100%',
+    },
+    code: {
+      fontFamily: typography.fontMono,
+      fontSize: typography.sizeMd,
+      lineHeight: typography.lineHeightCode,
+      color: colors.text,
+    },
+  })
+
+  class CustomRenderer extends Renderer {
+    code(text: string, language?: string, _containerStyle?: any, _textStyle?: any) {
+      const lang = language?.toLowerCase() ?? ''
+      const dotColor = LANG_COLORS[lang] ?? colors.textDim
+      const displayLang = language ?? 'plaintext'
+      const codeBgColor = hexToRgba(dotColor, 0.08)
+      const highlightedLines = highlightCode(text, language, colors, tokenColors)
+
+      return (
+        <View style={codeStyles.block}>
+          <View style={codeStyles.header}>
+            <View style={[codeStyles.dot, { backgroundColor: dotColor }]} />
+            <Text style={codeStyles.lang}>{displayLang}</Text>
+            <CopyButton code={text} />
           </View>
-        </ScrollView>
-      </View>
-    )
+          <View style={codeStyles.divider} />
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={{ minWidth: '100%' }}
+          >
+            <View style={[codeStyles.codeContainer, { backgroundColor: codeBgColor }]}>
+              <Text style={codeStyles.code} selectable>
+                {highlightedLines}
+              </Text>
+            </View>
+          </ScrollView>
+        </View>
+      )
+    }
+  }
+
+  return new CustomRenderer()
+}
+
+// ---------------------------------------------------------------------------
+// mdStyles factory
+// ---------------------------------------------------------------------------
+
+function makeMdStyles(colors: ThemeColors): MarkedStyles {
+  return {
+    text:       { fontSize: typography.sizeLg, lineHeight: typography.lineHeightNormal },
+    paragraph:  { marginVertical: 2 },
+    strong:     { fontWeight: 'bold', color: colors.text },
+    em:         { fontStyle: 'italic', color: colors.text },
+    h1:         { fontSize: typography.size2xl, fontWeight: typography.weightBold, color: colors.text, marginTop: 8, marginBottom: 4 },
+    h2:         { fontSize: typography.sizeXl,  fontWeight: typography.weightBold, color: colors.text, marginTop: 6, marginBottom: 4 },
+    h3:         { fontSize: typography.sizeLg,  fontWeight: typography.weightBold, color: colors.text, marginTop: 4, marginBottom: 2 },
+    codespan:   { fontFamily: typography.fontMono, fontSize: typography.sizeMd, color: colors.tool, backgroundColor: colors.surface2, paddingHorizontal: 4, paddingVertical: 2, borderRadius: 4, fontStyle: 'normal' },
+    code:       { backgroundColor: colors.surface, borderRadius: 8 },
+    blockquote: { borderLeftWidth: 3, borderLeftColor: colors.textMuted, paddingLeft: 10 },
+    li:         { fontSize: typography.sizeLg, color: colors.text },
+    table:      { borderWidth: 1, borderColor: colors.border, borderRadius: 4 },
+    tableRow:   { minHeight: 36 },
+    tableCell:  { paddingHorizontal: 10, paddingVertical: 6 },
   }
 }
 
-const customRenderer = new CustomRenderer()
-
-const codeStyles = StyleSheet.create({
-  block: {
-    backgroundColor: colors.surface,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: colors.borderCode,
-    overflow: 'hidden',
-    marginVertical: 4,
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    backgroundColor: colors.bg,
-    gap: 8,
-  },
-  dot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-  },
-  lang: {
-    color: colors.textMuted,
-    fontSize: typography.sizeSm,
-    fontFamily: typography.fontMono,
-    flex: 1,
-  },
-  divider: {
-    height: StyleSheet.hairlineWidth,
-    backgroundColor: colors.borderCode,
-  },
-  codeContainer: {
-    paddingHorizontal: 14,
-    paddingVertical: 14,
-    width: '100%',
-  },
-  code: {
-    fontFamily: typography.fontMono,
-    fontSize: typography.sizeMd,
-    lineHeight: typography.lineHeightCode,
-    color: colors.text,
-  },
-  copyBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  copyLabel: {
-    fontSize: typography.sizeXs,
-    color: colors.textMuted,
-  },
-  copyLabelDone: {
-    color: '#40BF8A', // copy-done green, intentionally distinct from colors.success
-  },
-})
-
-const theme = {
-  colors: {
-    text:   colors.text,
-    link:   colors.accent,
-    code:   'transparent',
-    border: colors.border,
-  },
-}
-
-const mdStyles: MarkedStyles = {
-  text: { fontSize: typography.sizeLg, lineHeight: typography.lineHeightNormal },
-  paragraph: { marginVertical: 2 },
-  strong: { fontWeight: 'bold', color: colors.text },
-  em: { fontStyle: 'italic', color: colors.text },
-  h1: { fontSize: typography.size2xl, fontWeight: typography.weightBold, color: colors.text, marginTop: 8, marginBottom: 4 },
-  h2: { fontSize: typography.sizeXl, fontWeight: typography.weightBold, color: colors.text, marginTop: 6, marginBottom: 4 },
-  h3: { fontSize: typography.sizeLg, fontWeight: typography.weightBold, color: colors.text, marginTop: 4, marginBottom: 2 },
-  codespan: { fontFamily: typography.fontMono, fontSize: typography.sizeMd, color: colors.tool, backgroundColor: colors.surface2, paddingHorizontal: 4, paddingVertical: 2, borderRadius: 4, fontStyle: 'normal' },
-  code: { backgroundColor: colors.surface, borderRadius: 8 },
-  blockquote: { borderLeftWidth: 3, borderLeftColor: colors.textMuted, paddingLeft: 10 },
-  li: { fontSize: typography.sizeLg, color: colors.text },
-  table: { borderWidth: 1, borderColor: colors.border, borderRadius: 4 },
-  tableRow: { minHeight: 36 },
-  tableCell: { paddingHorizontal: 10, paddingVertical: 6 },
-}
+// ---------------------------------------------------------------------------
+// Normalizer — fixes React Native fontWeight bug on iOS/Android.
+// A paragraph break (\n\n) makes react-native-marked render bold/italic in
+// its own <View>, bypassing the bug. Code blocks are preserved.
+// ---------------------------------------------------------------------------
 
 const flatListStyle = { backgroundColor: 'transparent' } as const
 
-// React Native bug on iOS/Android: fontWeight on a nested <Text> doesn't
-// render when that element immediately follows a \n in the parent text node.
-// A paragraph break (\n\n) makes react-native-marked render bold/italic in
-// its own <View>, bypassing the bug. We preserve code blocks from normalization
-// to avoid breaking their syntax.
 function normalizeNewlines(md: string): string {
   if (Platform.OS === 'web') return md
 
@@ -280,12 +291,25 @@ function normalizeNewlines(md: string): string {
 type Props = { content: string }
 
 export function MarkdownMessage({ content }: Props) {
+  const { colors, tokenColors } = useTheme()
+
+  const renderer = useMemo(() => makeRenderer(colors, tokenColors), [colors, tokenColors])
+  const mdStyles  = useMemo(() => makeMdStyles(colors), [colors])
+  const mdTheme   = useMemo(() => ({
+    colors: {
+      text:   colors.text,
+      link:   colors.accent,
+      code:   'transparent',
+      border: colors.border,
+    },
+  }), [colors])
+
   return (
     <Markdown
       value={normalizeNewlines(content)}
-      theme={theme}
+      theme={mdTheme}
       styles={mdStyles}
-      renderer={customRenderer}
+      renderer={renderer}
       flatListProps={{ scrollEnabled: false, style: flatListStyle }}
     />
   )

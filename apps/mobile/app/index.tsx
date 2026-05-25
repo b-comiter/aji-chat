@@ -5,7 +5,7 @@
  * SQLite on mount (instant), then patches in-memory state as live WS
  * events arrive. Tap a row to open that agent's chat history.
  */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   FlatList,
   Modal,
@@ -19,9 +19,11 @@ import { Feather } from '@expo/vector-icons'
 import { useDB } from '../db/DBProvider'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useWS } from '../context/WebSocketContext'
+import { useTheme } from '../context/ThemeContext'
 import { getAllAgents, agentDisplayName, AGENT_DISPLAY_NAMES, type AgentRow } from '../db/database'
 import type { ServerEvent } from '@aji/protocol'
-import { colors, spacing, typography, radius } from '../constants/theme'
+import { spacing, typography, radius } from '../constants/theme'
+import type { ThemeColors } from '../constants/theme'
 
 // Agents the user can manually open a chat with (excludes 'unknown')
 const CONNECTABLE_AGENTS = Object.entries(AGENT_DISPLAY_NAMES)
@@ -45,7 +47,7 @@ function relativeTime(ts: number | null): string {
   return `${days}d ago`
 }
 
-function statusColor(status: string): string {
+function statusColor(status: string, colors: ThemeColors): string {
   switch (status) {
     case 'thinking':
     case 'working':
@@ -64,7 +66,9 @@ function statusColor(status: string): string {
 export default function HomeScreen() {
   const db = useDB()
   const { conn, subscribe } = useWS()
+  const { colors } = useTheme()
   const { top: safeTop } = useSafeAreaInsets()
+  const styles = useMemo(() => makeStyles(colors), [colors])
   const [agents, setAgents] = useState<AgentRow[]>([])
   const [pickerOpen, setPickerOpen] = useState(false)
   const mountedRef = useRef(true)
@@ -219,9 +223,11 @@ export default function HomeScreen() {
 // ---------------------------------------------------------------------------
 
 function AgentRow({ agent, onPress }: { agent: AgentRow; onPress: () => void }) {
+  const { colors } = useTheme()
+  const styles = useMemo(() => makeStyles(colors), [colors])
   return (
     <Pressable style={styles.row} onPress={onPress}>
-      <View style={[styles.statusDot, { backgroundColor: statusColor(agent.last_status) }]} />
+      <View style={[styles.statusDot, { backgroundColor: statusColor(agent.last_status, colors) }]} />
       <View style={styles.rowBody}>
         <View style={styles.rowTop}>
           <Text style={styles.agentName}>{agent.display_name}</Text>
@@ -244,84 +250,86 @@ function AgentRow({ agent, onPress }: { agent: AgentRow; onPress: () => void }) 
 // Styles
 // ---------------------------------------------------------------------------
 
-const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: colors.bg },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: spacing.xl,
-    paddingVertical: spacing.lg,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
-    gap: spacing.sm,
-  },
-  title: { color: colors.text, fontSize: typography.size2xl, fontWeight: typography.weightBold, flex: 1 },
-  connDot: { width: 8, height: 8, borderRadius: radius.full },
-  iconBtn: {
-    width: 30,
-    height: 30,
-    borderRadius: radius.full,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  addBtn: {
-    width: 30,
-    height: 30,
-    borderRadius: radius.full,
-    backgroundColor: colors.border,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  addBtnText: { color: colors.text, fontSize: typography.sizeLg, lineHeight: 20 },
-  modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center' },
-  pickerCard: {
-    width: 280,
-    backgroundColor: colors.surface,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: colors.border,
-    overflow: 'hidden',
-  },
-  pickerTitle: {
-    color: colors.textDim,
-    fontSize: typography.sizeSm,
-    fontWeight: typography.weightSemibold,
-    textTransform: 'uppercase',
-    letterSpacing: 0.8,
-    paddingHorizontal: spacing.lg,
-    paddingTop: 14,
-    paddingBottom: 10,
-  },
-  pickerRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: spacing.lg,
-    paddingVertical: 14,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.border,
-  },
-  pickerLabel: { color: colors.text, fontSize: typography.sizeLg, flex: 1 },
-  pickerChevron: { color: colors.textFaint, fontSize: typography.size2xl },
-  emptyWrap: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: spacing.xxxl },
-  emptyTitle: { color: colors.text, fontSize: typography.sizeXl, fontWeight: typography.weightSemibold, marginBottom: spacing.sm },
-  emptySub: { color: colors.textDim, fontSize: typography.size, textAlign: 'center', lineHeight: typography.lineHeightNormal },
-  code: { fontFamily: typography.fontMono, color: colors.tool },
-  list: { paddingTop: spacing.sm },
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: spacing.xl,
-    paddingVertical: 14,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.border,
-    gap: spacing.md,
-  },
-  statusDot: { width: 10, height: 10, borderRadius: radius.full, flexShrink: 0 },
-  rowBody: { flex: 1 },
-  rowTop: { flexDirection: 'row', alignItems: 'center', marginBottom: 3 },
-  agentName: { color: colors.text, fontSize: typography.sizeLg, fontWeight: typography.weightSemibold, flex: 1 },
-  timestamp: { color: colors.textDim, fontSize: typography.sizeSm },
-  preview: { color: colors.textMuted, fontSize: typography.sizeMd },
-  previewEmpty: { color: colors.textFaint, fontSize: typography.sizeMd, fontStyle: 'italic' },
-  chevron: { color: colors.textFaint, fontSize: typography.size2xl },
-})
+function makeStyles(colors: ThemeColors) {
+  return StyleSheet.create({
+    screen: { flex: 1, backgroundColor: colors.bg },
+    header: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingHorizontal: spacing.xl,
+      paddingVertical: spacing.lg,
+      borderBottomWidth: 1,
+      borderBottomColor: colors.border,
+      gap: spacing.sm,
+    },
+    title: { color: colors.text, fontSize: typography.size2xl, fontWeight: typography.weightBold, flex: 1 },
+    connDot: { width: 8, height: 8, borderRadius: radius.full },
+    iconBtn: {
+      width: 30,
+      height: 30,
+      borderRadius: radius.full,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    addBtn: {
+      width: 30,
+      height: 30,
+      borderRadius: radius.full,
+      backgroundColor: colors.border,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    addBtnText: { color: colors.text, fontSize: typography.sizeLg, lineHeight: 20 },
+    modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center' },
+    pickerCard: {
+      width: 280,
+      backgroundColor: colors.surface,
+      borderRadius: 16,
+      borderWidth: 1,
+      borderColor: colors.border,
+      overflow: 'hidden',
+    },
+    pickerTitle: {
+      color: colors.textDim,
+      fontSize: typography.sizeSm,
+      fontWeight: typography.weightSemibold,
+      textTransform: 'uppercase',
+      letterSpacing: 0.8,
+      paddingHorizontal: spacing.lg,
+      paddingTop: 14,
+      paddingBottom: 10,
+    },
+    pickerRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingHorizontal: spacing.lg,
+      paddingVertical: 14,
+      borderTopWidth: StyleSheet.hairlineWidth,
+      borderTopColor: colors.border,
+    },
+    pickerLabel: { color: colors.text, fontSize: typography.sizeLg, flex: 1 },
+    pickerChevron: { color: colors.textFaint, fontSize: typography.size2xl },
+    emptyWrap: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: spacing.xxxl },
+    emptyTitle: { color: colors.text, fontSize: typography.sizeXl, fontWeight: typography.weightSemibold, marginBottom: spacing.sm },
+    emptySub: { color: colors.textDim, fontSize: typography.size, textAlign: 'center', lineHeight: typography.lineHeightNormal },
+    code: { fontFamily: typography.fontMono, color: colors.tool },
+    list: { paddingTop: spacing.sm },
+    row: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingHorizontal: spacing.xl,
+      paddingVertical: 14,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: colors.border,
+      gap: spacing.md,
+    },
+    statusDot: { width: 10, height: 10, borderRadius: radius.full, flexShrink: 0 },
+    rowBody: { flex: 1 },
+    rowTop: { flexDirection: 'row', alignItems: 'center', marginBottom: 3 },
+    agentName: { color: colors.text, fontSize: typography.sizeLg, fontWeight: typography.weightSemibold, flex: 1 },
+    timestamp: { color: colors.textDim, fontSize: typography.sizeSm },
+    preview: { color: colors.textMuted, fontSize: typography.sizeMd },
+    previewEmpty: { color: colors.textFaint, fontSize: typography.sizeMd, fontStyle: 'italic' },
+    chevron: { color: colors.textFaint, fontSize: typography.size2xl },
+  })
+}
