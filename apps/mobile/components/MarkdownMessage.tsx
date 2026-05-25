@@ -4,6 +4,7 @@ import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-n
 import { Feather } from '@expo/vector-icons'
 import hljs from 'highlight.js'
 import Markdown, { type MarkedStyles, Renderer } from 'react-native-marked'
+import { colors, tokenColors, typography } from '../constants/theme'
 
 // Brand colors for popular languages — used as the dot indicator in the header
 const LANG_COLORS: Record<string, string> = {
@@ -49,26 +50,6 @@ function hexToRgba(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`
 }
 
-// Token type colors for syntax highlighting (mapped from hljs class names)
-const tokenColors: Record<string, string> = {
-  'keyword': '#ff6b6b',    // warm red - keywords
-  'built_in': '#61afef',   // bright blue - built-ins
-  'literal': '#61afef',    // bright blue - literals
-  'number': '#d19a66',     // orange - numbers
-  'string': '#98c379',     // green - strings
-  'attr': '#56b6c2',       // cyan - attributes
-  'function': '#c678dd',   // purple - function names
-  'class': '#e5c07b',      // gold - class names
-  'comment': '#6a737d',    // muted gray - comments
-  'punctuation': '#c9d1d9',// light gray - punctuation
-  'operator': '#ff6b6b',   // warm red - operators
-  'variable': '#e6edf3',   // off-white - variables
-  'title': '#c678dd',      // purple - titles
-  'section': '#61afef',    // bright blue - sections
-  'meta': '#56b6c2',       // cyan - metadata
-  'symbol': '#d16d9e',     // pink - symbols
-  'name': '#e5c07b',       // gold - names
-}
 
 function decodeHtmlEntities(s: string): string {
   return s
@@ -88,7 +69,7 @@ function highlightCode(code: string, language?: string): React.ReactNode[] {
     let i = 0
     const n = html.length
     // Stack tracks the active token and color as spans open/close (handles nesting)
-    const stack: Array<{ color: string; token?: string }> = [{ color: '#e6edf3' }]
+    const stack: Array<{ color: string; token?: string }> = [{ color: colors.text }]
 
     while (i < n) {
       if (html[i] === '<') {
@@ -99,7 +80,7 @@ function highlightCode(code: string, language?: string): React.ReactNode[] {
           const cm = tag.match(/class="([^"]+)"/)
           if (cm) {
             const tokenType = cm[1].split(' ')[0].replace('hljs-', '')
-            stack.push({ color: tokenColors[tokenType] ?? '#e6edf3', token: tokenType })
+            stack.push({ color: tokenColors[tokenType] ?? colors.text, token: tokenType })
           } else {
             stack.push({ ...stack[stack.length - 1] })
           }
@@ -119,7 +100,7 @@ function highlightCode(code: string, language?: string): React.ReactNode[] {
           if (top.token === 'comment') style.fontStyle = 'italic'
 
           // Emit raw string when using default color to keep tree lightweight
-          elements.push(top.color === '#e6edf3' ? text : <Text key={key++} style={style}>{text}</Text>)
+          elements.push(top.color === colors.text ? text : <Text key={key++} style={style}>{text}</Text>)
         }
         i = end === -1 ? n : end
       }
@@ -145,7 +126,7 @@ function CopyButton({ code }: { code: string }) {
       <Feather
         name={copied ? 'check' : 'copy'}
         size={14}
-        color={copied ? '#40BF8A' : '#8b949e'}
+        color={copied ? '#40BF8A' : colors.textMuted} // copy-done green intentionally distinct from colors.success
       />
       <Text style={[codeStyles.copyLabel, copied && codeStyles.copyLabelDone]}>
         {copied ? 'Copied' : 'Copy'}
@@ -157,7 +138,7 @@ function CopyButton({ code }: { code: string }) {
 class CustomRenderer extends Renderer {
   code(text: string, language?: string, containerStyle?: any, textStyle?: any) {
     const lang = language?.toLowerCase() ?? ''
-    const dotColor = LANG_COLORS[lang] ?? '#6e7681'
+    const dotColor = LANG_COLORS[lang] ?? colors.textDim
     const displayLang = language ?? 'plaintext'
     const codeBgColor = hexToRgba(dotColor, 0.08)
     const highlightedLines = highlightCode(text, language)
@@ -190,10 +171,10 @@ const customRenderer = new CustomRenderer()
 
 const codeStyles = StyleSheet.create({
   block: {
-    backgroundColor: '#161b22',
+    backgroundColor: colors.surface,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#30363d',
+    borderColor: colors.borderCode,
     overflow: 'hidden',
     marginVertical: 4,
   },
@@ -202,7 +183,7 @@ const codeStyles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: 12,
     paddingVertical: 8,
-    backgroundColor: '#0d1117',
+    backgroundColor: colors.bg,
     gap: 8,
   },
   dot: {
@@ -211,14 +192,14 @@ const codeStyles = StyleSheet.create({
     borderRadius: 5,
   },
   lang: {
-    color: '#8b949e',
-    fontSize: 12,
-    fontFamily: 'Menlo',
+    color: colors.textMuted,
+    fontSize: typography.sizeSm,
+    fontFamily: typography.fontMono,
     flex: 1,
   },
   divider: {
     height: StyleSheet.hairlineWidth,
-    backgroundColor: '#30363d',
+    backgroundColor: colors.borderCode,
   },
   codeContainer: {
     paddingHorizontal: 14,
@@ -226,10 +207,10 @@ const codeStyles = StyleSheet.create({
     width: '100%',
   },
   code: {
-    fontFamily: 'Menlo',
-    fontSize: 13,
-    lineHeight: 20,
-    color: '#e6edf3',
+    fontFamily: typography.fontMono,
+    fontSize: typography.sizeMd,
+    lineHeight: typography.lineHeightCode,
+    color: colors.text,
   },
   copyBtn: {
     flexDirection: 'row',
@@ -237,36 +218,36 @@ const codeStyles = StyleSheet.create({
     gap: 4,
   },
   copyLabel: {
-    fontSize: 11,
-    color: '#8b949e',
+    fontSize: typography.sizeXs,
+    color: colors.textMuted,
   },
   copyLabelDone: {
-    color: '#40BF8A',
+    color: '#40BF8A', // copy-done green, intentionally distinct from colors.success
   },
 })
 
 const theme = {
   colors: {
-    text: '#e6edf3',
-    link: '#5e8eff',
-    code: 'transparent',
-    border: '#21262d',
+    text:   colors.text,
+    link:   colors.accent,
+    code:   'transparent',
+    border: colors.border,
   },
 }
 
 const mdStyles: MarkedStyles = {
-  text: { fontSize: 15, lineHeight: 22 },
+  text: { fontSize: typography.sizeLg, lineHeight: typography.lineHeightNormal },
   paragraph: { marginVertical: 2 },
-  strong: { fontWeight: 'bold', color: '#e6edf3' },
-  em: { fontStyle: 'italic', color: '#e6edf3' },
-  h1: { fontSize: 20, fontWeight: '700', color: '#e6edf3', marginTop: 8, marginBottom: 4 },
-  h2: { fontSize: 17, fontWeight: '700', color: '#e6edf3', marginTop: 6, marginBottom: 4 },
-  h3: { fontSize: 15, fontWeight: '700', color: '#e6edf3', marginTop: 4, marginBottom: 2 },
-  codespan: { fontFamily: 'Menlo', fontSize: 13, color: '#b392f0', backgroundColor: '#1c2129', paddingHorizontal: 4, paddingVertical: 2, borderRadius: 4, fontStyle: 'normal' },
-  code: { backgroundColor: '#161b22', borderRadius: 8 },
-  blockquote: { borderLeftWidth: 3, borderLeftColor: '#8b949e', paddingLeft: 10 },
-  li: { fontSize: 15, color: '#e6edf3' },
-  table: { borderWidth: 1, borderColor: '#21262d', borderRadius: 4 },
+  strong: { fontWeight: 'bold', color: colors.text },
+  em: { fontStyle: 'italic', color: colors.text },
+  h1: { fontSize: typography.size2xl, fontWeight: typography.weightBold, color: colors.text, marginTop: 8, marginBottom: 4 },
+  h2: { fontSize: typography.sizeXl, fontWeight: typography.weightBold, color: colors.text, marginTop: 6, marginBottom: 4 },
+  h3: { fontSize: typography.sizeLg, fontWeight: typography.weightBold, color: colors.text, marginTop: 4, marginBottom: 2 },
+  codespan: { fontFamily: typography.fontMono, fontSize: typography.sizeMd, color: colors.tool, backgroundColor: colors.surface2, paddingHorizontal: 4, paddingVertical: 2, borderRadius: 4, fontStyle: 'normal' },
+  code: { backgroundColor: colors.surface, borderRadius: 8 },
+  blockquote: { borderLeftWidth: 3, borderLeftColor: colors.textMuted, paddingLeft: 10 },
+  li: { fontSize: typography.sizeLg, color: colors.text },
+  table: { borderWidth: 1, borderColor: colors.border, borderRadius: 4 },
   tableRow: { minHeight: 36 },
   tableCell: { paddingHorizontal: 10, paddingVertical: 6 },
 }

@@ -15,11 +15,13 @@ import {
   View,
 } from 'react-native'
 import { router } from 'expo-router'
+import { Feather } from '@expo/vector-icons'
 import { useDB } from '../db/DBProvider'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useWS } from '../context/WebSocketContext'
 import { getAllAgents, agentDisplayName, AGENT_DISPLAY_NAMES, type AgentRow } from '../db/database'
 import type { ServerEvent } from '@aji/protocol'
+import { colors, spacing, typography, radius } from '../constants/theme'
 
 // Agents the user can manually open a chat with (excludes 'unknown')
 const CONNECTABLE_AGENTS = Object.entries(AGENT_DISPLAY_NAMES)
@@ -47,11 +49,11 @@ function statusColor(status: string): string {
   switch (status) {
     case 'thinking':
     case 'working':
-      return '#d29922' // amber
+      return colors.warn
     case 'idle':
-      return '#3fb950' // green
+      return colors.success
     default:
-      return '#6e7681' // grey
+      return colors.textDim
   }
 }
 
@@ -144,7 +146,9 @@ export default function HomeScreen() {
   }, [subscribe, db])
 
   const connColor =
-    conn === 'connected' ? '#3fb950' : conn === 'connecting' ? '#d29922' : '#f85149'
+    conn === 'connected' ? colors.success
+    : conn === 'connecting' ? colors.warn
+    : colors.danger
 
   return (
     <View style={[styles.screen, { paddingTop: safeTop }]}>
@@ -152,6 +156,9 @@ export default function HomeScreen() {
       <View style={styles.header}>
         <Text style={styles.title}>aji-chat</Text>
         <View style={[styles.connDot, { backgroundColor: connColor }]} />
+        <Pressable style={styles.iconBtn} onPress={() => router.push('/settings')} hitSlop={8}>
+          <Feather name="settings" size={16} color={colors.textMuted} />
+        </Pressable>
         <Pressable style={styles.addBtn} onPress={() => setPickerOpen(true)} hitSlop={8}>
           <Text style={styles.addBtnText}>＋</Text>
         </Pressable>
@@ -238,60 +245,83 @@ function AgentRow({ agent, onPress }: { agent: AgentRow; onPress: () => void }) 
 // ---------------------------------------------------------------------------
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: '#0d1117' },
+  screen: { flex: 1, backgroundColor: colors.bg },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingVertical: 16,
+    paddingHorizontal: spacing.xl,
+    paddingVertical: spacing.lg,
     borderBottomWidth: 1,
-    borderBottomColor: '#21262d',
-    gap: 8,
+    borderBottomColor: colors.border,
+    gap: spacing.sm,
   },
-  title: { color: '#e6edf3', fontSize: 20, fontWeight: '700', flex: 1 },
-  connDot: { width: 8, height: 8, borderRadius: 4 },
-  addBtn: { width: 30, height: 30, borderRadius: 15, backgroundColor: '#21262d', alignItems: 'center', justifyContent: 'center' },
-  addBtnText: { color: '#e6edf3', fontSize: 16, lineHeight: 20 },
+  title: { color: colors.text, fontSize: typography.size2xl, fontWeight: typography.weightBold, flex: 1 },
+  connDot: { width: 8, height: 8, borderRadius: radius.full },
+  iconBtn: {
+    width: 30,
+    height: 30,
+    borderRadius: radius.full,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  addBtn: {
+    width: 30,
+    height: 30,
+    borderRadius: radius.full,
+    backgroundColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  addBtnText: { color: colors.text, fontSize: typography.sizeLg, lineHeight: 20 },
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center' },
   pickerCard: {
     width: 280,
-    backgroundColor: '#161b22',
+    backgroundColor: colors.surface,
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: '#21262d',
+    borderColor: colors.border,
     overflow: 'hidden',
   },
-  pickerTitle: { color: '#6e7681', fontSize: 12, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.8, paddingHorizontal: 16, paddingTop: 14, paddingBottom: 10 },
+  pickerTitle: {
+    color: colors.textDim,
+    fontSize: typography.sizeSm,
+    fontWeight: typography.weightSemibold,
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    paddingHorizontal: spacing.lg,
+    paddingTop: 14,
+    paddingBottom: 10,
+  },
   pickerRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 16,
+    paddingHorizontal: spacing.lg,
     paddingVertical: 14,
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: '#21262d',
+    borderTopColor: colors.border,
   },
-  pickerLabel: { color: '#e6edf3', fontSize: 15, flex: 1 },
-  pickerChevron: { color: '#3d444d', fontSize: 20 },
-  emptyWrap: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 32 },
-  emptyTitle: { color: '#e6edf3', fontSize: 17, fontWeight: '600', marginBottom: 8 },
-  emptySub: { color: '#6e7681', fontSize: 14, textAlign: 'center', lineHeight: 22 },
-  code: { fontFamily: 'Menlo', color: '#b392f0' },
-  list: { paddingTop: 8 },
+  pickerLabel: { color: colors.text, fontSize: typography.sizeLg, flex: 1 },
+  pickerChevron: { color: colors.textFaint, fontSize: typography.size2xl },
+  emptyWrap: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: spacing.xxxl },
+  emptyTitle: { color: colors.text, fontSize: typography.sizeXl, fontWeight: typography.weightSemibold, marginBottom: spacing.sm },
+  emptySub: { color: colors.textDim, fontSize: typography.size, textAlign: 'center', lineHeight: typography.lineHeightNormal },
+  code: { fontFamily: typography.fontMono, color: colors.tool },
+  list: { paddingTop: spacing.sm },
   row: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 20,
+    paddingHorizontal: spacing.xl,
     paddingVertical: 14,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#21262d',
-    gap: 12,
+    borderBottomColor: colors.border,
+    gap: spacing.md,
   },
-  statusDot: { width: 10, height: 10, borderRadius: 5, flexShrink: 0 },
+  statusDot: { width: 10, height: 10, borderRadius: radius.full, flexShrink: 0 },
   rowBody: { flex: 1 },
   rowTop: { flexDirection: 'row', alignItems: 'center', marginBottom: 3 },
-  agentName: { color: '#e6edf3', fontSize: 15, fontWeight: '600', flex: 1 },
-  timestamp: { color: '#6e7681', fontSize: 12 },
-  preview: { color: '#8b949e', fontSize: 13 },
-  previewEmpty: { color: '#3d444d', fontSize: 13, fontStyle: 'italic' },
-  chevron: { color: '#3d444d', fontSize: 20 },
+  agentName: { color: colors.text, fontSize: typography.sizeLg, fontWeight: typography.weightSemibold, flex: 1 },
+  timestamp: { color: colors.textDim, fontSize: typography.sizeSm },
+  preview: { color: colors.textMuted, fontSize: typography.sizeMd },
+  previewEmpty: { color: colors.textFaint, fontSize: typography.sizeMd, fontStyle: 'italic' },
+  chevron: { color: colors.textFaint, fontSize: typography.size2xl },
 })
