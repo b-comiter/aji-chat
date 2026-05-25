@@ -212,21 +212,6 @@ export type ClientEvent = UserMessage | PromptResponse | GetCommands
 /** Either direction. Useful for shared logging / transport code. */
 export type AnyEvent = ServerEvent | ClientEvent
 
-/** Narrow on `type`. Example: `if (isServerEvent(e, 'text_delta')) ...` */
-export function isServerEvent<T extends ServerEvent['type']>(
-  event: ServerEvent,
-  type: T,
-): event is Extract<ServerEvent, { type: T }> {
-  return event.type === type
-}
-
-export function isClientEvent<T extends ClientEvent['type']>(
-  event: ClientEvent,
-  type: T,
-): event is Extract<ClientEvent, { type: T }> {
-  return event.type === type
-}
-
 // ---------------------------------------------------------------------------
 // Builders
 // ---------------------------------------------------------------------------
