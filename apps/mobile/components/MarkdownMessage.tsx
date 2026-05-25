@@ -1,6 +1,6 @@
 import * as Clipboard from 'expo-clipboard'
 import { useMemo, useState } from 'react'
-import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { Feather } from '@expo/vector-icons'
 import hljs from 'highlight.js'
 import Markdown, { type MarkedStyles, Renderer } from 'react-native-marked'
@@ -9,7 +9,6 @@ import type { ThemeColors } from '../constants/theme'
 import { useTheme } from '../context/ThemeContext'
 
 // Brand colors for popular languages — used as the dot indicator in the header.
-// Intentionally kept local: these are language brand colors, not app design tokens.
 const LANG_COLORS: Record<string, string> = {
   python:     '#3572A5',
   javascript: '#F7DF1E',
@@ -46,11 +45,16 @@ const LANG_COLORS: Record<string, string> = {
   haskell:    '#5E5086',
 }
 
-function hexToRgba(hex: string, alpha: number): string {
+// Global caching engine for calculated background highlights
+const CODE_BG_CACHE: Record<string, string> = {}
+function getCachedBgColor(hex: string): string {
+  if (CODE_BG_CACHE[hex]) return CODE_BG_CACHE[hex]
   const r = parseInt(hex.slice(1, 3), 16)
   const g = parseInt(hex.slice(3, 5), 16)
   const b = parseInt(hex.slice(5, 7), 16)
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`
+  const rgba = `rgba(${r}, ${g}, ${b}, 0.08)`
+  CODE_BG_CACHE[hex] = rgba
+  return rgba
 }
 
 function decodeHtmlEntities(s: string): string {
@@ -59,7 +63,7 @@ function decodeHtmlEntities(s: string): string {
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
-    .replace(/&#x27;|&#39;|&apos;/g, "'")
+    .replace(/&#x27;|'|&apos;/g, "'")
 }
 
 function highlightCode(
@@ -72,10 +76,8 @@ function highlightCode(
   try {
     const { value: html } = hljs.highlight(code, { language, ignoreIllegals: true })
     const elements: React.ReactNode[] = []
-    let key = 0
     let i = 0
     const n = html.length
-    // Stack tracks the active token and color as spans open/close (handles nesting)
     const stack: Array<{ color: string; token?: string }> = [{ color: colors.text }]
 
     while (i < n) {
@@ -103,11 +105,11 @@ function highlightCode(
           const top = stack[stack.length - 1]
           const style: any = { color: top.color }
           if (top.token === 'keyword') style.fontWeight = '600'
-          if (top.token === 'function' || top.token === 'func' || top.token === 'title' || top.token === 'name') style.fontWeight = '600'
+          if (['function', 'func', 'title', 'name'].includes(top.token || '')) style.fontWeight = '600'
           if (top.token === 'comment') style.fontStyle = 'italic'
 
-          // Emit raw string when using default color to keep the tree lightweight
-          elements.push(top.color === colors.text ? text : <Text key={key++} style={style}>{text}</Text>)
+          // Use structural offset template keys for stable, zero-glitch reconciliation loops
+          elements.push(top.color === colors.text ? text : <Text key={`hl-${i}`} style={style}>{text}</Text>)
         }
         i = end === -1 ? n : end
       }
@@ -119,11 +121,6 @@ function highlightCode(
   }
 }
 
-// ---------------------------------------------------------------------------
-// CopyButton — reads theme from context directly (renders inside Markdown tree)
-// ---------------------------------------------------------------------------
-
-// Non-color styles for the copy button — stable across themes
 const copyBtnStyles = StyleSheet.create({
   btn:   { flexDirection: 'row', alignItems: 'center', gap: 4 },
   label: { fontSize: typography.sizeXs },
@@ -139,7 +136,6 @@ function CopyButton({ code }: { code: string }) {
     setTimeout(() => setCopied(false), 2000)
   }
 
-  // #40BF8A — copy-done green, intentionally distinct from colors.success
   const iconColor  = copied ? '#40BF8A' : colors.textMuted
   const labelColor = copied ? '#40BF8A' : colors.textMuted
 
@@ -152,11 +148,6 @@ function CopyButton({ code }: { code: string }) {
     </Pressable>
   )
 }
-
-// ---------------------------------------------------------------------------
-// Renderer factory — creates a CustomRenderer instance closed over the theme.
-// Recreated (via useMemo) only when colors/tokenColors change.
-// ---------------------------------------------------------------------------
 
 function makeRenderer(colors: ThemeColors, tokenColors: Record<string, string>) {
   const codeStyles = StyleSheet.create({
@@ -209,7 +200,7 @@ function makeRenderer(colors: ThemeColors, tokenColors: Record<string, string>) 
       const lang = language?.toLowerCase() ?? ''
       const dotColor = LANG_COLORS[lang] ?? colors.textDim
       const displayLang = language ?? 'plaintext'
-      const codeBgColor = hexToRgba(dotColor, 0.08)
+      const codeBgColor = getCachedBgColor(dotColor)
       const highlightedLines = highlightCode(text, language, colors, tokenColors)
 
       return (
@@ -239,63 +230,39 @@ function makeRenderer(colors: ThemeColors, tokenColors: Record<string, string>) 
   return new CustomRenderer()
 }
 
-// ---------------------------------------------------------------------------
-// mdStyles factory
-// ---------------------------------------------------------------------------
-
 function makeMdStyles(colors: ThemeColors): MarkedStyles {
   return {
-    text:       { fontSize: typography.sizeLg, lineHeight: typography.lineHeightNormal },
-    paragraph:  { marginVertical: 2 },
-    strong:     { fontWeight: 'bold', color: colors.text },
-    em:         { fontStyle: 'italic', color: colors.text },
-    h1:         { fontSize: typography.size2xl, fontWeight: typography.weightBold, color: colors.text, marginTop: 8, marginBottom: 4 },
-    h2:         { fontSize: typography.sizeXl,  fontWeight: typography.weightBold, color: colors.text, marginTop: 6, marginBottom: 4 },
-    h3:         { fontSize: typography.sizeLg,  fontWeight: typography.weightBold, color: colors.text, marginTop: 4, marginBottom: 2 },
-    codespan:   { fontFamily: typography.fontMono, fontSize: typography.sizeMd, color: colors.tool, backgroundColor: colors.surface2, paddingHorizontal: 4, paddingVertical: 2, borderRadius: 4, fontStyle: 'normal' },
-    code:       { backgroundColor: colors.surface, borderRadius: 8 },
+    text: { fontSize: typography.sizeLg, lineHeight: typography.lineHeightNormal, color: colors.text },
+    paragraph: { marginVertical: 2 },
+    strong: { fontWeight: 'bold', color: colors.text },
+    em: { fontStyle: 'italic', color: colors.text },
+    h1: { fontSize: typography.size2xl, fontWeight: '700', color: colors.text, marginTop: 8, marginBottom: 4 },
+    h2: { fontSize: typography.sizeXl, fontWeight: '700', color: colors.text, marginTop: 6, marginBottom: 4 },
+    h3: { fontSize: typography.sizeLg, fontWeight: '700', color: colors.text, marginTop: 4, marginBottom: 2 },
+    codespan: { fontFamily: typography.fontMono, fontSize: typography.sizeMd, color: colors.tool, backgroundColor: colors.surface2, paddingHorizontal: 4, paddingVertical: 2, borderRadius: 4, fontStyle: 'normal' },
+    code: { backgroundColor: colors.surface, borderRadius: 8 },
     blockquote: { borderLeftWidth: 3, borderLeftColor: colors.textMuted, paddingLeft: 10 },
-    li:         { fontSize: typography.sizeLg, color: colors.text },
-    table:      { borderWidth: 1, borderColor: colors.border, borderRadius: 4 },
-    tableRow:   { minHeight: 36 },
-    tableCell:  { paddingHorizontal: 10, paddingVertical: 6 },
+    li: { fontSize: typography.sizeLg, color: colors.text },
+    table: { borderWidth: 1, borderColor: colors.border, borderRadius: 4 },
+    tableRow: { minHeight: 36 },
+    tableCell: { paddingHorizontal: 10, paddingVertical: 8, color: colors.text },
   }
 }
 
 // ---------------------------------------------------------------------------
-// Normalizer — fixes React Native fontWeight bug on iOS/Android.
-// A paragraph break (\n\n) makes react-native-marked render bold/italic in
-// its own <View>, bypassing the bug. Code blocks are preserved.
+// Main Export Component Wrapper
 // ---------------------------------------------------------------------------
-
-const flatListStyle = { backgroundColor: 'transparent' } as const
-
-function normalizeNewlines(md: string): string {
-  if (Platform.OS === 'web') return md
-
-  const codeBlocks: string[] = []
-  let normalized = md.replace(/```[\s\S]*?```/g, (match) => {
-    codeBlocks.push(match)
-    return `__CODE_BLOCK_${codeBlocks.length - 1}__`
-  })
-
-  normalized = normalized.replace(/(?<!\n)\n(\*{1,2}\S|_{1,2}\S)/g, '\n\n$1')
-
-  codeBlocks.forEach((block, i) => {
-    normalized = normalized.replace(`__CODE_BLOCK_${i}__`, block)
-  })
-
-  return normalized
+interface MarkdownMessageProps {
+  content: string
 }
 
-type Props = { content: string }
-
-export function MarkdownMessage({ content }: Props) {
+export function MarkdownMessage({ content }: MarkdownMessageProps) {
   const { colors, tokenColors } = useTheme()
 
-  const renderer = useMemo(() => makeRenderer(colors, tokenColors), [colors, tokenColors])
-  const mdStyles  = useMemo(() => makeMdStyles(colors), [colors])
-  const mdTheme   = useMemo(() => ({
+  const customRenderer = useMemo(() => makeRenderer(colors, tokenColors), [colors, tokenColors])
+  const mdStyles = useMemo(() => makeMdStyles(colors), [colors])
+
+  const markdownTheme = useMemo(() => ({
     colors: {
       text:   colors.text,
       link:   colors.accent,
@@ -306,11 +273,10 @@ export function MarkdownMessage({ content }: Props) {
 
   return (
     <Markdown
-      value={normalizeNewlines(content)}
-      theme={mdTheme}
+      value={content}
+      renderer={customRenderer}
       styles={mdStyles}
-      renderer={renderer}
-      flatListProps={{ scrollEnabled: false, style: flatListStyle }}
+      theme={markdownTheme}
     />
   )
 }
