@@ -338,11 +338,6 @@ class AjiChatAdapter(BasePlatformAdapter):
                 {"type": "text_delta", "id": message_id, "text": cleaned},
                 chat_id=chat_id, turn_id=turn_id,
             )
-        await self._client.emit(
-            {"type": "message_end", "id": message_id},
-            chat_id=chat_id, turn_id=turn_id,
-        )
-
         self._state.remember_sent(message_id, cleaned)
         return SendResult(success=True, message_id=message_id)
 
@@ -357,26 +352,34 @@ class AjiChatAdapter(BasePlatformAdapter):
         cleaned = _strip_cursor(content)
         flog("edit_message() chat_id=%s msg_id=%.12s finalize=%s content=%.120r",
              chat_id, message_id, finalize, content)
+
+        if finalize and not self._state.is_tracked(message_id):
+            flog("edit_message() skipping redundant finalize for already-closed msg=%.12s", message_id)
+            return SendResult(success=True, message_id=message_id)
+
         previous = self._state.get_sent(message_id)
         turn_id = self._state.current_turn(chat_id)
 
-        # Common case: edit text strictly extends previous; emit just the delta.
+        # Compute the incremental delta to emit.
+        # Agents may call edit_message in two modes:
+        #   A. Buffered — each call has the complete text so far;
+        #      delta = new suffix (cleaned[len(previous):]).
+        #   B. Streaming — each call has only the new token;
+        #      startswith check fails, so we treat content as the delta.
+        # In both cases we store the running total (previous + delta) so the
+        # next call — including the final finalize call — always sees the full
+        # accumulated text and computes an empty or correct delta.
         if cleaned.startswith(previous):
             delta = cleaned[len(previous):]
         else:
-            # Text was rewritten (rare — e.g. provider correction). Emit the
-            # whole thing as a new delta. The mobile already has `previous`
-            # rendered; this will duplicate, but correctness > minimal bytes
-            # in this edge case.
             delta = cleaned
+        self._state.remember_sent(message_id, previous + delta)
 
         if delta:
             await self._client.emit(
                 {"type": "text_delta", "id": message_id, "text": delta},
                 chat_id=chat_id, turn_id=turn_id,
             )
-
-        self._state.remember_sent(message_id, cleaned)
 
         if finalize:
             await self._client.emit(
@@ -423,6 +426,20 @@ class AjiChatAdapter(BasePlatformAdapter):
     ) -> None:
         chat_id = event.source.chat_id if event.source else _DEFAULT_CHAT_ID
         flog_info("on_processing_complete() chat_id=%s outcome=%s", chat_id, outcome)
+
+        # Close any messages opened by send() that were never finalized by
+        # edit_message(finalize=True) — i.e. non-streaming single responses.
+        # Streaming responses call forget_sent() inside edit_message(finalize=True)
+        # so their IDs will already be gone by the time we reach here.
+        turn_id = self._state.current_turn(chat_id)
+        for message_id in list(self._state.last_sent.keys()):
+            flog_info("on_processing_complete() closing open message %s", message_id)
+            await self._client.emit(
+                {"type": "message_end", "id": message_id},
+                chat_id=chat_id, turn_id=turn_id,
+            )
+            self._state.forget_sent(message_id)
+
         self._state.end_turn(chat_id)
         await self._client.emit({"type": "status", "value": "idle"})
 
