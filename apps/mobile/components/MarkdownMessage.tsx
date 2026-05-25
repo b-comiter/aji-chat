@@ -163,7 +163,7 @@ class CustomRenderer extends Renderer {
     const highlightedLines = highlightCode(text, language)
 
     return (
-      <View key={Math.random()} style={codeStyles.block}>
+      <View style={codeStyles.block}>
         <View style={codeStyles.header}>
           <View style={[codeStyles.dot, { backgroundColor: dotColor }]} />
           <Text style={codeStyles.lang}>{displayLang}</Text>
