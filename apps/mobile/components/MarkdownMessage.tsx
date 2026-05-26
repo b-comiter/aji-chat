@@ -1,5 +1,5 @@
 import * as Clipboard from 'expo-clipboard'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { Feather } from '@expo/vector-icons'
 import hljs from 'highlight.js'
@@ -49,6 +49,7 @@ const LANG_COLORS: Record<string, string> = {
 const CODE_BG_CACHE: Record<string, string> = {}
 function getCachedBgColor(hex: string): string {
   if (CODE_BG_CACHE[hex]) return CODE_BG_CACHE[hex]
+  if (!/^#[0-9A-Fa-f]{6}$/.test(hex)) return 'rgba(128, 128, 128, 0.08)'
   const r = parseInt(hex.slice(1, 3), 16)
   const g = parseInt(hex.slice(3, 5), 16)
   const b = parseInt(hex.slice(5, 7), 16)
@@ -72,7 +73,8 @@ function highlightCode(
   colors: ThemeColors,
   tokenColors: Record<string, string>,
 ): React.ReactNode[] {
-  if (!language) return [code]
+  if (!language || !hljs.getLanguage(language)) return [code]
+
   try {
     const { value: html } = hljs.highlight(code, { language, ignoreIllegals: true })
     const elements: React.ReactNode[] = []
@@ -121,36 +123,11 @@ function highlightCode(
   }
 }
 
-const copyBtnStyles = StyleSheet.create({
-  btn:   { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  label: { fontSize: typography.sizeXs },
-})
-
-function CopyButton({ code }: { code: string }) {
-  const { colors } = useTheme()
-  const [copied, setCopied] = useState(false)
-
-  async function handlePress() {
-    await Clipboard.setStringAsync(code)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
-  }
-
-  const iconColor  = copied ? '#40BF8A' : colors.textMuted
-  const labelColor = copied ? '#40BF8A' : colors.textMuted
-
-  return (
-    <Pressable onPress={handlePress} style={copyBtnStyles.btn} hitSlop={8}>
-      <Feather name={copied ? 'check' : 'copy'} size={14} color={iconColor} />
-      <Text style={[copyBtnStyles.label, { color: labelColor }]}>
-        {copied ? 'Copied' : 'Copy'}
-      </Text>
-    </Pressable>
-  )
-}
-
-function makeRenderer(colors: ThemeColors, tokenColors: Record<string, string>) {
-  const codeStyles = StyleSheet.create({
+// ---------------------------------------------------------------------------
+// Code block styles — extracted so CodeBlock can memoize per theme change
+// ---------------------------------------------------------------------------
+function makeCodeStyles(colors: ThemeColors) {
+  return StyleSheet.create({
     block: {
       backgroundColor: colors.surface,
       borderRadius: 8,
@@ -194,41 +171,109 @@ function makeRenderer(colors: ThemeColors, tokenColors: Record<string, string>) 
       color: colors.text,
     },
   })
+}
 
-  class CustomRenderer extends Renderer {
-    code(text: string, language?: string, _containerStyle?: any, _textStyle?: any) {
-      const lang = language?.toLowerCase() ?? ''
-      const dotColor = LANG_COLORS[lang] ?? colors.textDim
-      const displayLang = language ?? 'plaintext'
-      const codeBgColor = getCachedBgColor(dotColor)
-      const highlightedLines = highlightCode(text, language, colors, tokenColors)
+// ---------------------------------------------------------------------------
+// CopyButton
+// ---------------------------------------------------------------------------
+const copyBtnStyles = StyleSheet.create({
+  btn:   { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  label: { fontSize: typography.sizeXs },
+})
 
-      return (
-        <View style={codeStyles.block}>
-          <View style={codeStyles.header}>
-            <View style={[codeStyles.dot, { backgroundColor: dotColor }]} />
-            <Text style={codeStyles.lang}>{displayLang}</Text>
-            <CopyButton code={text} />
-          </View>
-          <View style={codeStyles.divider} />
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={{ minWidth: '100%' }}
-          >
-            <View style={[codeStyles.codeContainer, { backgroundColor: codeBgColor }]}>
-              <Text style={codeStyles.code} selectable>
-                {highlightedLines}
-              </Text>
-            </View>
-          </ScrollView>
-        </View>
-      )
+function CopyButton({ code }: { code: string }) {
+  const { colors } = useTheme()
+  const [copied, setCopied] = useState(false)
+  const resetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (resetTimeoutRef.current) {
+        clearTimeout(resetTimeoutRef.current)
+      }
     }
+  }, [])
+
+  async function handlePress() {
+    await Clipboard.setStringAsync(code)
+    setCopied(true)
+    if (resetTimeoutRef.current) {
+      clearTimeout(resetTimeoutRef.current)
+    }
+    resetTimeoutRef.current = setTimeout(() => {
+      setCopied(false)
+      resetTimeoutRef.current = null
+    }, 2000)
   }
 
-  return new CustomRenderer()
+  const iconColor  = copied ? '#40BF8A' : colors.textMuted
+  const labelColor = copied ? '#40BF8A' : colors.textMuted
+
+  return (
+    <Pressable onPress={handlePress} style={copyBtnStyles.btn} hitSlop={8}>
+      <Feather name={copied ? 'check' : 'copy'} size={14} color={iconColor} />
+      <Text style={[copyBtnStyles.label, { color: labelColor }]}>
+        {copied ? 'Copied' : 'Copy'}
+      </Text>
+    </Pressable>
+  )
 }
+
+// ---------------------------------------------------------------------------
+// CodeBlock — proper React component so highlight result can be memoized
+// ---------------------------------------------------------------------------
+function CodeBlock({ code, language }: { code: string; language?: string }) {
+  const { colors, tokenColors } = useTheme()
+  const styles = useMemo(() => makeCodeStyles(colors), [colors])
+
+  const lang = language?.toLowerCase() ?? ''
+  const dotColor = LANG_COLORS[lang] ?? colors.textDim
+  const displayLang = language ?? 'plaintext'
+
+  const codeBgColor = useMemo(() => getCachedBgColor(dotColor), [dotColor])
+  const highlightedLines = useMemo(
+    () => highlightCode(code, language, colors, tokenColors),
+    [code, language, colors, tokenColors],
+  )
+
+  return (
+    <View style={styles.block}>
+      <View style={styles.header}>
+        <View style={[styles.dot, { backgroundColor: dotColor }]} />
+        <Text style={styles.lang}>{displayLang}</Text>
+        <CopyButton code={code} />
+      </View>
+      <View style={styles.divider} />
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={{ minWidth: '100%' }}
+      >
+        <View style={[styles.codeContainer, { backgroundColor: codeBgColor }]}>
+          <Text style={styles.code} selectable>
+            {highlightedLines}
+          </Text>
+        </View>
+      </ScrollView>
+    </View>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Renderer — thin singleton; CodeBlock handles all theming internally
+// ---------------------------------------------------------------------------
+
+class CustomRenderer extends Renderer {
+  code(text: string, language?: string) {
+    return <CodeBlock code={text} language={language} />
+  }
+}
+
+const sharedRenderer = new CustomRenderer()
+
+// ---------------------------------------------------------------------------
+// Markdown styles
+// ---------------------------------------------------------------------------
 
 function makeMdStyles(colors: ThemeColors): MarkedStyles {
   return {
@@ -239,7 +284,9 @@ function makeMdStyles(colors: ThemeColors): MarkedStyles {
     h1: { fontSize: typography.size2xl, fontWeight: '700', color: colors.text, marginTop: 8, marginBottom: 4 },
     h2: { fontSize: typography.sizeXl, fontWeight: '700', color: colors.text, marginTop: 6, marginBottom: 4 },
     h3: { fontSize: typography.sizeLg, fontWeight: '700', color: colors.text, marginTop: 4, marginBottom: 2 },
-    codespan: { fontFamily: typography.fontMono, fontSize: typography.sizeMd, color: colors.tool, backgroundColor: colors.surface2, paddingHorizontal: 4, paddingVertical: 2, borderRadius: 4, fontStyle: 'normal' },
+    codespan: { fontFamily: typography.fontMono, fontSize: typography.sizeMd, color: colors.tool,
+      backgroundColor: colors.surface2, paddingHorizontal: 4, paddingVertical: 2, borderRadius: 4,
+      fontStyle: 'normal' },
     code: { backgroundColor: colors.surface, borderRadius: 8 },
     blockquote: { borderLeftWidth: 3, borderLeftColor: colors.textMuted, paddingLeft: 10 },
     li: { fontSize: typography.sizeLg, color: colors.text },
@@ -256,10 +303,48 @@ interface MarkdownMessageProps {
   content: string
 }
 
-export function MarkdownMessage({ content }: MarkdownMessageProps) {
-  const { colors, tokenColors } = useTheme()
+/**
+ * Normalizes input text strings for the React Native Markdown parser.
+ * 
+ * Why this is required in React Native vs. Web:
+ * 1. Native API payloads frequently transmit literal escape characters ("\\n") 
+ *    instead of real line-break bytes, which standard parsers render as raw text.
+ * 
+ * 2. Unlike web-based markdown engines (like marked.js) which handle single 
+ *    newlines gracefully using HTML <br/> tags, native mobile engines rely on strict 
+ *    paragraph boundaries. Continuous layouts like "\n**Text**" break the internal 
+ *    Lexer tokenization loops, causing bold style rules to fail silently. 
+ * 
+ * 3. Forcing a double newline ("\n\n**") isolates metadata segments into discrete, 
+ *    valid paragraph components that native layout blocks can safely process.
+ */
+function normalizeMarkdownInput(rawInput: string): string {
+  if (!rawInput) return '';
 
-  const customRenderer = useMemo(() => makeRenderer(colors, tokenColors), [colors, tokenColors])
+  let normalized = rawInput
+    // 1. Force raw '\\n' strings from API responses into real bytes
+    .replace(/\\n/g, '\n')
+    
+    // 2. CRITICAL: Inject an extra newline before bold keys.
+    // This stops react-native-marked from breaking on continuous paragraphs.
+    .replace(/\n(\*\*)/g, '\n\n$1')
+    
+    // 3. Optional: Convert loose double-space indentation lines into 
+    // clean markdown bullet points so the layout lists read correctly
+    .replace(/\n  (Recent|Tools|Last)/g, '\n* $1')
+
+  console.warn(
+    `MarkdownMessage: normalizing content for markdown parsing {content}`, 
+    JSON.stringify(normalized)
+  );
+  return normalized
+}
+
+export function MarkdownMessage({ content }: MarkdownMessageProps) {
+  const { colors } = useTheme()
+
+  const normalizedContent = useMemo(() => normalizeMarkdownInput(content), [content])
+
   const mdStyles = useMemo(() => makeMdStyles(colors), [colors])
 
   const markdownTheme = useMemo(() => ({
@@ -273,10 +358,11 @@ export function MarkdownMessage({ content }: MarkdownMessageProps) {
 
   return (
     <Markdown
-      value={content}
-      renderer={customRenderer}
+      value={normalizedContent}
+      renderer={sharedRenderer}
       styles={mdStyles}
       theme={markdownTheme}
+      flatListProps={{ style: { backgroundColor: 'transparent' }, contentContainerStyle: { backgroundColor: 'transparent' } }}
     />
   )
 }
