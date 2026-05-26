@@ -332,11 +332,6 @@ function normalizeMarkdownInput(rawInput: string): string {
     // 3. Optional: Convert loose double-space indentation lines into 
     // clean markdown bullet points so the layout lists read correctly
     .replace(/\n  (Recent|Tools|Last)/g, '\n* $1')
-
-  console.warn(
-    `MarkdownMessage: normalizing content for markdown parsing {content}`, 
-    JSON.stringify(normalized)
-  );
   return normalized
 }
 
