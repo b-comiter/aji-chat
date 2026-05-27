@@ -211,6 +211,101 @@ export async function getItemsForAgent(
 }
 
 // ---------------------------------------------------------------------------
+// Paginated readers — cursor is items.local_id (monotonic insertion order)
+// All return rows in ASC display order regardless of which direction we fetch.
+// ---------------------------------------------------------------------------
+
+/** Newest `limit` rows for a chat, in ASC order (oldest first). */
+export async function loadRecentItems(
+  db: SQLiteDatabase,
+  chatId: string,
+  limit: number,
+): Promise<ItemRow[]> {
+  const rows = await db.getAllAsync<ItemRow>(
+    `SELECT * FROM items WHERE chat_id = ? ORDER BY local_id DESC LIMIT ?`,
+    chatId,
+    limit,
+  )
+  return rows.reverse()
+}
+
+/** Up to `limit` rows older than `beforeLocalId`, in ASC order. */
+export async function loadOlderThan(
+  db: SQLiteDatabase,
+  chatId: string,
+  beforeLocalId: number,
+  limit: number,
+): Promise<ItemRow[]> {
+  const rows = await db.getAllAsync<ItemRow>(
+    `SELECT * FROM items WHERE chat_id = ? AND local_id < ?
+     ORDER BY local_id DESC LIMIT ?`,
+    chatId,
+    beforeLocalId,
+    limit,
+  )
+  return rows.reverse()
+}
+
+/** Up to `limit` rows newer than `afterLocalId`, in ASC order. */
+export async function loadNewerThan(
+  db: SQLiteDatabase,
+  chatId: string,
+  afterLocalId: number,
+  limit: number,
+): Promise<ItemRow[]> {
+  return db.getAllAsync<ItemRow>(
+    `SELECT * FROM items WHERE chat_id = ? AND local_id > ?
+     ORDER BY local_id ASC LIMIT ?`,
+    chatId,
+    afterLocalId,
+    limit,
+  )
+}
+
+/**
+ * Load a window centered on `itemId`: up to `beforeLimit` rows at or before its
+ * local_id (target included), plus up to `afterLimit` rows after it.
+ * Returns separate arrays so callers can derive hasMore from each side.
+ * Returns null if the item is not found.
+ */
+export async function loadAroundItem(
+  db: SQLiteDatabase,
+  chatId: string,
+  itemId: string,
+  beforeLimit: number,
+  afterLimit: number,
+): Promise<{ before: ItemRow[]; after: ItemRow[] } | null> {
+  const target = await db.getFirstAsync<{ local_id: number }>(
+    `SELECT local_id FROM items WHERE chat_id = ? AND id = ? LIMIT 1`,
+    chatId,
+    itemId,
+  )
+  if (!target) return null
+
+  const beforeDesc = await db.getAllAsync<ItemRow>(
+    `SELECT * FROM items WHERE chat_id = ? AND local_id <= ?
+     ORDER BY local_id DESC LIMIT ?`,
+    chatId,
+    target.local_id,
+    beforeLimit,
+  )
+  const after = await loadNewerThan(db, chatId, target.local_id, afterLimit)
+  return { before: beforeDesc.reverse(), after }
+}
+
+/** Look up the local_id for an item id. Returns null if not found. */
+export async function findItemLocalId(
+  db: SQLiteDatabase,
+  itemId: string,
+): Promise<number | null> {
+  const row = await db.getFirstAsync<{ local_id: number }>(
+    `SELECT local_id FROM items WHERE id = ? LIMIT 1`,
+    itemId,
+  )
+  return row?.local_id ?? null
+}
+
+// ---------------------------------------------------------------------------
 // Dev / debug utilities
 // ---------------------------------------------------------------------------
 

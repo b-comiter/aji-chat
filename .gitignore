@@ -35,7 +35,6 @@ coverage/
 
 # Environment
 .env
-.env.*
 
 # React Native
 *.keystore
@@ -87,3 +86,6 @@ apps/mobile/assets/*
 
 # Ignore pnpm store
 .pnpm-store/
+
+.claude/
+CLAUDE.md

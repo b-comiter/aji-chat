@@ -292,7 +292,7 @@ function makeMdStyles(colors: ThemeColors): MarkedStyles {
     li: { fontSize: typography.sizeLg, color: colors.text },
     table: { borderWidth: 1, borderColor: colors.border, borderRadius: 4 },
     tableRow: { minHeight: 36 },
-    tableCell: { paddingHorizontal: 10, },
+    tableCell: { paddingHorizontal: 10, paddingVertical: 8 },
   }
 }
 
@@ -343,21 +343,25 @@ export function MarkdownMessage({ content }: MarkdownMessageProps) {
   const mdStyles = useMemo(() => makeMdStyles(colors), [colors])
 
   const markdownTheme = useMemo(() => ({
-    colors: {
-      text:   colors.text,
-      link:   colors.accent,
-      code:   'transparent',
-      border: colors.border,
-    },
-  }), [colors])
+      colors: {
+        text:   colors.text,
+        link:   colors.accent,
+        code:   'transparent',
+        border: colors.border,
+      },
+    }), [colors])
 
   return (
-    <Markdown
-      value={normalizedContent}
-      renderer={sharedRenderer}
-      styles={mdStyles}
-      theme={markdownTheme}
-      flatListProps={{ style: { backgroundColor: 'transparent' }, contentContainerStyle: { backgroundColor: 'transparent' } }}
-    />
+      <Markdown 
+        value={normalizedContent} 
+        renderer={sharedRenderer} 
+        styles={mdStyles} 
+        theme={markdownTheme} 
+        flatListProps={{ 
+          style: { backgroundColor: 'transparent' },
+          contentContainerStyle: { backgroundColor: 'transparent' }
+        }} 
+      />
   )
 }
+

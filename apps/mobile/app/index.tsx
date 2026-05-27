@@ -15,10 +15,9 @@ import {
   View,
 } from 'react-native'
 import { router } from 'expo-router'
-import { Feather } from '@expo/vector-icons'
 import { useDB } from '../db/DBProvider'
-import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useWS } from '../context/WebSocketContext'
+import { IndexHeader } from '../components/headers/IndexHeader'
 import { useTheme } from '../context/ThemeContext'
 import { getAllAgents, agentDisplayName, AGENT_DISPLAY_NAMES, type AgentRow } from '../db/database'
 import type { ServerEvent } from '@aji/protocol'
@@ -67,7 +66,6 @@ export default function HomeScreen() {
   const db = useDB()
   const { conn, subscribe } = useWS()
   const { colors } = useTheme()
-  const { top: safeTop } = useSafeAreaInsets()
   const styles = useMemo(() => makeStyles(colors), [colors])
   const [agents, setAgents] = useState<AgentRow[]>([])
   const [pickerOpen, setPickerOpen] = useState(false)
@@ -149,24 +147,13 @@ export default function HomeScreen() {
     })
   }, [subscribe, db])
 
-  const connColor =
-    conn === 'connected' ? colors.success
-    : conn === 'connecting' ? colors.warn
-    : colors.danger
-
   return (
-    <View style={[styles.screen, { paddingTop: safeTop }]}>
-      {/* Header */}
-      <View style={styles.header}>
-        <Text style={styles.title}>aji-chat</Text>
-        <View style={[styles.connDot, { backgroundColor: connColor }]} />
-        <Pressable style={styles.iconBtn} onPress={() => router.push('/settings')} hitSlop={8}>
-          <Feather name="settings" size={16} color={colors.textMuted} />
-        </Pressable>
-        <Pressable style={styles.addBtn} onPress={() => setPickerOpen(true)} hitSlop={8}>
-          <Text style={styles.addBtnText}>＋</Text>
-        </Pressable>
-      </View>
+    <View style={styles.screen}>
+      <IndexHeader
+        connStatus={conn}
+        onSettings={() => router.push('/settings')}
+        onAdd={() => setPickerOpen(true)}
+      />
 
       {/* Agent picker modal */}
       <Modal
@@ -253,33 +240,6 @@ function AgentRow({ agent, onPress }: { agent: AgentRow; onPress: () => void }) 
 function makeStyles(colors: ThemeColors) {
   return StyleSheet.create({
     screen: { flex: 1, backgroundColor: colors.bg },
-    header: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      paddingHorizontal: spacing.xl,
-      paddingVertical: spacing.lg,
-      borderBottomWidth: 1,
-      borderBottomColor: colors.border,
-      gap: spacing.sm,
-    },
-    title: { color: colors.text, fontSize: typography.size2xl, fontWeight: typography.weightBold, flex: 1 },
-    connDot: { width: 8, height: 8, borderRadius: radius.full },
-    iconBtn: {
-      width: 30,
-      height: 30,
-      borderRadius: radius.full,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    addBtn: {
-      width: 30,
-      height: 30,
-      borderRadius: radius.full,
-      backgroundColor: colors.border,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    addBtnText: { color: colors.text, fontSize: typography.sizeLg, lineHeight: 20 },
     modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center' },
     pickerCard: {
       width: 280,

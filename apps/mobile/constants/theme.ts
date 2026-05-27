@@ -5,6 +5,7 @@
 export const darkColors = {
   // Backgrounds — mirrors mobile-mockup.html :root CSS variables
   bg:         '#0d1117',   // --bg
+  headerBg:   '#161b22',   // navigation chrome (status bar + header bar)
   surface:    '#161b22',   // --surface
   surface2:   '#1c2129',   // --surface-2
   surface3:   '#242b35',   // --surface-3
@@ -41,6 +42,7 @@ export const darkColors = {
 export const lightColors = {
   // Backgrounds
   bg:         '#ffffff',
+  headerBg:   '#f6f8fa',   // navigation chrome (status bar + header bar)
   surface:    '#f6f8fa',
   surface2:   '#eaeef2',
   surface3:   '#e0e4e9',
