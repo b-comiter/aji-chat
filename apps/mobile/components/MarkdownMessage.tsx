@@ -292,7 +292,7 @@ function makeMdStyles(colors: ThemeColors): MarkedStyles {
     li: { fontSize: typography.sizeLg, color: colors.text },
     table: { borderWidth: 1, borderColor: colors.border, borderRadius: 4 },
     tableRow: { minHeight: 36 },
-    tableCell: { paddingHorizontal: 10, paddingVertical: 8, color: colors.text },
+    tableCell: { paddingHorizontal: 10, },
   }
 }
 
