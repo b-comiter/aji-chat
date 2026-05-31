@@ -8,16 +8,29 @@
     "mobile": "pnpm --filter mobile start",
     "send": "tsx tools/send.ts",
     "simulate": "tsx tools/simulate.ts",
-    "hooks:install": "tsx tools/claude-hooks-install.ts",
-    "hooks:uninstall": "tsx tools/claude-hooks-uninstall.ts",
+    "claude-hook:install": "tsx tools/claude_code_integration/claude-hooks-install.ts",
+    "claude-hook:uninstall": "tsx tools/claude_code_integration/claude-hooks-uninstall.ts",
     "hermes:install": "tsx tools/hermes-plugin-install.ts",
-    "hermes:uninstall": "tsx tools/hermes-plugin-uninstall.ts"
+    "hermes:uninstall": "tsx tools/hermes-plugin-uninstall.ts",
+    "channel:bridge": "tsx tools/claude-channel-bridge.ts",
+    "channel:smoke": "tsx tools/claude-channel-bridge.smoke.ts",
+    "test:message": "tsx tools/test-mobile-message.ts",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:protocol": "jest --selectProjects @aji/protocol",
+    "test:server": "jest --selectProjects server",
+    "test:mobile": "jest --selectProjects mobile"
   },
   "dependencies": {
-    "@aji/protocol": "workspace:*"
+    "@aji/protocol": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.29.0"
   },
   "devDependencies": {
+    "@swc/core": "^1.15.40",
+    "@swc/jest": "^0.2.39",
+    "@types/jest": "^29.5.14",
     "@types/node": "^22.19.19",
+    "jest": "^29.7.0",
     "tsx": "^4.19.4",
     "typescript": "~5.9.2"
   },

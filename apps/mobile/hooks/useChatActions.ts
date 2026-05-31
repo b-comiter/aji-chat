@@ -17,13 +17,14 @@ import {
   getDbDump,
   insertItem,
   updateAgentPreview,
+  updateItemData,
   upsertAgent,
   wipeAllHistory,
 } from '../db/database'
+import { SERVER_CONFIG } from '../constants/server'
 import type { Item } from './chatTypes'
 
-const SERVER_PORT = process.env.EXPO_PUBLIC_SERVER_PORT ?? '4000'
-const SERVER_HTTP = `http://${process.env.EXPO_PUBLIC_SERVER_HOST}:${SERVER_PORT}`
+const SERVER_HTTP = SERVER_CONFIG.httpBase
 
 async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs = 5000): Promise<Response> {
   const ctrl = new AbortController()
@@ -168,9 +169,30 @@ export function useChatActions({
   }, [setItems])
 
   const respond = useCallback((promptId: string, choice: string) => {
-    sendEvent({ type: 'prompt_response', id: promptId, choice })
-    setItems((prev) => prev.filter((it) => !(it.kind === 'prompt' && it.id === promptId)))
-  }, [sendEvent, setItems])
+    // Hermes text-approval choices are slash commands (/approve, /deny, etc.).
+    // Send them as a plain user_message to the agent rather than a prompt_response
+    // — there is no server-side waiter for these, they are Hermes's own text protocol.
+    if (choice.startsWith('/')) {
+      sendEvent({ type: 'user_message', text: choice, ...(chatId ? { agent: chatId } : {}) })
+    } else {
+      sendEvent({ type: 'prompt_response', id: promptId, choice })
+    }
+
+    // Persist resolved state so the prompt doesn't re-block the composer on reload.
+    const current = itemsRef.current.find(
+      (it): it is Extract<Item, { kind: 'prompt' }> => it.kind === 'prompt' && it.id === promptId,
+    )
+    if (current) {
+      const choiceLabel = current.options.find((o) => o.id === choice)?.label ?? choice
+      updateItemData(db, promptId, { ...current, resolved: true, resolvedChoice: choice, choiceLabel }).catch(console.warn)
+    }
+
+    setItems((prev) => prev.map((it) => {
+      if (it.kind !== 'prompt' || it.id !== promptId) return it
+      const choiceLabel = it.options.find((o) => o.id === choice)?.label ?? choice
+      return { ...it, resolved: true, resolvedChoice: choice, choiceLabel }
+    }))
+  }, [chatId, db, sendEvent, setItems])
 
   const handleLocalCommand = useCallback(async (cmd: string, args: string[]): Promise<boolean> => {
     const factory = LOCAL_COMMAND_HANDLERS[cmd]
@@ -226,7 +248,9 @@ export function useChatActions({
     const msgData: Item = { kind: 'message', id: msgId, role: 'user', text, done: true }
 
     setItems((prev) => [...prev, msgData])
-    sendEvent({ type: 'user_message', text })
+    // Stamp the target agent (chatId) so server-side adapters — e.g. the Claude
+    // Code channel bridge — can route this message to the right session.
+    sendEvent({ type: 'user_message', text, ...(chatId ? { agent: chatId } : {}) })
 
     if (chatId) {
       upsertAgent(db, chatId)

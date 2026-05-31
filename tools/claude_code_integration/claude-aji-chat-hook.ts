@@ -63,23 +63,29 @@ function clearTurnId(sessionId: string): void {
 // HTTP helpers
 // ---------------------------------------------------------------------------
 
-async function postJson(url: string, body: unknown): Promise<unknown | null> {
+async function postJson(url: string, body: unknown, timeoutMs?: number): Promise<unknown | null> {
+  const ctrl = new AbortController()
+  const timer = timeoutMs != null ? setTimeout(() => ctrl.abort(), timeoutMs) : null
   try {
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      signal: ctrl.signal,
     })
     if (!response.ok) return null
     const text = await response.text()
     return text ? JSON.parse(text) as unknown : null
   } catch {
     return null
+  } finally {
+    if (timer !== null) clearTimeout(timer)
   }
 }
 
+// Regular events get a 4 s deadline so a hung server never stalls the hook pipeline.
 async function emit(event: ServerEvent): Promise<void> {
-  await postJson(SERVER, event)
+  await postJson(SERVER, event, 4000)
 }
 
 async function readStdin(): Promise<Record<string, unknown> | null> {
@@ -169,6 +175,35 @@ function writeHookJson(body: unknown): void {
   process.stdout.write(`${JSON.stringify(body)}\n`)
 }
 
+// ---------------------------------------------------------------------------
+// Model-level commands exposed to the mobile command picker.
+//
+// NOTE: These are NOT Claude Code CLI slash commands (/compact, /clear, etc.).
+// CLI commands run at the terminal layer before the model sees anything — they
+// cannot be triggered through the channel bridge. Instead, we emit model-level
+// prompts that Claude the model can actually act on when received via channel.
+// ---------------------------------------------------------------------------
+
+async function emitClaudeCodeCommands(): Promise<void> {
+  await emit({
+    type: 'commands',
+    agent: AGENT,
+    commands: [
+      // Status / awareness
+      { name: 'status',    description: 'What are you currently working on?',               category: 'Info' },
+      { name: 'summarize', description: 'Summarize what you have done so far this session', category: 'Info' },
+      { name: 'memory',    description: 'Show me what is in your CLAUDE.md memory files',  category: 'Info' },
+
+      // Session
+      { name: 'compact',   description: 'Summarize and compress our conversation to save context', category: 'Session', args_hint: '[focus]' },
+
+      // Review
+      { name: 'plan',      description: 'Explain your plan before you start',              category: 'Review' },
+      { name: 'diff',      description: 'Show me a summary of all changes made so far',    category: 'Review' },
+    ],
+  })
+}
+
 async function main(): Promise<void> {
   const payload = await readStdin()
   if (!payload) return
@@ -178,13 +213,25 @@ async function main(): Promise<void> {
 
   switch (event) {
     case 'UserPromptSubmit': {
+      const prompt = String(payload.prompt ?? '')
+
+      // If this prompt originated from the phone (via the channel bridge), the
+      // user already sees it on mobile — don't echo it back wrapped in <channel> tags.
+      const fromAjiChat = /<channel\s+source="aji-chat"[^>]*>/.test(prompt)
+
       const id = randomUUID()
       const turnId = randomUUID()
       writeTurnId(sessionId, turnId)
-      await emit({ type: 'message_start', id, role: 'user', agent: AGENT, turn_id: turnId })
-      await emit({ type: 'text_delta', id, text: String(payload.prompt ?? ''), agent: AGENT, turn_id: turnId })
-      await emit({ type: 'message_end', id, agent: AGENT, turn_id: turnId })
+
+      if (!fromAjiChat) {
+        await emit({ type: 'message_start', id, role: 'user', agent: AGENT, turn_id: turnId })
+        await emit({ type: 'text_delta', id, text: prompt, agent: AGENT, turn_id: turnId })
+        await emit({ type: 'message_end', id, agent: AGENT, turn_id: turnId })
+      }
       await emit({ type: 'status', value: 'thinking', agent: AGENT })
+      // Populate the mobile command picker on first contact so commands are
+      // available immediately (server caches them for the session lifetime).
+      await emitClaudeCodeCommands()
       break
     }
     case 'PreToolUse': {
@@ -272,6 +319,8 @@ async function main(): Promise<void> {
       }
       clearTurnId(sessionId)
       await emit({ type: 'status', value: 'idle', agent: AGENT })
+      // Refresh the mobile command picker when Claude goes idle — best time to send a command.
+      await emitClaudeCodeCommands()
       break
     }
     default:

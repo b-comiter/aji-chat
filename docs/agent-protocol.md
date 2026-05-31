@@ -125,7 +125,7 @@ vocabulary.
 
 ### Server → Phone events
 
-Seven of the ten event types carry an optional `turn_id` that groups everything
+Most of the event types carry an optional `turn_id` that groups everything
 belonging to one agent turn. The Hermes adapter mints a UUID in
 `on_processing_start` and stamps it on every outbound event until
 `on_processing_complete`. The Claude Code hook mints a UUID on `UserPromptSubmit`,
@@ -142,6 +142,15 @@ in that turn. If unset (e.g. from the simulator), mobile falls back to chronolog
 // Tool calls
 { type: "tool_start", id: "tool_1", name: "write_file", args: {...}, turn_id?: "turn_abc" }
 { type: "tool_end",   id: "tool_1", result: {...},                    turn_id?: "turn_abc" }
+
+// Files / media — a single self-contained event (no start/delta/end). The bytes
+// ride inline as base64 in `data`, so the server stays a dumb router and the
+// client persists + replays the file with no out-of-band fetch. The client
+// renders by `mime`: audio/* → audio player, anything else → a file chip.
+// This one event subsumes Hermes's typed send_voice / send_image / send_document;
+// the planned Hermes verb is a single `send_file`.
+{ type: "file", id: "file_1", role: "assistant", mime: "audio/mpeg",
+  data: "<base64>", name?: "clip.mp3", duration?: 1, text?: "caption", turn_id?: "turn_abc" }
 
 // Agent status (no turn_id — it's terminal UI state, not turn-scoped)
 { type: "status", value: "thinking" | "working" | "idle" }

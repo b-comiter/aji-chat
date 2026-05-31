@@ -7,6 +7,7 @@
  *            keyed by chat_id (= the agent identity, e.g. 'claude-code')
  */
 import type { SQLiteDatabase } from 'expo-sqlite'
+import type { CommandItem } from '@aji/protocol'
 
 // ---------------------------------------------------------------------------
 // Display names
@@ -49,6 +50,26 @@ export async function migrateDb(db: SQLiteDatabase): Promise<void> {
     await db.execAsync('PRAGMA user_version = 3')
   }
 
+  if (version < 4) {
+    // v3→v4: add unique index on items.id for idempotent event replay.
+    await db.execAsync(`
+      CREATE UNIQUE INDEX IF NOT EXISTS items_id_unique ON items(id);
+    `)
+    await db.execAsync('PRAGMA user_version = 4')
+  }
+
+  if (version < 5) {
+    // v4→v5: per-chat cached slash command lists for offline/reload hydration.
+    await db.execAsync(`
+      CREATE TABLE IF NOT EXISTS command_cache (
+        chat_id    TEXT PRIMARY KEY REFERENCES agents(id),
+        commands   TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `)
+    await db.execAsync('PRAGMA user_version = 5')
+  }
+
   await db.execAsync(`
     CREATE TABLE IF NOT EXISTS agents (
       id                   TEXT PRIMARY KEY,
@@ -70,6 +91,12 @@ export async function migrateDb(db: SQLiteDatabase): Promise<void> {
     );
 
     CREATE INDEX IF NOT EXISTS items_by_chat ON items(chat_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS command_cache (
+      chat_id    TEXT PRIMARY KEY REFERENCES agents(id),
+      commands   TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
   `)
 }
 
@@ -146,6 +173,7 @@ export async function getAllAgents(db: SQLiteDatabase): Promise<AgentRow[]> {
   )
 }
 
+
 // ---------------------------------------------------------------------------
 // Items
 // ---------------------------------------------------------------------------
@@ -161,7 +189,7 @@ export async function insertItem(
   },
 ): Promise<void> {
   await db.runAsync(
-    `INSERT INTO items (id, chat_id, kind, data, turn_id, done, created_at)
+    `INSERT OR IGNORE INTO items (id, chat_id, kind, data, turn_id, done, created_at)
      VALUES (?, ?, ?, ?, ?, 0, ?)`,
     opts.id,
     opts.chatId,
@@ -340,6 +368,44 @@ export async function setSetting(db: SQLiteDatabase, key: string, value: string)
     key,
     value,
   )
+}
+
+// ---------------------------------------------------------------------------
+// Commands cache (per chat)
+// ---------------------------------------------------------------------------
+
+export async function saveCachedCommands(
+  db: SQLiteDatabase,
+  chatId: string,
+  commands: CommandItem[],
+): Promise<void> {
+  await db.runAsync(
+    `INSERT INTO command_cache (chat_id, commands, updated_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(chat_id) DO UPDATE SET
+       commands = excluded.commands,
+       updated_at = excluded.updated_at`,
+    chatId,
+    JSON.stringify(commands),
+    Date.now(),
+  )
+}
+
+export async function loadCachedCommands(
+  db: SQLiteDatabase,
+  chatId: string,
+): Promise<CommandItem[]> {
+  const row = await db.getFirstAsync<{ commands: string }>(
+    `SELECT commands FROM command_cache WHERE chat_id = ? LIMIT 1`,
+    chatId,
+  )
+  if (!row?.commands) return []
+  try {
+    const parsed = JSON.parse(row.commands) as CommandItem[]
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
 }
 
 export type DbDumpResult = {

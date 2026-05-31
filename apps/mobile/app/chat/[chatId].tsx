@@ -1,73 +1,78 @@
 /**
- * Per-agent chat screen.
+ * Per-agent chat screen with inverted FlatList (WhatsApp model).
  *
- * Responsible only for rendering. All state management lives in:
- *  - useChatSession  — items, agent status, commands (WS + DB)
- *  - useChatActions  — sendMessage, respond, addSystemMessage
- *  - useChatAnimations — keyboard offset, status pulse
+ * **Responsibilities split across:**
+ *  - useChatSession   — items (chronological), agent status, commands (WS + DB)
+ *  - useChatActions   — sendMessage, respond, addSystemMessage
+ *  - useChatAnimations — keyboard offset
+ *  - MessageList      — inverted rendering (newest at visual bottom)
+ *
+ * **Architecture:**
+ *  - Items stored chronologically (oldest first → newest last)
+ *  - Render metadata (groupStartIds, newestId) computed once per items change
+ *  - renderItem uses id-based lookups (not array indices)
+ *  - MessageList reverses items for display; inverted prop handles the rest
+ *
+ * **Scroll behavior:**
+ *  - Chat opens at visual bottom (newest message) — free from inverted semantics
+ *  - User scrolls up → reads history, pagination loads older messages
+ *  - New messages arrive → appear at bottom, user not yanked (inverted's free behavior)
+ *  - User sends → explicit scrollToBottom() animates to newest
+ *  - No scroll position save/restore (acceptable UX trade-off)
+ *
+ * See docs/chat-scroll-architecture.md for full design rationale.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Animated } from 'react-native'
 import { useLocalSearchParams } from 'expo-router'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useDB } from '../../db/DBProvider'
-import { agentDisplayName, setSetting } from '../../db/database'
+import { agentDisplayName } from '../../db/database'
 import { useWS } from '../../context/WebSocketContext'
 import { useTheme } from '../../context/ThemeContext'
 import type { Item } from '../../hooks/chatTypes'
 import { useChatSession } from '../../hooks/useChatSession'
-import type { SavedPosition } from '../../hooks/useChatSession'
 import { useChatActions, LOCAL_COMMANDS } from '../../hooks/useChatActions'
-import { useKeyboardOffset, usePulseAnimation } from '../../hooks/useChatAnimations'
+import { useKeyboardOffset } from '../../hooks/useChatAnimations'
 import { ChatHeader } from '../../components/headers/ChatHeader'
 import { Composer } from '../../components/chat/Composer'
 import { MessageList } from '../../components/chat/MessageList'
+import type { MessageListHandle } from '../../components/chat/MessageList'
 import { CommandPicker } from '../../components/chat/CommandPicker'
 import { Row } from '../../components/chat/MessageRow'
+import { ToolSheet } from '../../components/chat/ToolSheet'
 
 export default function ChatScreen() {
-  const { chatId } = useLocalSearchParams<{ chatId: string }>()
+  const { chatId } = useLocalSearchParams<{ chatId?: string | string[] }>()
+  const resolvedChatId = useMemo(() => {
+    if (Array.isArray(chatId)) return chatId[0] ?? undefined
+    return chatId?.trim() ? chatId : undefined
+  }, [chatId])
   const db = useDB()
-  const { conn, sendEvent, subscribe } = useWS()
+  const { conn, sendEvent, subscribe, setActiveChatId } = useWS()
+
+  useEffect(() => {
+    setActiveChatId(resolvedChatId ?? null)
+    return () => setActiveChatId(null)
+  }, [resolvedChatId, setActiveChatId])
   const { colors } = useTheme()
 
   const { bottom: safeBottom } = useSafeAreaInsets()
   const [draft, setDraft] = useState('')
+  const [isToolSheetOpen, setIsToolSheetOpen] = useState<Item[] | null>(null)
+  const messageListRef = useRef<MessageListHandle | null>(null)
 
   const {
     items,
     setItems,
     agentStatus,
     commands,
-    initialPosition,
     hasMoreOlder,
-    hasMoreNewer,
     loadOlder,
-    loadNewer,
-  } = useChatSession(chatId, db, conn, subscribe)
+  } = useChatSession(resolvedChatId, db, conn, subscribe, sendEvent)
 
-  // Latest reported scroll position from MessageList (kept in a ref so the
-  // unmount cleanup can read the value without restarting the effect on every
-  // position update).
-  const positionRef = useRef<SavedPosition | null>(null)
-  const onPositionChange = useCallback((pos: SavedPosition) => {
-    positionRef.current = pos
-  }, [])
-
-  // Persist scroll position on chat unmount.
-  useEffect(() => {
-    if (!chatId) return
-    return () => {
-      const pos = positionRef.current
-      if (pos) {
-        setSetting(db, `scroll_pos:${chatId}`, JSON.stringify(pos)).catch(() => {})
-      }
-    }
-  }, [db, chatId])
-
-  const { sendMessage, respond } = useChatActions({ chatId, db, conn, sendEvent, items, setItems })
+  const { sendMessage, respond } = useChatActions({ chatId: resolvedChatId, db, conn, sendEvent, items, setItems })
   const kbOffset = useKeyboardOffset(safeBottom)
-  const pulseScale = usePulseAnimation(agentStatus)
 
   const toolsByAgentMsgId = useMemo(() => {
     const map = new Map<string, Item[]>()
@@ -84,39 +89,101 @@ export default function ChatScreen() {
     return map
   }, [items])
 
-  const displayItems = useMemo(() => items.filter((it) => it.kind !== 'tool'), [items])
+  // Filter tools (rendered via badge) and ghost agent messages (done, no text, no tool badge).
+  // Ghost messages arise when message_end arrives with no preceding text_delta; they produce
+  // an empty wrapper + divider with no visible content, causing blank divider stacking.
+  const displayItems = useMemo(() => items.filter((it) => {
+    if (it.kind === 'tool') return false
+    if (it.kind === 'message' && it.role !== 'user' && it.done && !it.text.trim()) {
+      return (toolsByAgentMsgId.get(it.id)?.length ?? 0) > 0
+    }
+    return true
+  }), [items, toolsByAgentMsgId])
+
+  const hasPendingPrompt = useMemo(
+    () => displayItems.some((it) => it.kind === 'prompt' && !it.resolved),
+    [displayItems],
+  )
+
+  // Compute which items start a new message group (avatar visible, metadata shown).
+  //
+  // Why precompute over chronological items + id-based lookup?
+  //   - MessageList reverses items for inverted rendering (data[0] = newest)
+  //   - renderItem's `index` is now meaningless (data[5] is the 5th newest, not 5th chronologically)
+  //   - Computing "group start" from index would fail (prev item in reversed order ≠ prev in time)
+  //
+  // Solution: Compute once over chronological items, store IDs in a Set.
+  // renderItem does O(1) lookup: `isGroupStart = groupStartIds.has(item.id)`.
+  // Result: same semantics ("first in a same-sender run") regardless of render order.
+  const groupStartIds = useMemo(() => {
+    const set = new Set<string>()
+    let prev: Item | undefined
+    for (const item of displayItems) {
+      if (computeIsGroupStart(item, prev)) set.add(item.id)
+      prev = item
+    }
+    return set
+  }, [displayItems])
+
+  // Divider style per item ID, keyed by the item's bottom border.
+  // 'heavy' on role transitions (user↔agent) for clear visual separation.
+  // 'light' between same-sender messages for subtle readability breaks.
+  // 'none' on the chronologically newest item (no border needed at visual bottom).
+  const dividerMap = useMemo(() => {
+    const map = new Map<string, 'light' | 'heavy' | 'none'>()
+    for (let i = 0; i < displayItems.length; i++) {
+      const cur = displayItems[i]
+      const next = displayItems[i + 1]
+      if (!next) {
+        map.set(cur.id, 'none')
+        continue
+      }
+      const curRole = cur.kind === 'message' || cur.kind === 'file' ? cur.role : 'other'
+      const nextRole = next.kind === 'message' || next.kind === 'file' ? next.role : 'other'
+      map.set(cur.id, curRole !== nextRole ? 'heavy' : 'light')
+    }
+    return map
+  }, [displayItems])
 
   const allCommands = useMemo(() => [...LOCAL_COMMANDS, ...commands], [commands])
 
-  const rawQuery = draft.startsWith('/') ? draft.slice(1) : null
+  const trimmedDraft = useMemo(() => draft.trim(), [draft])
+  const rawQuery = trimmedDraft.startsWith('/') ? trimmedDraft.slice(1) : null
   const pickerQuery = rawQuery !== null && !rawQuery.includes(' ') ? rawQuery.toLowerCase() : null
 
   const pickerItems = useMemo(() => {
     if (pickerQuery === null) return []
     return allCommands
       .filter((c) =>
-        c.name.startsWith(pickerQuery) ||
-        (c.aliases ?? []).some((a) => a.startsWith(pickerQuery)),
+        c.name.toLowerCase().startsWith(pickerQuery) ||
+        (c.aliases ?? []).some((a) => a.toLowerCase().startsWith(pickerQuery)),
       )
       .slice(0, 20)
   }, [pickerQuery, allCommands])
 
-  const displayName = chatId ? agentDisplayName(chatId) : 'Chat'
+  const displayName = resolvedChatId ? agentDisplayName(resolvedChatId) : 'Chat'
   const avatarLabel = useMemo(() => getAvatarLabel(displayName), [displayName])
-  const canSend = draft.trim().length > 0 && conn === 'connected'
+  const canSend = trimmedDraft.length > 0 && conn === 'connected' && (!hasPendingPrompt || trimmedDraft.startsWith('/'))
 
   const handleSend = useCallback(() => {
-    const text = draft.trim()
+    const text = trimmedDraft
     if (!text) return
     sendMessage(text)
     setDraft('')
-  }, [draft, sendMessage])
+    // Explicit scroll to bottom on Send. In inverted FlatList, offset: 0 = visual bottom.
+    // We animate to ensure the user sees their message land and the agent's streaming reply.
+    // (Unlike most interactions, Send is an explicit "I want to be at the bottom" signal.)
+    messageListRef.current?.scrollToBottom()
+  }, [trimmedDraft, sendMessage])
+
+  const handleCommandSelect = useCallback((name: string) => {
+    setDraft(`/${name} `)
+  }, [])
 
   const renderItem = useCallback(
-    ({ item, index }: { item: Item; index: number }) => {
-      const prev = displayItems[index - 1]
-      const isGroupStart = computeIsGroupStart(item, prev)
-      const isLast = index === displayItems.length - 1
+    ({ item }: { item: Item }) => {
+      const isGroupStart = groupStartIds.has(item.id)
+      const dividerKind = dividerMap.get(item.id) ?? 'none'
       const tools =
         item.kind === 'message' && item.role === 'assistant'
           ? toolsByAgentMsgId.get(item.id) ?? []
@@ -126,13 +193,14 @@ export default function ChatScreen() {
           item={item}
           onChoose={respond}
           isGroupStart={isGroupStart}
-          isLast={isLast}
+          dividerKind={dividerKind}
           tools={tools}
           avatarLabel={avatarLabel}
+          onOpenTools={setIsToolSheetOpen}
         />
       )
     },
-    [displayItems, toolsByAgentMsgId, respond, avatarLabel],
+    [groupStartIds, dividerMap, toolsByAgentMsgId, respond, avatarLabel],
   )
 
   return (
@@ -140,31 +208,32 @@ export default function ChatScreen() {
       <ChatHeader
         displayName={displayName}
         agentStatus={agentStatus}
-        pulseScale={pulseScale}
         connStatus={conn}
       />
       <MessageList
+        ref={messageListRef}
         items={displayItems}
         renderItem={renderItem}
-        initialPosition={initialPosition}
         hasMoreOlder={hasMoreOlder}
-        hasMoreNewer={hasMoreNewer}
         onLoadOlder={loadOlder}
-        onLoadNewer={loadNewer}
-        onPositionChange={onPositionChange}
       />
-      {pickerItems.length > 0 && (
-        <CommandPicker items={pickerItems} onSelect={(name) => setDraft(`/${name} `)} />
-      )}
-      <Composer draft={draft} setDraft={setDraft} onSend={handleSend} canSend={canSend} />
+      {pickerItems.length > 0 && <CommandPicker items={pickerItems} onSelect={handleCommandSelect} />}
+      <Composer draft={draft} setDraft={setDraft} onSend={handleSend} canSend={canSend} blocked={hasPendingPrompt} />
+      <ToolSheet
+        tools={isToolSheetOpen ?? []}
+        visible={isToolSheetOpen !== null}
+        onClose={() => setIsToolSheetOpen(null)}
+      />
     </Animated.View>
   )
 }
 
 function getAvatarLabel(displayName: string): string {
-  const words = displayName.trim().split(/\s+/)
+  const trimmed = displayName.trim()
+  if (!trimmed) return 'AI'
+  const words = trimmed.split(/\s+/)
   if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase()
-  return displayName.slice(0, 2).toUpperCase()
+  return trimmed.slice(0, 2).toUpperCase()
 }
 
 /**

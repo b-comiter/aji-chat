@@ -63,6 +63,11 @@ class AjiClient:
              payload.get("type"), payload.get("id"), payload.get("turn_id"), payload.get("agent"))
         await self._post("/event", payload)
 
+    async def probe(self) -> None:
+        """Lightweight server liveness check. Raises on any failure."""
+        response = await self._client.get(f"{self.server_url}/status")
+        response.raise_for_status()
+
     async def register_webhook(self, url: str) -> None:
         flog("register_webhook() url=%s", url)
         await self._post("/webhook", {"url": url})

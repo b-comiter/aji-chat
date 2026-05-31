@@ -5,11 +5,18 @@
  *
  * Usage: pnpm simulate
  */
+import { readFileSync } from 'node:fs'
 import type { ServerEvent } from '@aji/protocol'
 import { newId } from '@aji/protocol'
 
 const SERVER = 'http://localhost:4000/event'
 const AGENT = 'simulate'
+
+// A tiny committed MP3 tone, read once and base64-encoded so we can replay an
+// audio (`file`) event end-to-end. MP3 decodes on both iOS and Android.
+const SAMPLE_MP3_B64 = readFileSync(
+  new URL('./assets/sample.mp3', import.meta.url),
+).toString('base64')
 
 async function emit(event: ServerEvent): Promise<void> {
   await fetch(SERVER, {
@@ -47,6 +54,21 @@ async function run(): Promise<void> {
   await emit({ type: 'message_end', id: msg1, agent: AGENT })
   await sleep(300)
 
+  // Audio (file) message — exercises the inline-base64 `file` event.
+  console.log('emitting audio message with base64 data…')
+  await emit({
+    type: 'file',
+    id: newId('file'),
+    role: 'assistant',
+    mime: 'audio/mpeg',
+    name: 'sample.mp3',
+    duration: 1,
+    data: SAMPLE_MP3_B64,
+    text: 'Here is a voice clip.',
+    agent: AGENT,
+  })
+  await sleep(600)
+
   await emit({ type: 'status', value: 'working', agent: AGENT })
   const tool1 = newId('tool')
   await emit({
@@ -74,15 +96,116 @@ async function run(): Promise<void> {
   await emit({ type: 'message_end', id: msg2, agent: AGENT })
   await sleep(300)
 
+  // 1. Bash command — subtitle + code block
   await emit({
     type: 'permission_request',
     id: newId('perm'),
-    title: 'Read file',
-    message: 'Allow reading src/index.ts?',
+    title: 'Bash permission',
+    message: [
+      'Bash is requesting permission.',
+      '',
+      JSON.stringify({
+        command: 'mkdir -p /Users/bcom/.claude/projects/-Users-bcom-dev-aji-chat/memory',
+        description: 'Ensure memory directory exists',
+        timeout: 10000,
+      }, null, 2),
+    ].join('\n'),
     options: [
-      { id: 'once', label: 'Allow once' },
-      { id: 'always', label: 'Always allow' },
-      { id: 'cancel', label: 'Cancel' },
+      { id: 'allow_once', label: 'Allow once' },
+      { id: 'suggestion:0', label: 'Always allow (this project)' },
+      { id: 'deny', label: 'Deny' },
+    ],
+    agent: AGENT,
+  })
+  await sleep(1200)
+
+  // 2. Write — file path as subtitle
+  await emit({
+    type: 'permission_request',
+    id: newId('perm'),
+    title: 'Write permission',
+    message: [
+      'Write is requesting permission.',
+      '',
+      JSON.stringify({
+        file_path: '/Users/bcom/.claude/projects/-Users-bcom-dev-aji-chat/memory/MEMORY.md',
+        content: '# Memory index\n- [Overview](project_overview.md) — what we\'re building\n',
+      }, null, 2),
+    ].join('\n'),
+    options: [
+      { id: 'allow_once', label: 'Allow once' },
+      { id: 'deny', label: 'Deny' },
+    ],
+    agent: AGENT,
+  })
+  await sleep(1200)
+
+  // 3. AskUserQuestion — question list with labeled options
+  await emit({
+    type: 'permission_request',
+    id: newId('perm'),
+    title: 'AskUserQuestion permission',
+    message: [
+      'AskUserQuestion is requesting permission.',
+      '',
+      JSON.stringify({
+        questions: [
+          {
+            question: 'How should mobile messages be routed to the right agent?',
+            header: 'Routing',
+            options: [
+              {
+                label: 'Add `agent` to UserMessage',
+                description: 'Small protocol change: mobile stamps the chatId on each user_message; the bridge filters to claude-code only.',
+              },
+              {
+                label: 'Forward all messages',
+                description: 'No protocol change. The bridge injects every user_message into Claude Code. Simplest, but messages from other chats would leak in.',
+              },
+            ],
+            multiSelect: false,
+          },
+          {
+            question: 'Want a fallback for idle session delivery?',
+            header: 'Idle delivery',
+            options: [
+              {
+                label: 'Channel push only',
+                description: 'Simplest. Rely on the channel feature; verify idle-wake behavior during testing.',
+              },
+              {
+                label: 'Add file-inbox fallback',
+                description: 'Belt-and-suspenders: bridge writes messages to a file, CLAUDE.md tells Claude to check it each turn.',
+              },
+            ],
+            multiSelect: false,
+          },
+        ],
+      }, null, 2),
+    ].join('\n'),
+    options: [
+      { id: 'allow_once', label: 'Allow once' },
+      { id: 'deny', label: 'Deny' },
+    ],
+    agent: AGENT,
+  })
+  await sleep(1200)
+
+  // 4. ExitPlanMode — plan preview in rationale
+  await emit({
+    type: 'permission_request',
+    id: newId('perm'),
+    title: 'ExitPlanMode permission',
+    message: [
+      'ExitPlanMode is requesting permission.',
+      '',
+      JSON.stringify({
+        plan: '# Plan: Switch MessageList to inverted FlatList\n\n## Context\nWe\'ve burned a long session on scroll/restore inside a non-inverted FlatList. The fundamental problem: "bottom" is a moving target when adding messages extends the content.\n\n## Approach\nAdd `inverted` prop and reverse data at the FlatList boundary only. Upstream code stays chronological.',
+      }, null, 2),
+    ].join('\n'),
+    options: [
+      { id: 'allow_once', label: 'Allow once' },
+      { id: 'deny', label: 'Deny' },
     ],
     agent: AGENT,
   })

@@ -317,22 +317,41 @@ interface MarkdownMessageProps {
  * 
  * 3. Forcing a double newline ("\n\n**") isolates metadata segments into discrete, 
  *    valid paragraph components that native layout blocks can safely process.
+ * 
+ * 4. React Native markdown renderers split elements into separate native UI <Text> 
+ *    and <View> tokens. The engine fails to apply bold formatting styles to a 
+ *    text line if it immediately follows or surrounds an inline `code` snippet. 
+ *    To circumvent this layout engine defect on bullet items, mixed formatting 
+ *    is flattened into a safe, linear sequence: "**Text:** `code`".
  */
 function normalizeMarkdownInput(rawInput: string): string {
   if (!rawInput) return '';
 
-  let normalized = rawInput
+  return rawInput
     // 1. Force raw '\\n' strings from API responses into real bytes
     .replace(/\\n/g, '\n')
     
     // 2. CRITICAL: Inject an extra newline before bold keys.
-    // This stops react-native-marked from breaking on continuous paragraphs.
     .replace(/\n(\*\*)/g, '\n\n$1')
     
-    // 3. Optional: Convert loose double-space indentation lines into 
-    // clean markdown bullet points so the layout lists read correctly
+    // 3. Optional: Convert loose double-space indentation lines into clean bullet points
     .replace(/\n  (Recent|Tools|Last)/g, '\n* $1')
-  return normalized
+
+    // 4. Clean up LLM formatting errors with single quotes (e.g., **'text'** -> **text**)
+    .replace(/\*\*\'([^*'\n]+?)\'\*\*/g, '**$1**')
+
+    // 5. Restructure ONLY bulleted lines with backticks Work around for render bug 
+    // This matches a bullet line starting with - or *, finds the bold block, and captures the inner parts.
+    .replace(/^([\s]*[-*]\s+)\*\*(.*?)\*\*/gm, (match, bullet, content) => {
+      if (!content.includes('`')) return match;
+
+      // Extract text content and code content regardless of which comes first
+      const code = content.match(/`([^`]+?)`/)?.[1];
+      const text = content.replace(/`[^`]+?`/g, '').replace(/^[\s\W:-]+|[\s\W:-]+$/g, '').trim();
+
+      // Return unified, readable layout: "- **Text:** `code`"
+      return code && text ? `${bullet}**${text}:** \`${code}\`` : match;
+    });
 }
 
 export function MarkdownMessage({ content }: MarkdownMessageProps) {

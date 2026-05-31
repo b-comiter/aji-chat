@@ -3,7 +3,7 @@ import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { serve } from '@hono/node-server'
 import { WebSocketServer, WebSocket } from 'ws'
-import type { ClientEvent, PermissionRequest, PromptResponse, ServerEvent } from '@aji/protocol'
+import type { ClientEvent, Commands, PermissionRequest, PromptResponse, ServerEvent } from '@aji/protocol'
 import { textMessage } from '@aji/protocol'
 
 const PORT = 4000
@@ -14,6 +14,17 @@ const clients = new Set<WebSocket>()
 const webhooks = new Set<string>()
 const promptWaiters = new Map<string, { resolve: (event: PromptResponse | null) => void }>()
 
+// Latest commands per agent — keyed by event.agent, falling back to '__global__'.
+// Replayed to every new WS client on connect so late-joining screens don't miss them.
+const commandsCache = new Map<string, Commands>()
+
+// Ring buffer of recent events for offline-reconnect replay.
+// Clients send get_missed_events with their last known seq; server replays entries
+// with seq > after_seq back to that client only.
+const MAX_BUFFER = 500
+const eventBuffer: Array<{ seq: number; event: ServerEvent }> = []
+let nextSeq = 0
+
 // ---------------------------------------------------------------------------
 // Logging
 // ---------------------------------------------------------------------------
@@ -22,24 +33,40 @@ function ts(): string {
   return new Date().toISOString().replace('T', ' ').replace('Z', '')
 }
 
-function log(direction: '→' | '←' | ' ', tag: string, detail?: unknown): void {
+function log(direction: '➡️' | '⬅️' | '✅' | '❌' | ' ', tag: string, detail?: unknown): void {
   const prefix = `[${ts()}] ${direction} ${tag}`
   if (detail === undefined) {
     console.log(prefix)
   } else if (typeof detail === 'string') {
     console.log(`${prefix}  ${detail}`)
   } else {
-    console.log(`${prefix}  ${JSON.stringify(detail)}`)
+    console.log(`${prefix}  ${JSON.stringify(detail, null, 2)}`)
   }
 }
-
 
 // ---------------------------------------------------------------------------
 // Broadcast helpers
 // ---------------------------------------------------------------------------
 
+function bufferAndSend(ws: WebSocket, event: ServerEvent): void {
+  const seq = nextSeq++
+  eventBuffer.push({ seq, event })
+  if (eventBuffer.length > MAX_BUFFER) eventBuffer.shift()
+  ws.send(JSON.stringify({ seq, event }))
+}
+
+function replayCommandsTo(ws: WebSocket): void {
+  for (const cached of commandsCache.values()) {
+    bufferAndSend(ws, cached)
+  }
+}
+
 function broadcast(event: ServerEvent): number {
-  const payload = JSON.stringify(event)
+  const seq = nextSeq++
+  eventBuffer.push({ seq, event })
+  if (eventBuffer.length > MAX_BUFFER) eventBuffer.shift()
+
+  const payload = JSON.stringify({ seq, event })
   let sent = 0
   for (const client of clients) {
     if (client.readyState === WebSocket.OPEN) {
@@ -47,7 +74,12 @@ function broadcast(event: ServerEvent): number {
       sent += 1
     }
   }
-  log('→', `broadcast:${event.type}`, { sent, event })
+  if (event.type === 'file') {
+    // Don't log the full base64 data for files — can be huge and floods the console.
+    log(' ', '(file event data omitted)', { ...event, data: '[base64 data]' })
+  } else {
+    log('➡️', `broadcast:${event.type}`, { seq, event, sent })
+  }
   return sent
 }
 
@@ -79,6 +111,14 @@ function waitForPrompt(prompt: PermissionRequest): Promise<PromptResponse | null
   broadcast(prompt)
   return new Promise((resolve) => {
     promptWaiters.set(prompt.id, { resolve })
+    // Safety valve: auto-dismiss after 10 minutes so a crashed hook doesn't
+    // leave a stale waiter that permanently blocks the prompt slot.
+    setTimeout(() => {
+      if (promptWaiters.delete(prompt.id)) {
+        dismissPrompt(prompt.id)
+        resolve(null)
+      }
+    }, 10 * 60 * 1000)
   })
 }
 
@@ -89,7 +129,10 @@ function waitForPrompt(prompt: PermissionRequest): Promise<PromptResponse | null
 /** Broadcast a single typed ServerEvent to all connected clients. */
 app.post('/event', async (c) => {
   const event = (await c.req.json()) as ServerEvent
-  log(' ', `POST /event  type=${event.type}`)
+
+  if (event.type === 'commands') {
+    commandsCache.set(event.agent ?? '__global__', event)
+  }
   const sent = broadcast(event)
   return c.json({ sent })
 })
@@ -100,7 +143,7 @@ app.post('/send', async (c) => {
   log(' ', 'POST /send', message.slice(0, 120))
   let sent = 0
   for (const event of textMessage(message)) {
-    sent = broadcast(event)
+    sent += broadcast(event)
   }
   return c.json({ sent })
 })
@@ -124,7 +167,7 @@ app.post('/prompt/wait', async (c) => {
 
   const response = await waitForPrompt(prompt)
   if (response) {
-    log('←', `prompt/wait resolved  id=${prompt.id} choice=${response.choice}`)
+    log('⬅️', `prompt/wait resolved  id=${prompt.id} choice=${response.choice}`)
   } else {
     log(' ', `prompt/wait aborted  id=${prompt.id}`)
   }
@@ -263,10 +306,13 @@ app.post('/last-messages/dump', async (c) => {
 
   console.log(`\n[LAST MESSAGES] chat=${chatId} (${messages.length} message${messages.length !== 1 ? 's' : ''})`)
 
-  messages.forEach((msg, i) => {
-    console.log(msg)
-    console.log(' ', i)
-  })
+  const rows = messages.map((msg, i) => ({
+    '#': i + 1,
+    role: msg.role,
+    text: msg.text.replace(/\n/g, ' ').slice(0, 1000) || '—',
+    done: msg.done ? '✓' : '…',
+  }))
+  console.table(rows)
 
   return c.json({ logged: true })
 })
@@ -284,7 +330,7 @@ app.get('/status', (c) => {
  */
 app.post('/prompt/respond', async (c) => {
   const { id, choice } = await c.req.json<{ id: string; choice: string }>()
-  log('←', `POST /prompt/respond  id=${id} choice=${choice}`)
+  log('⬅️', `POST /prompt/respond  id=${id} choice=${choice}`)
   const resolved = resolvePrompt({ type: 'prompt_response', id, choice })
   return c.json({ resolved })
 })
@@ -317,13 +363,32 @@ const wss = new WebSocketServer({ server, path: '/ws' })
 
 wss.on('connection', (ws) => {
   clients.add(ws)
-  log(' ', `ws:connect  total=${clients.size}`)
+  log('✅', `ws:connect  total=${clients.size}`)
+
+  // Replay cached commands so late-joining clients get the current command list
+  // for every active agent without having to ask.
+  replayCommandsTo(ws)
 
   ws.on('message', (raw) => {
     try {
       const event = JSON.parse(raw.toString()) as ClientEvent
-      log('←', `ws:${event.type}`, event)
-      if (event.type === 'prompt_response') resolvePrompt(event)
+      log('⬅️', `ws:${event.type}`, event)
+      if (event.type === 'prompt_response') {
+        resolvePrompt(event)
+      } else if (event.type === 'get_commands') {
+        // Client is explicitly requesting the current command list (e.g. after
+        // a reconnect or before the agent has had a chance to broadcast).
+        if (ws.readyState === WebSocket.OPEN) replayCommandsTo(ws)
+      } else if (event.type === 'get_missed_events') {
+        const after = event.after_seq
+        const missed = eventBuffer.filter((e) => e.seq > after)
+        log(' ', `ws:get_missed_events  after=${after} replaying=${missed.length}`)
+        for (const entry of missed) {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(entry))
+          }
+        }
+      }
       dispatchToWebhooks(event)
     } catch {
       log(' ', 'ws:unparseable', raw.toString().slice(0, 200))
@@ -332,6 +397,6 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => {
     clients.delete(ws)
-    log(' ', `ws:disconnect  total=${clients.size}`)
+    log('❌', `ws:disconnect  total=${clients.size}`)
   })
 })

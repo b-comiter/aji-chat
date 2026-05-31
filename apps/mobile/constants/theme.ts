@@ -42,7 +42,7 @@ export const darkColors = {
 export const lightColors = {
   // Backgrounds
   bg:         '#ffffff',
-  headerBg:   '#f6f8fa',   // navigation chrome (status bar + header bar)
+  headerBg:   '#f6f8fa',
   surface:    '#f6f8fa',
   surface2:   '#eaeef2',
   surface3:   '#e0e4e9',

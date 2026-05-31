@@ -86,6 +86,33 @@ export interface Status {
 }
 
 /**
+ * A self-contained file/attachment — audio today, images/documents later.
+ * Unlike text, a file is a single discrete blob (no start/delta/end): the
+ * bytes ride inline as base64 in `data`, so the server stays a dumb router and
+ * the client can persist + replay it without any out-of-band fetch.
+ *
+ * The client renders based on `mime`: `audio/*` → an audio player, anything
+ * else → a generic file chip. `send_file` is the planned Hermes verb.
+ */
+export interface FileMessage {
+  type: 'file'
+  id: string
+  role: Role
+  /** IANA media type, e.g. 'audio/mpeg', 'audio/ogg', 'image/png'. */
+  mime: string
+  /** Base64-encoded file bytes (no `data:` prefix). */
+  data: string
+  /** Original filename — used for display and as an extension hint. */
+  name?: string
+  /** Duration in seconds, for audio/video. */
+  duration?: number
+  /** Optional caption / transcript shown alongside the file. */
+  text?: string
+  turn_id?: TurnId
+  agent?: AgentId
+}
+
+/**
  * Three-button approval prompt. Mirrors Hermes's send_slash_confirm and
  * send_exec_approval. The client should render `options` as buttons and
  * respond with a `PromptResponse` carrying the chosen option's `id`.
@@ -172,6 +199,7 @@ export type ServerEvent =
   | ToolStart
   | ToolEnd
   | Status
+  | FileMessage
   | PermissionRequest
   | Clarify
   | PromptDismiss
@@ -184,6 +212,12 @@ export type ServerEvent =
 export interface UserMessage {
   type: 'user_message'
   text: string
+  /**
+   * Which agent/chat this message is destined for (the mobile chatId).
+   * Optional for backward compatibility; adapters that route by agent
+   * (e.g. the Claude Code channel bridge) filter on this field.
+   */
+  agent?: AgentId
 }
 
 export interface PromptResponse {
@@ -203,7 +237,17 @@ export interface GetCommands {
   type: 'get_commands'
 }
 
-export type ClientEvent = UserMessage | PromptResponse | GetCommands
+/**
+ * Request replay of buffered ServerEvents missed while disconnected.
+ * The server responds by sending all buffered entries with seq > after_seq
+ * back to the requesting client only (not broadcast).
+ */
+export interface GetMissedEvents {
+  type: 'get_missed_events'
+  after_seq: number
+}
+
+export type ClientEvent = UserMessage | PromptResponse | GetCommands | GetMissedEvents
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -235,4 +279,35 @@ export function textMessage(text: string, role: Role = 'assistant', turn_id?: Tu
     { type: 'text_delta', id, text, ...(turn_id ? { turn_id } : {}) },
     { type: 'message_end', id, ...(turn_id ? { turn_id } : {}) },
   ]
+}
+
+/**
+ * Construct a single `file` event from a base64 payload. `role` defaults to
+ * 'assistant'; undefined optional fields are omitted so the wire shape stays
+ * minimal. Pass `turn_id` to group the file with a wider agent turn.
+ */
+export function fileMessage(
+  mime: string,
+  data: string,
+  opts: {
+    role?: Role
+    name?: string
+    duration?: number
+    text?: string
+    turn_id?: TurnId
+    agent?: AgentId
+  } = {},
+): FileMessage {
+  return {
+    type: 'file',
+    id: newId('file'),
+    role: opts.role ?? 'assistant',
+    mime,
+    data,
+    ...(opts.name !== undefined ? { name: opts.name } : {}),
+    ...(opts.duration !== undefined ? { duration: opts.duration } : {}),
+    ...(opts.text !== undefined ? { text: opts.text } : {}),
+    ...(opts.turn_id ? { turn_id: opts.turn_id } : {}),
+    ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
+  }
 }

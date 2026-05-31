@@ -5,7 +5,7 @@
  * SQLite on mount (instant), then patches in-memory state as live WS
  * events arrive. Tap a row to open that agent's chat history.
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   FlatList,
   Modal,
@@ -18,10 +18,11 @@ import { router } from 'expo-router'
 import { useDB } from '../db/DBProvider'
 import { useWS } from '../context/WebSocketContext'
 import { IndexHeader } from '../components/headers/IndexHeader'
+import { StatusIcon } from '../components/headers/StatusIcon'
 import { useTheme } from '../context/ThemeContext'
 import { getAllAgents, agentDisplayName, AGENT_DISPLAY_NAMES, type AgentRow } from '../db/database'
 import type { ServerEvent } from '@aji/protocol'
-import { spacing, typography, radius } from '../constants/theme'
+import { spacing, typography } from '../constants/theme'
 import type { ThemeColors } from '../constants/theme'
 
 // Agents the user can manually open a chat with (excludes 'unknown')
@@ -58,6 +59,62 @@ function statusColor(status: string, colors: ThemeColors): string {
   }
 }
 
+function statusLabel(status: string): string {
+  switch (status) {
+    case 'thinking':
+      return 'Thinking'
+    case 'working':
+      return 'Working'
+    case 'idle':
+      return 'Idle'
+    default:
+      return 'Unknown'
+  }
+}
+
+function createPlaceholderAgent(chatId: string, status: AgentRow['last_status'] = 'idle'): AgentRow {
+  return {
+    id: chatId,
+    display_name: agentDisplayName(chatId),
+    last_message_preview: null,
+    last_event_at: Date.now(),
+    last_status: status,
+  }
+}
+
+function upsertMissingAgent(prev: AgentRow[], chatId: string, status: AgentRow['last_status'] = 'idle'): AgentRow[] {
+  if (prev.some((agent) => agent.id === chatId)) return prev
+  return [createPlaceholderAgent(chatId, status), ...prev]
+}
+
+function applyLiveAgentEvent(prev: AgentRow[], event: ServerEvent): AgentRow[] {
+  const chatId = event.agent ?? 'unknown'
+
+  switch (event.type) {
+    case 'message_start':
+    case 'tool_start':
+    case 'permission_request':
+    case 'clarify':
+    case 'file':
+      return upsertMissingAgent(prev, chatId)
+
+    case 'message_end':
+      return prev.map((agent) =>
+        agent.id === chatId ? { ...agent, last_event_at: Date.now() } : agent,
+      )
+
+    case 'status': {
+      const withPlaceholder = upsertMissingAgent(prev, chatId, event.value)
+      return withPlaceholder.map((agent) =>
+        agent.id === chatId ? { ...agent, last_status: event.value } : agent,
+      )
+    }
+
+    default:
+      return prev
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -69,79 +126,31 @@ export default function HomeScreen() {
   const styles = useMemo(() => makeStyles(colors), [colors])
   const [agents, setAgents] = useState<AgentRow[]>([])
   const [pickerOpen, setPickerOpen] = useState(false)
-  const mountedRef = useRef(true)
 
   // Load agent list from DB on mount
   useEffect(() => {
+    let cancelled = false
+
     getAllAgents(db).then((rows) => {
-      if (mountedRef.current) setAgents(rows)
+      if (!cancelled) setAgents(rows)
     })
-    return () => { mountedRef.current = false }
+
+    return () => {
+      cancelled = true
+    }
   }, [db])
 
   // Subscribe to all WS events to patch in-memory agent rows in real-time
   useEffect(() => {
+    let cancelled = false
+
     return subscribe('*', (event: ServerEvent) => {
-      const chatId = event.agent ?? 'unknown'
+      setAgents((prev) => applyLiveAgentEvent(prev, event))
 
-      setAgents((prev) => {
-        switch (event.type) {
-          case 'message_start':
-          case 'tool_start':
-          case 'permission_request':
-          case 'clarify': {
-            // Ensure agent row exists (may arrive before DB upsert completes)
-            const exists = prev.some((a) => a.id === chatId)
-            if (exists) return prev
-            return [
-              {
-                id: chatId,
-                display_name: agentDisplayName(chatId),
-                last_message_preview: null,
-                last_event_at: Date.now(),
-                last_status: 'idle',
-              },
-              ...prev,
-            ]
-          }
-
-          case 'message_end': {
-            // Preview is updated by the context in DB; we update in-memory here
-            // by re-reading from the inFlight text via the event's text accumulation.
-            // Since we don't have the text here, just bump the timestamp.
-            return prev.map((a) =>
-              a.id === chatId ? { ...a, last_event_at: Date.now() } : a,
-            )
-          }
-
-          case 'status': {
-            const exists = prev.some((a) => a.id === chatId)
-            if (!exists) {
-              return [
-                {
-                  id: chatId,
-                  display_name: agentDisplayName(chatId),
-                  last_message_preview: null,
-                  last_event_at: Date.now(),
-                  last_status: event.value,
-                },
-                ...prev,
-              ]
-            }
-            return prev.map((a) =>
-              a.id === chatId ? { ...a, last_status: event.value } : a,
-            )
-          }
-
-          default:
-            return prev
-        }
-      })
-
-      // After message_end, re-read agent row to get updated preview
-      if (event.type === 'message_end') {
+      // After message_end or file, re-read agent rows to get updated preview
+      if (event.type === 'message_end' || event.type === 'file') {
         getAllAgents(db).then((rows) => {
-          if (mountedRef.current) setAgents(rows)
+          if (!cancelled) setAgents(rows)
         })
       }
     })
@@ -214,7 +223,12 @@ function AgentRow({ agent, onPress }: { agent: AgentRow; onPress: () => void }) 
   const styles = useMemo(() => makeStyles(colors), [colors])
   return (
     <Pressable style={styles.row} onPress={onPress}>
-      <View style={[styles.statusDot, { backgroundColor: statusColor(agent.last_status, colors) }]} />
+      <StatusIcon
+        color={statusColor(agent.last_status, colors)}
+        size={10}
+        pulse={agent.last_status !== 'idle'}
+        accessibilityLabel={`Agent status ${statusLabel(agent.last_status)}`}
+      />
       <View style={styles.rowBody}>
         <View style={styles.rowTop}>
           <Text style={styles.agentName}>{agent.display_name}</Text>
@@ -283,7 +297,6 @@ function makeStyles(colors: ThemeColors) {
       borderBottomColor: colors.border,
       gap: spacing.md,
     },
-    statusDot: { width: 10, height: 10, borderRadius: radius.full, flexShrink: 0 },
     rowBody: { flex: 1 },
     rowTop: { flexDirection: 'row', alignItems: 'center', marginBottom: 3 },
     agentName: { color: colors.text, fontSize: typography.sizeLg, fontWeight: typography.weightSemibold, flex: 1 },

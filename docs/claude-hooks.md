@@ -15,7 +15,7 @@ This creates a **dual-endpoint permission system** where permission requests can
 ```
 Claude Code Desktop
         ↓ (hook events via stdin)
-   Hook Script (tools/claude-aji-chat-hook.ts)
+   Hook Script (tools/claude_code_integration/claude-aji-chat-hook.ts)
         ↓ (POST /event, /prompt/wait)
    Aji-Chat Server (apps/server/src/index.ts)
         ↓ (WebSocket broadcast)
@@ -88,7 +88,7 @@ Claude Code Desktop          Hook                 Server              Mobile
 
 ## Hook Script Details
 
-### File: `tools/claude-aji-chat-hook.ts`
+### File: `tools/claude_code_integration/claude-aji-chat-hook.ts`
 
 **Key variables:**
 - `SERVER` (env: `AJI_SERVER`, default: `http://localhost:4000/event`) — where to POST events
@@ -175,14 +175,14 @@ function resolvePrompt(event) {
 
 ### Install hooks
 ```bash
-pnpm hooks:install
+pnpm claude-hook:install
 ```
 
 This registers 4 Claude Code events in `~/.claude/settings.json` to run the hook script.
 
 ### Uninstall hooks
 ```bash
-pnpm hooks:uninstall
+pnpm claude-hook:uninstall
 ```
 
 Removes all aji-chat hooks from settings.
@@ -240,7 +240,7 @@ interface PermissionRequest {
 ## See Also
 
 - `docs/agent-protocol.md` — Protocol design rationale vs. Hermes
-- `tools/claude-aji-chat-hook.ts` — Hook implementation
-- `tools/claude-hooks-install.ts` — Hook registration
-- `tools/claude-hooks-uninstall.ts` — Hook cleanup
+- `tools/claude_code_integration/claude-aji-chat-hook.ts` — Hook implementation
+- `tools/claude_code_integration/claude-hooks-install.ts` — Hook registration
+- `tools/claude_code_integration/claude-hooks-uninstall.ts` — Hook cleanup
 - `packages/protocol/src/index.ts` — Shared wire types

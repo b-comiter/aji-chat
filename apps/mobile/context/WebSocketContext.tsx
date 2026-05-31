@@ -24,17 +24,24 @@ import {
   type ReactNode,
 } from 'react'
 import { AppState } from 'react-native'
+import * as Notifications from 'expo-notifications'
 import type { ClientEvent, ServerEvent } from '@aji/protocol'
 import { useDB } from '../db/DBProvider'
 import {
+  agentDisplayName,
   deleteItem,
+  getSetting,
   insertItem,
+  saveCachedCommands,
+  setSetting,
   updateAgentPreview,
   updateAgentStatus,
   upsertAgent,
 } from '../db/database'
+import { filePreviewLabel } from '../components/chat/fileHelpers'
+import { SERVER_CONFIG } from '../constants/server'
 
-const SERVER_WS = `ws://${process.env.EXPO_PUBLIC_SERVER_HOST}:4000/ws`
+const SERVER_WS = SERVER_CONFIG.wsEndpoint
 const BACKOFF = [1000, 2000, 4000, 8000, 16000, 30000]
 
 export type ConnStatus = 'connecting' | 'connected' | 'disconnected'
@@ -48,12 +55,15 @@ interface WSContextValue {
   sendEvent: (e: ClientEvent) => void
   /** Subscribe to events for a specific chat (agent id). Pass '*' for all events. */
   subscribe: (chatId: string, handler: (e: ServerEvent) => void) => () => void
+  /** Called by chat screens to suppress notifications while the screen is visible. */
+  setActiveChatId: (id: string | null) => void
 }
 
 const WSContext = createContext<WSContextValue>({
   conn: 'connecting',
   sendEvent: () => {},
   subscribe: () => () => {},
+  setActiveChatId: () => {},
 })
 
 export function useWS(): WSContextValue {
@@ -87,7 +97,9 @@ export function WSProvider({ children }: { children: ReactNode }) {
   const ws = useRef<WebSocket | null>(null)
   const attempt = useRef(0)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const seqFlushTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const mounted = useRef(true)
+  const lastSeqRef = useRef(0)
 
   // Per-chat subscriber sets. Key '*' = all-events listener.
   const subscribers = useRef<Map<string, Set<(e: ServerEvent) => void>>>(new Map())
@@ -96,6 +108,10 @@ export function WSProvider({ children }: { children: ReactNode }) {
   // final payload to SQLite only on message_end / tool_end.
   const inFlight = useRef<Map<string, InFlight>>(new Map())
 
+  // The chatId currently visible to the user. Notifications are suppressed for
+  // this chat so the user isn't alerted to messages they can already see.
+  const activeChatIdRef = useRef<string | null>(null)
+
   // ---------------------------------------------------------------------------
   // Fan-out helpers
   // ---------------------------------------------------------------------------
@@ -103,6 +119,18 @@ export function WSProvider({ children }: { children: ReactNode }) {
   function notify(chatId: string, event: ServerEvent) {
     subscribers.current.get(chatId)?.forEach((h) => h(event))
     subscribers.current.get('*')?.forEach((h) => h(event))
+  }
+
+  async function maybeNotify(chatId: string, title: string, body: string) {
+    if (activeChatIdRef.current === chatId) return
+    try {
+      await Notifications.scheduleNotificationAsync({
+        content: { title, body, data: { chatId }, sound: true },
+        trigger: null,
+      })
+    } catch {
+      // Notifications unavailable (permission denied, simulator, etc.) — ignore
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -159,6 +187,10 @@ export function WSProvider({ children }: { children: ReactNode }) {
               turnId: inf.turnId,
             })
             await updateAgentPreview(db, inf.chatId, inf.text ?? '')
+            if (inf.role !== 'user') {
+              const body = inf.text?.trim().slice(0, 100) ?? 'New message'
+              await maybeNotify(inf.chatId, agentDisplayName(inf.chatId), body)
+            }
           }
           break
         }
@@ -204,6 +236,31 @@ export function WSProvider({ children }: { children: ReactNode }) {
           break
         }
 
+        case 'file': {
+          // Single self-contained event — persist immediately (no inFlight).
+          await upsertAgent(db, chatId)
+          await insertItem(db, {
+            id: event.id,
+            chatId,
+            kind: 'file',
+            data: {
+              kind: 'file',
+              id: event.id,
+              role: event.role,
+              mime: event.mime,
+              data: event.data,
+              name: event.name,
+              duration: event.duration,
+              text: event.text,
+              done: true,
+              turnId,
+            },
+            turnId,
+          })
+          await updateAgentPreview(db, chatId, filePreviewLabel(event))
+          break
+        }
+
         case 'permission_request': {
           await upsertAgent(db, chatId)
           await insertItem(db, {
@@ -220,6 +277,7 @@ export function WSProvider({ children }: { children: ReactNode }) {
             },
             turnId,
           })
+          await maybeNotify(chatId, 'Approval needed', event.title)
           break
         }
 
@@ -239,6 +297,7 @@ export function WSProvider({ children }: { children: ReactNode }) {
             },
             turnId,
           })
+          await maybeNotify(chatId, 'Clarification needed', event.question)
           break
         }
 
@@ -249,6 +308,12 @@ export function WSProvider({ children }: { children: ReactNode }) {
 
         case 'status': {
           await updateAgentStatus(db, chatId, event.value)
+          break
+        }
+
+        case 'commands': {
+          await upsertAgent(db, chatId)
+          await saveCachedCommands(db, chatId, event.commands)
           break
         }
 
@@ -271,6 +336,7 @@ export function WSProvider({ children }: { children: ReactNode }) {
     function connect() {
       if (!mounted.current) return
       setConn('connecting')
+
       const socket = new WebSocket(SERVER_WS)
       ws.current = socket
 
@@ -278,6 +344,7 @@ export function WSProvider({ children }: { children: ReactNode }) {
         attempt.current = 0
         setConn('connected')
         socket.send(JSON.stringify({ type: 'get_commands' }))
+        socket.send(JSON.stringify({ type: 'get_missed_events', after_seq: lastSeqRef.current }))
       }
       socket.onerror = () => socket.close()
       socket.onclose = () => {
@@ -289,7 +356,17 @@ export function WSProvider({ children }: { children: ReactNode }) {
       }
       socket.onmessage = (e) => {
         try {
-          const event = JSON.parse(e.data as string) as ServerEvent
+          const parsed = JSON.parse(e.data as string) as { seq?: number; event?: ServerEvent }
+          const event: ServerEvent = parsed.event ?? (parsed as unknown as ServerEvent)
+          if (parsed.seq !== undefined && parsed.seq > lastSeqRef.current) {
+            lastSeqRef.current = parsed.seq
+            // Debounce the SQLite write — text_delta arrives 10-20x/sec during
+            // streaming; we only need the seq persisted before the next reconnect.
+            if (seqFlushTimer.current) clearTimeout(seqFlushTimer.current)
+            seqFlushTimer.current = setTimeout(() => {
+              setSetting(db, 'ws_last_seq', String(lastSeqRef.current)).catch(() => {})
+            }, 500)
+          }
           handleEvent(event).catch((err) =>
             console.warn('[WSContext] handleEvent error', err),
           )
@@ -299,7 +376,12 @@ export function WSProvider({ children }: { children: ReactNode }) {
       }
     }
 
-    connect()
+    // Load the last seen seq from SQLite before first connect so we can
+    // request only genuinely missed events (not replay already-stored ones).
+    getSetting(db, 'ws_last_seq').then((val) => {
+      if (val) lastSeqRef.current = parseInt(val, 10)
+      connect()
+    })
 
     const appState = AppState.addEventListener('change', (next) => {
       if (next === 'active') {
@@ -316,6 +398,10 @@ export function WSProvider({ children }: { children: ReactNode }) {
       mounted.current = false
       appState.remove()
       if (timer.current) clearTimeout(timer.current)
+      if (seqFlushTimer.current) {
+        clearTimeout(seqFlushTimer.current)
+        setSetting(db, 'ws_last_seq', String(lastSeqRef.current)).catch(() => {})
+      }
       ws.current?.close()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -342,9 +428,13 @@ export function WSProvider({ children }: { children: ReactNode }) {
     [],
   )
 
+  const setActiveChatId = useCallback((id: string | null) => {
+    activeChatIdRef.current = id
+  }, [])
+
   const value = useMemo(
-    () => ({ conn, sendEvent, subscribe }),
-    [conn, sendEvent, subscribe],
+    () => ({ conn, sendEvent, subscribe, setActiveChatId }),
+    [conn, sendEvent, subscribe, setActiveChatId],
   )
 
   return <WSContext.Provider value={value}>{children}</WSContext.Provider>

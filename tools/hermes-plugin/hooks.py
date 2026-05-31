@@ -46,6 +46,16 @@ def _kwarg_first(kwargs: dict[str, Any], *names: str) -> Any:
     return None
 
 
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    return str(value)
+
+
 def _adapter():
     return _adapter_module.get_current_adapter()
 
@@ -98,7 +108,7 @@ async def _emit_tool_start(adapter: Any, kwargs: dict[str, Any]) -> None:
             "type": "tool_start",
             "id": tool_id,
             "name": tool_name,
-            "args": tool_args if isinstance(tool_args, dict) else {"value": tool_args},
+            "args": _json_safe(tool_args) if isinstance(tool_args, dict) else {"value": _json_safe(tool_args)},
         })
         flog("_emit_tool_start() emitted OK")
     except Exception as exc:
@@ -136,9 +146,9 @@ async def _emit_tool_end(adapter: Any, kwargs: dict[str, Any]) -> None:
     flog("_emit_tool_end() id=%.12s task_id=%.12s result=%.80r error=%s",
          tool_id, task_id, result, error)
 
-    event: dict[str, Any] = {"type": "tool_end", "id": tool_id, "result": result}
+    event: dict[str, Any] = {"type": "tool_end", "id": tool_id, "result": _json_safe(result)}
     if error is not None:
-        event["error"] = str(error)
+        event["error"] = _json_safe(error)
 
     try:
         await adapter.aji_client.emit(event)

@@ -72,7 +72,7 @@ pnpm send "hello from the server"
 pnpm simulate
 
 # Register Claude Code hooks (mirrors mobile permissions to desktop Claude Code)
-pnpm hooks:install
+pnpm claude-hook:install
 
 # Install Hermes plugin (symlinks into ~/.hermes/plugins/)
 pnpm hermes:install
@@ -83,7 +83,7 @@ Set up mobile env first: copy `apps/mobile/.env.example` to `.env` and set `EXPO
 ## Agent Integration
 
 ### Claude Code
-Hooks at `tools/claude-aji-chat-hook.ts` integrate with Claude Code's lifecycle. Hook settings are registered via `pnpm hooks:install` into `~/.claude/settings.json`. When Claude Code executes tools, the hook stamps `agent: 'claude-code'` on all emitted events.
+Hooks at `tools/claude_code_integration/claude-aji-chat-hook.ts` integrate with Claude Code's lifecycle. Hook settings are registered via `pnpm claude-hook:install` into `~/.claude/settings.json`. When Claude Code executes tools, the hook stamps `agent: 'claude-code'` on all emitted events.
 
 ### Hermes
 Plugin at `tools/hermes-plugin/` enables Hermes as a platform. Install via `pnpm hermes:install`. Set `AJI_SERVER_URL=http://localhost:4000` before starting the gateway. The plugin:
@@ -138,9 +138,21 @@ Mobile's event handler is defensive. Send events via `pnpm send` or the simulato
 ### Code blocks
 `MarkdownMessage.tsx` uses `react-native-marked` for rendering and `highlight.js` for syntax highlighting. Language detection is automatic; `LANG_COLORS` map at the top of the component controls badge colors.
 
+## Chat Architecture: Inverted FlatList
+
+The mobile chat uses a **WhatsApp/iMessage-style inverted FlatList** for rendering:
+- Newest messages naturally appear at the visual bottom (no sticky-bottom logic needed)
+- Streaming text fills in without auto-scroll — the visual anchor stays put
+- Users can scroll up to read history without being yanked back
+- Scroll position is not saved; users always start at the bottom (acceptable UX trade-off matching WhatsApp/Telegram behavior)
+
+See [`docs/chat-scroll-architecture.md`](docs/chat-scroll-architecture.md) for detailed design rationale, implementation notes, and test coverage.
+
+
 ## Known Limitations
 
 - **Web**: no persistence (Hermes integration is native-only anyway)
 - **Permissions**: timeout is 15 seconds (configurable via `AJI_PERMISSION_WAIT_MS` env var)
 - **Mobile UI**: no image rendering yet (text fallback only)
 - **Streaming**: depends on Hermes config; off by default — add `streaming: true` to `display.platforms.aji-chat` in config.yaml
+- **Scroll restore**: no scroll position save across sessions; users always start at the bottom of chats

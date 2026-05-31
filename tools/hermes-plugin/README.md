@@ -120,6 +120,11 @@ caches the list and shows a live-filtered picker when the user types `/`.
 Messages starting with `/` are routed as `MessageType.COMMAND` so Hermes's
 built-in dispatch handles them — they never reach the LLM.
 
+Adapter-owned command:
+- `/stream on|off` updates `display.platforms.aji-chat.streaming` in
+   `~/.hermes/config.yaml` via `hermes config set ...`.
+- After changing it, restart the Hermes gateway for the setting to take effect.
+
 ### No timeouts on prompts
 
 Permission and clarify prompts emitted by the plugin **stay visible on mobile until the user taps a choice**. There is no auto-dismiss, no server-side timeout, and no `/prompt/wait` endpoint involvement.
@@ -163,8 +168,14 @@ The logger (`aji_chat_plugin`) is isolated from Hermes's own log stream
    `pre_tool_call` when `tool_name == "clarify"` to render a structured choice
    card instead of letting the question flow as a plain message. Depends on
    whether `register_hook` allows the hook to override the tool result.
-2. **Image rendering.** `send_image` currently falls back to sending the
-   URL/caption as text. The mobile app doesn't render images yet.
+2. **Inline image rendering.** Local files all flow through `_emit_file` →
+   `file` events: `send_voice`/`send_video`/`send_document`/`send_image_file`
+   read the file, base64-encode it, and emit it (Ogg/Opus audio is transcoded
+   to m4a/AAC first via ffmpeg, since iOS can't decode Ogg). The mobile renders
+   `audio/*` with a player and everything else as a tappable file chip — it does
+   not yet render images *inline*, so URL-based `send_image` still falls back to
+   text (a link reads better than a chip). Inline image previews are the
+   remaining gap.
 3. **Skill commands in the picker.** `push_commands()` currently includes only
    `COMMAND_REGISTRY` built-ins and plugin-registered commands. Skills (e.g.
    `/code-review`) are reachable by typing but don't appear in the `/` picker.
