@@ -24,7 +24,6 @@ import {
   type ReactNode,
 } from 'react'
 import { AppState } from 'react-native'
-import * as Notifications from 'expo-notifications'
 import type { ClientEvent, ServerEvent } from '@aji/protocol'
 import { useDB } from '../db/DBProvider'
 import {
@@ -123,14 +122,8 @@ export function WSProvider({ children }: { children: ReactNode }) {
 
   async function maybeNotify(chatId: string, title: string, body: string) {
     if (activeChatIdRef.current === chatId) return
-    try {
-      await Notifications.scheduleNotificationAsync({
-        content: { title, body, data: { chatId }, sound: true },
-        trigger: null,
-      })
-    } catch {
-      // Notifications unavailable (permission denied, simulator, etc.) — ignore
-    }
+    void title
+    void body
   }
 
   // ---------------------------------------------------------------------------

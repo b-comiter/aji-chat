@@ -39,6 +39,31 @@ export async function migrateDb(db: SQLiteDatabase): Promise<void> {
     await db.execAsync('PRAGMA user_version = 2')
   }
 
+  // Create base tables before version-conditional migrations so index/FK
+  // migrations that depend on these tables can safely reference them.
+  await db.execAsync(`
+    CREATE TABLE IF NOT EXISTS agents (
+      id                   TEXT PRIMARY KEY,
+      display_name         TEXT NOT NULL,
+      last_message_preview TEXT,
+      last_event_at        INTEGER,
+      last_status          TEXT NOT NULL DEFAULT 'idle'
+    );
+
+    CREATE TABLE IF NOT EXISTS items (
+      local_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+      id         TEXT    NOT NULL,
+      chat_id    TEXT    NOT NULL REFERENCES agents(id),
+      kind       TEXT    NOT NULL,
+      data       TEXT    NOT NULL,
+      turn_id    TEXT,
+      done       INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS items_by_chat ON items(chat_id, created_at);
+  `)
+
   if (version < 3) {
     // v2→v3: add key-value settings table for user preferences (e.g. theme).
     await db.execAsync(`
@@ -69,35 +94,6 @@ export async function migrateDb(db: SQLiteDatabase): Promise<void> {
     `)
     await db.execAsync('PRAGMA user_version = 5')
   }
-
-  await db.execAsync(`
-    CREATE TABLE IF NOT EXISTS agents (
-      id                   TEXT PRIMARY KEY,
-      display_name         TEXT NOT NULL,
-      last_message_preview TEXT,
-      last_event_at        INTEGER,
-      last_status          TEXT NOT NULL DEFAULT 'idle'
-    );
-
-    CREATE TABLE IF NOT EXISTS items (
-      local_id   INTEGER PRIMARY KEY AUTOINCREMENT,
-      id         TEXT    NOT NULL,
-      chat_id    TEXT    NOT NULL REFERENCES agents(id),
-      kind       TEXT    NOT NULL,
-      data       TEXT    NOT NULL,
-      turn_id    TEXT,
-      done       INTEGER NOT NULL DEFAULT 0,
-      created_at INTEGER NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS items_by_chat ON items(chat_id, created_at);
-
-    CREATE TABLE IF NOT EXISTS command_cache (
-      chat_id    TEXT PRIMARY KEY REFERENCES agents(id),
-      commands   TEXT NOT NULL,
-      updated_at INTEGER NOT NULL
-    );
-  `)
 }
 
 // ---------------------------------------------------------------------------

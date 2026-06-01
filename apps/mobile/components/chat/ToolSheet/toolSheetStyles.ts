@@ -69,6 +69,9 @@ export function makeCardStyles(colors: ThemeColors) {
       borderTopColor: colors.border,
       padding: spacing.md,
     },
+    detailAnimatedWrap: {
+      overflow: 'hidden',
+    },
     section: {
       backgroundColor: colors.surface,
       borderRadius: radius.md,
@@ -86,19 +89,36 @@ export function makeCardStyles(colors: ThemeColors) {
       letterSpacing: 0.6,
       marginBottom: spacing.xs,
     },
-    codeScroll: {
+    codeShell: {
       backgroundColor: colors.bg,
       borderRadius: radius.sm,
-      maxHeight: 120,
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: colors.border,
+      overflow: 'hidden',
+    },
+    codeScrollContent: {
+      maxHeight: 320,
+    },
+    codeScrollY: {
+      maxHeight: 320,
+    },
+    codeScrollYContent: {
+      flexGrow: 0,
+    },
+    codeScrollX: {},
+    codeScrollXContent: {
+      minWidth: '100%',
+      flexGrow: 0,
+    },
+    codeInner: {
+      padding: spacing.sm,
+      minWidth: '100%',
     },
     code: {
       fontFamily: typography.fontMono,
       fontSize: typography.sizeSm,
       color: colors.text,
       lineHeight: typography.lineHeightCode,
-      padding: spacing.sm,
     },
   })
 }
@@ -174,6 +194,22 @@ export function makeSheetStyles(colors: ThemeColors) {
       flexWrap: 'wrap',
       gap: spacing.xs,
       marginTop: spacing.sm,
+    },
+    collapseAllBtn: {
+      alignSelf: 'flex-start',
+      marginTop: spacing.sm,
+      paddingHorizontal: spacing.sm,
+      paddingVertical: spacing.xs + 1,
+      borderRadius: radius.full,
+      backgroundColor: colors.surface2,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: colors.border,
+    },
+    collapseAllBtnText: {
+      fontSize: typography.sizeXs,
+      fontWeight: typography.weightSemibold,
+      color: colors.accent,
+      letterSpacing: 0.2,
     },
     summaryChip: {
       paddingHorizontal: spacing.sm,

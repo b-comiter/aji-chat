@@ -1,4 +1,4 @@
-import { formatJson, summarizeJson, toolIcon } from './toolSheetHelpers'
+import { formatJson, getToolPreview, summarizeJson, toolIcon } from './toolSheetHelpers'
 
 describe('toolIcon', () => {
   test('returns the mapped icon for a known tool name', () => {
@@ -85,5 +85,62 @@ describe('summarizeJson', () => {
 
   test('truncates long output for inline previews', () => {
     expect(summarizeJson({ text: 'abcdefghijklmnopqrstuvwxyz' }, 18)).toBe('{"text":"abcdefgh…')
+  })
+})
+
+describe('getToolPreview', () => {
+  test('shows file path summary for read_file', () => {
+    expect(
+      getToolPreview('read_file', { filePath: '/Users/me/dev/aji-chat/apps/mobile/app/chat/[chatId].tsx' }, undefined, false),
+    ).toEqual({
+      label: 'Read',
+      text: '/Users/me/dev/aji-chat/apps/mobile/app/chat/[chatId].tsx',
+    })
+  })
+
+  test('shows edited label and change count for edit tool', () => {
+    expect(
+      getToolPreview('edit_file', { path: 'apps/mobile/hooks/useChatSession.ts' }, { changes: 2 }, true),
+    ).toEqual({
+      label: 'Edited',
+      text: 'apps/mobile/hooks/useChatSession.ts (2 changes)',
+    })
+  })
+
+  test('shows query + include pattern for grep', () => {
+    expect(
+      getToolPreview('grep', { query: 'tool_end', includePattern: 'tools/hermes-plugin/**' }, undefined, false),
+    ).toEqual({
+      label: 'Searched',
+      text: 'tool_end in tools/hermes-plugin/**',
+    })
+  })
+
+  test('strips url scheme for fetch previews', () => {
+    expect(
+      getToolPreview('web_fetch', { url: 'https://docs.python.org/3/library/json.html' }, undefined, true),
+    ).toEqual({
+      label: 'Fetched',
+      text: 'docs.python.org/3/library/json.html',
+    })
+  })
+
+  test('uses ran label for bash and command text', () => {
+    const preview = getToolPreview(
+      'bash',
+      { command: 'pnpm exec jest --runInBand apps/mobile/components/chat/ToolSheet/toolSheetHelpers.test.ts' },
+      undefined,
+      false,
+    )
+
+    expect(preview.label).toBe('Ran')
+    expect(preview.text.startsWith('pnpm exec jest --runInBand')).toBe(true)
+  })
+
+  test('falls back to JSON summary when no targeted field exists', () => {
+    expect(getToolPreview('unknown_tool', { alpha: 1 }, undefined, false)).toEqual({
+      label: 'Args',
+      text: '{"alpha":1}',
+    })
   })
 })
