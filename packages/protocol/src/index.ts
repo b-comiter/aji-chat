@@ -220,6 +220,29 @@ export interface UserMessage {
   agent?: AgentId
 }
 
+/**
+ * Client-initiated file/attachment — the inverse of the server-side `FileMessage`.
+ * Bytes ride inline as base64 in `data` so the server stays a dumb router and
+ * adapters (e.g. Hermes) can translate it into their own attachment format
+ * without an out-of-band fetch. Audio captured in the mobile composer's voice
+ * mode is sent this way.
+ */
+export interface UserFile {
+  type: 'user_file'
+  /** IANA media type, e.g. 'audio/mp4'. */
+  mime: string
+  /** Base64-encoded file bytes (no `data:` prefix). */
+  data: string
+  /** Original filename — used as a display label / extension hint. */
+  name?: string
+  /** Duration in seconds, for audio/video. */
+  duration?: number
+  /** Optional caption sent alongside the file. */
+  text?: string
+  /** Destination agent (mobile chatId), mirrors `UserMessage.agent`. */
+  agent?: AgentId
+}
+
 export interface PromptResponse {
   type: 'prompt_response'
   /** The id of the originating PermissionRequest or Clarify event */
@@ -247,7 +270,7 @@ export interface GetMissedEvents {
   after_seq: number
 }
 
-export type ClientEvent = UserMessage | PromptResponse | GetCommands | GetMissedEvents
+export type ClientEvent = UserMessage | UserFile | PromptResponse | GetCommands | GetMissedEvents
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -286,6 +309,32 @@ export function textMessage(text: string, role: Role = 'assistant', turn_id?: Tu
  * 'assistant'; undefined optional fields are omitted so the wire shape stays
  * minimal. Pass `turn_id` to group the file with a wider agent turn.
  */
+/**
+ * Construct a single `user_file` ClientEvent. Mirrors `fileMessage` but for the
+ * client→server direction — used by the mobile composer's voice mode to ship a
+ * recorded clip to the agent.
+ */
+export function userFileMessage(
+  mime: string,
+  data: string,
+  opts: {
+    name?: string
+    duration?: number
+    text?: string
+    agent?: AgentId
+  } = {},
+): UserFile {
+  return {
+    type: 'user_file',
+    mime,
+    data,
+    ...(opts.name !== undefined ? { name: opts.name } : {}),
+    ...(opts.duration !== undefined ? { duration: opts.duration } : {}),
+    ...(opts.text !== undefined ? { text: opts.text } : {}),
+    ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
+  }
+}
+
 export function fileMessage(
   mime: string,
   data: string,

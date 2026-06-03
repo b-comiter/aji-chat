@@ -265,7 +265,29 @@ function CodeBlock({ code, language }: { code: string; language?: string }) {
 
 class CustomRenderer extends Renderer {
   code(text: string, language?: string) {
-    return <CodeBlock code={text} language={language} />
+    return <CodeBlock key={this.getKey()} code={text} language={language} />
+  }
+
+  table(
+    header: React.ReactNode[][],
+    rows: React.ReactNode[][][],
+    tableStyle?: object,
+    rowStyle?: object,
+    cellStyle?: object,
+  ) {
+    const rendered = super.table(header, rows, tableStyle, rowStyle, cellStyle)
+
+    return (
+      <ScrollView
+        key={this.getKey()}
+        horizontal
+        directionalLockEnabled
+        showsHorizontalScrollIndicator = {true}
+        contentContainerStyle={{ paddingRight: 16 }}
+      >
+        <View>{rendered}</View>
+      </ScrollView>
+    )
   }
 }
 
@@ -371,7 +393,7 @@ export function MarkdownMessage({ content }: MarkdownMessageProps) {
     }), [colors])
 
   return (
-      <Markdown 
+      <Markdown
         value={normalizedContent} 
         renderer={sharedRenderer} 
         styles={mdStyles} 

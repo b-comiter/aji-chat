@@ -80,6 +80,7 @@ apps/mobile/assets/*
 # Ignore mobile build
 /apps/mobile/.expo/
 /apps/mobile/.expo-shared/
+/apps/mobile/ios/
 
 # Ignore server build
 /apps/server/dist/

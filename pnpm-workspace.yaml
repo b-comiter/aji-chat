@@ -4,6 +4,7 @@ packages:
 allowBuilds:
   '@swc/core': true
   esbuild: true
-  unrs-resolver: set this to true or false
+  msgpackr-extract: true
+  unrs-resolver: true
 minimumReleaseAgeExclude:
   - expo-file-system@19.0.23

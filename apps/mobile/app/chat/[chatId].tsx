@@ -23,8 +23,10 @@
  * See docs/chat-scroll-architecture.md for full design rationale.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Animated } from 'react-native'
+import { Alert, Animated } from 'react-native'
 import { useLocalSearchParams } from 'expo-router'
+import * as ImagePicker from 'expo-image-picker'
+import * as DocumentPicker from 'expo-document-picker'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useDB } from '../../db/DBProvider'
 import { agentDisplayName } from '../../db/database'
@@ -71,7 +73,7 @@ export default function ChatScreen() {
     loadOlder,
   } = useChatSession(resolvedChatId, db, conn, subscribe, sendEvent)
 
-  const { sendMessage, respond } = useChatActions({ chatId: resolvedChatId, db, conn, sendEvent, items, setItems })
+  const { sendMessage, sendAudio, sendAttachment, respond } = useChatActions({ chatId: resolvedChatId, db, conn, sendEvent, items, setItems })
   const kbOffset = useKeyboardOffset(safeBottom)
 
   const toolsByAgentMsgId = useMemo(() => {
@@ -176,6 +178,53 @@ export default function ChatScreen() {
     messageListRef.current?.scrollToBottom()
   }, [trimmedDraft, sendMessage])
 
+  const handleSendAudio = useCallback((uri: string, durationMs: number) => {
+    sendAudio(uri, durationMs).catch(console.warn)
+    messageListRef.current?.scrollToBottom()
+  }, [sendAudio])
+
+  // ── Attachment handlers ──────────────────────────────────────────────────
+
+  const handleAttachCamera = useCallback(async () => {
+    const perm = await ImagePicker.requestCameraPermissionsAsync()
+    if (!perm.granted) {
+      Alert.alert('Camera access required', 'Allow camera access in Settings to send photos.')
+      return
+    }
+    const result = await ImagePicker.launchCameraAsync({
+      mediaTypes: ['images', 'videos'],
+      quality: 0.85,
+    })
+    if (result.canceled) return
+    const asset = result.assets[0]
+    sendAttachment({ uri: asset.uri, mime: asset.mimeType ?? 'image/jpeg', name: asset.fileName ?? undefined }).catch(console.warn)
+    messageListRef.current?.scrollToBottom()
+  }, [sendAttachment])
+
+  const handleAttachPhoto = useCallback(async () => {
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync()
+    if (!perm.granted) {
+      Alert.alert('Photo library access required', 'Allow photo library access in Settings to share images.')
+      return
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images', 'videos'],
+      quality: 0.85,
+    })
+    if (result.canceled) return
+    const asset = result.assets[0]
+    sendAttachment({ uri: asset.uri, mime: asset.mimeType ?? 'image/jpeg', name: asset.fileName ?? undefined }).catch(console.warn)
+    messageListRef.current?.scrollToBottom()
+  }, [sendAttachment])
+
+  const handleAttachFile = useCallback(async () => {
+    const result = await DocumentPicker.getDocumentAsync({ type: '*/*', copyToCacheDirectory: true })
+    if (result.canceled) return
+    const asset = result.assets[0]
+    sendAttachment({ uri: asset.uri, mime: asset.mimeType ?? 'application/octet-stream', name: asset.name }).catch(console.warn)
+    messageListRef.current?.scrollToBottom()
+  }, [sendAttachment])
+
   const handleCommandSelect = useCallback((name: string) => {
     setDraft(`/${name} `)
   }, [])
@@ -218,7 +267,17 @@ export default function ChatScreen() {
         onLoadOlder={loadOlder}
       />
       {pickerItems.length > 0 && <CommandPicker items={pickerItems} onSelect={handleCommandSelect} />}
-      <Composer draft={draft} setDraft={setDraft} onSend={handleSend} canSend={canSend} blocked={hasPendingPrompt} />
+      <Composer
+        draft={draft}
+        setDraft={setDraft}
+        onSend={handleSend}
+        canSend={canSend}
+        blocked={hasPendingPrompt}
+        onSendAudio={handleSendAudio}
+        onAttachCamera={handleAttachCamera}
+        onAttachPhoto={handleAttachPhoto}
+        onAttachFile={handleAttachFile}
+      />
       <ToolSheet
         tools={isToolSheetOpen ?? []}
         visible={isToolSheetOpen !== null}

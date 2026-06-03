@@ -31,6 +31,8 @@ logger = logging.getLogger(__name__)
 # Callback the adapter passes in: receives a fully-constructed event dict
 # (we don't import MessageEvent here to keep this module focused on transport).
 UserMessageHandler = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
+# Same shape, used for user_file events (audio recordings from voice mode etc.)
+UserFileHandler = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
 # No-arg async callback; the adapter knows how to build and push the list.
 GetCommandsHandler = Callable[[], Coroutine[Any, Any, None]]
 
@@ -42,12 +44,14 @@ class WebhookServer:
         port: int,
         state: SessionState,
         on_user_message: UserMessageHandler,
+        on_user_file: "UserFileHandler | None" = None,
         on_get_commands: "GetCommandsHandler | None" = None,
     ) -> None:
         self.host = host
         self.port = port
         self.state = state
         self.on_user_message = on_user_message
+        self.on_user_file = on_user_file
         self.on_get_commands = on_get_commands
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
@@ -94,6 +98,28 @@ class WebhookServer:
             flog_info("_handle_inbound() user_message text=%.120r", text)
             await self.on_user_message({
                 "text": text,
+                "received_at": datetime.utcnow().isoformat(),
+            })
+            return web.json_response({"ok": True})
+
+        if event_type == "user_file":
+            mime = str(payload.get("mime", ""))
+            name = payload.get("name")
+            duration = payload.get("duration")
+            data_len = len(str(payload.get("data", "")))
+            flog_info(
+                "_handle_inbound() user_file mime=%s name=%s duration=%s b64_len=%d",
+                mime, name, duration, data_len,
+            )
+            if self.on_user_file is None:
+                flog_warn("_handle_inbound() user_file but no handler registered")
+                return web.json_response({"ok": True, "ignored": True})
+            await self.on_user_file({
+                "mime": mime,
+                "data": str(payload.get("data", "")),
+                "name": name,
+                "duration": duration,
+                "text": payload.get("text"),
                 "received_at": datetime.utcnow().isoformat(),
             })
             return web.json_response({"ok": True})

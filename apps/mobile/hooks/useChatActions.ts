@@ -4,14 +4,16 @@
  *  - Responding to agent prompts
  *  - Adding client-side system messages
  *  - Local slash command dispatch (with two-step guard for /wipe-db)
+ *  - Sending voice recordings and file attachments
  *
  * Exposes LOCAL_COMMANDS so the screen can build the slash-command picker.
  */
 import { useCallback, useRef } from 'react'
 import { router } from 'expo-router'
 import type { ClientEvent, CommandItem } from '@aji/protocol'
-import { newId } from '@aji/protocol'
+import { newId, userFileMessage } from '@aji/protocol'
 import type { SQLiteDatabase } from 'expo-sqlite'
+import { File } from 'expo-file-system'
 import {
   clearAgentHistory,
   getDbDump,
@@ -260,5 +262,100 @@ export function useChatActions({
     }
   }, [conn, chatId, db, sendEvent, setItems, handleLocalCommand])
 
-  return { sendMessage, addSystemMessage, respond }
+  // Voice mode: ship a recorded audio clip to the agent. Mirrors `sendMessage`
+  // but the local Item is a `file` (so the existing AudioMessage row renders
+  // it), and the wire event is `user_file` rather than `user_message`.
+  const sendAudio = useCallback(async (uri: string, durationMs: number) => {
+    if (conn !== 'connected') return
+    let base64: string
+    try {
+      base64 = await new File(uri).base64()
+    } catch (err) {
+      console.warn('[useChatActions] failed to read recording', err)
+      addSystemMessage('Could not read the recording.')
+      return
+    }
+
+    const mime = 'audio/mp4'
+    const name = 'voice-message.m4a'
+    const durationSec = Math.max(0, durationMs / 1000)
+    const fileId = newId('file')
+    const localItem: Item = {
+      kind: 'file',
+      id: fileId,
+      role: 'user',
+      mime,
+      data: base64,
+      name,
+      duration: durationSec,
+      done: true,
+    }
+
+    setItems((prev) => [...prev, localItem])
+    sendEvent(userFileMessage(mime, base64, {
+      name,
+      duration: durationSec,
+      ...(chatId ? { agent: chatId } : {}),
+    }))
+
+    if (chatId) {
+      upsertAgent(db, chatId)
+        .then(() => insertItem(db, { id: fileId, chatId, kind: 'file', data: localItem }))
+        .then(() => updateAgentPreview(db, chatId, '🎤 Voice message'))
+        .catch(console.warn)
+    }
+
+    // Drop the temp recording file — the local Item's base64 (and AudioMessage's
+    // own cache file keyed by item id) handle replay independently.
+    try { new File(uri).delete() } catch {}
+  }, [conn, chatId, db, sendEvent, setItems, addSystemMessage])
+
+  // General-purpose attachment sender. Shared by camera, photo library, and
+  // file picker — all of them resolve to a local URI + mime + optional name.
+  // Reads the file as base64, appends a local `file` Item so the AudioMessage
+  // / generic file chip renders immediately, and dispatches `user_file` over
+  // the websocket the same way sendAudio does.
+  const sendAttachment = useCallback(async (opts: {
+    uri: string
+    mime: string
+    name?: string
+  }) => {
+    if (conn !== 'connected') return
+    const { uri, mime, name } = opts
+    let base64: string
+    try {
+      base64 = await new File(uri).base64()
+    } catch (err) {
+      console.warn('[useChatActions] failed to read attachment', err)
+      addSystemMessage('Could not read the attachment.')
+      return
+    }
+
+    const fileId = newId('file')
+    const localItem: Item = {
+      kind: 'file',
+      id: fileId,
+      role: 'user',
+      mime,
+      data: base64,
+      ...(name !== undefined ? { name } : {}),
+      done: true,
+    }
+
+    setItems((prev) => [...prev, localItem])
+    sendEvent(userFileMessage(mime, base64, {
+      ...(name !== undefined ? { name } : {}),
+      ...(chatId ? { agent: chatId } : {}),
+    }))
+
+    if (chatId) {
+      const preview = name ? `📎 ${name}` : `📎 Attachment`
+      upsertAgent(db, chatId)
+        .then(() => insertItem(db, { id: fileId, chatId, kind: 'file', data: localItem }))
+        .then(() => updateAgentPreview(db, chatId, preview))
+        .catch(console.warn)
+    }
+  }, [conn, chatId, db, sendEvent, setItems, addSystemMessage])
+
+  return { sendMessage, sendAudio, sendAttachment, addSystemMessage, respond }
 }

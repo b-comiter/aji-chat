@@ -63,38 +63,50 @@ export const Row = memo(function Row({ item, onChoose, isGroupStart, dividerKind
     const isUser = item.role === 'user'
     const displayText = isUser ? item.text : stripStreamingCursor(item.text)
     const hasTools = tools.length > 0
-    const showBubble = isUser || hasTools
+    const shouldRenderPlainText = isUser || !item.done
 
     return (
       <View style={[styles.msgWrapper, dividerKind === 'light' && styles.msgBorderLight,
-          dividerKind === 'heavy' && styles.msgBorderHeavy]}>
+      dividerKind === 'heavy' && styles.msgBorderHeavy]}>
         {isGroupStart && (
           <View style={[styles.msgMeta, isUser && styles.msgMetaUserRight]}>
             {!isUser && <Avatar label={avatarLabel} variant="agent" />}
           </View>
         )}
-        <View style={isUser ? styles.msgAlignRight : styles.msgAlignLeft}>
-          <Pressable
-            onLongPress={handleLongPress}
-            delayLongPress={400}
-            accessibilityRole="button"
-            accessibilityLabel="Copy message"
-            accessibilityHint="Long press to copy this message"
-          >
-            <View style={[
-              showBubble && styles.bubble,
-              isUser ? styles.bubbleUser : showBubble && styles.bubbleAgent,
-            ]}>
-              {isUser || !item.done ? (
+        <View testID="message-container" style={isUser ? styles.msgAlignRight : styles.msgAlignLeft}>
+          {shouldRenderPlainText ? (
+            <Pressable
+              onLongPress={handleLongPress}
+              delayLongPress={400}
+              accessibilityRole="button"
+              accessibilityLabel="Copy message"
+              accessibilityHint="Long press to copy this message"
+            >
+              <View style={[styles.bubble, isUser ? styles.bubbleUser : styles.bubbleAgent]}>
                 <Text style={[styles.bubbleText, isUser && styles.bubbleTextUser]}>
                   {displayText}{!item.done && <Text style={styles.cursor}> ▍</Text>}
                 </Text>
-              ) : (
-                <View style={styles.markdownContainer}>
-                  <MarkdownMessage content={displayText} />
-                </View>
-              )}
-              {!isUser && hasTools && (
+                {!isUser && hasTools && (
+                  <Pressable
+                    onPress={() => onOpenTools(tools)}
+                    style={styles.toolBadge}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Open ${tools.length} tool call${tools.length === 1 ? '' : 's'}`}
+                    accessibilityHint="Shows tool calls used for this response"
+                  >
+                    <Text style={styles.toolBadgeText}>
+                      🔧 {tools.length} tool call{tools.length === 1 ? '' : 's'} ›
+                    </Text>
+                  </Pressable>
+                )}
+              </View>
+            </Pressable>
+          ) : (
+            <>
+              <View style={styles.markdownContainer}>
+                <MarkdownMessage content={displayText} />
+              </View>
+              {hasTools && (
                 <Pressable
                   onPress={() => onOpenTools(tools)}
                   style={styles.toolBadge}
@@ -107,16 +119,17 @@ export const Row = memo(function Row({ item, onChoose, isGroupStart, dividerKind
                   </Text>
                 </Pressable>
               )}
+            </>
+          )}
+          {copied && (
+            <View style={[styles.copiedRow, isUser && styles.copiedRowRight]}>
+              <View style={styles.copiedPill}>
+                <Text style={styles.copiedPillText}>Copied</Text>
+              </View>
             </View>
-          </Pressable>
+          )}
         </View>
-        {copied && (
-          <View style={[styles.copiedRow, isUser && styles.copiedRowRight]}>
-            <View style={styles.copiedPill}>
-              <Text style={styles.copiedPillText}>Copied</Text>
-            </View>
-          </View>
-        )}
+
       </View>
     )
   }
@@ -125,7 +138,7 @@ export const Row = memo(function Row({ item, onChoose, isGroupStart, dividerKind
     const isUser = item.role === 'user'
     return (
       <View style={[styles.msgWrapper, dividerKind === 'light' && styles.msgBorderLight,
-          dividerKind === 'heavy' && styles.msgBorderHeavy]}>
+      dividerKind === 'heavy' && styles.msgBorderHeavy]}>
         {isGroupStart && (
           <View style={[styles.msgMeta, isUser && styles.msgMetaUserRight]}>
             {!isUser && <Avatar label={avatarLabel} variant="agent" />}
@@ -176,11 +189,14 @@ function makeStyles(colors: ThemeColors) {
     msgAlignRight: { alignItems: 'flex-end' },
     bubble: { borderRadius: radius.xl, paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
     markdownContainer: {
+      backgroundColor: colors.surface,
       borderWidth: 1,
-      borderColor: 'transparent',
-      flexShrink: 1,
-      alignSelf: 'flex-start',
-      width: '100%',
+      borderColor: colors.border,
+      borderRadius: radius.xl,
+      paddingHorizontal: spacing.lg,
+      paddingVertical: spacing.md,
+      alignSelf: 'stretch',
+      maxWidth: '100%',
     },
     fileBubble: { maxWidth: '85%' },
     bubbleAgent: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },

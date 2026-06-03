@@ -161,6 +161,7 @@ class AjiChatAdapter(BasePlatformAdapter):
             port=plugin_port,
             state=self._state,
             on_user_message=self._on_user_message,
+            on_user_file=self._on_user_file,
             on_get_commands=self.push_commands,
         )
         self._running = False
@@ -286,6 +287,81 @@ class AjiChatAdapter(BasePlatformAdapter):
             await self.handle_message(event)
         except Exception as exc:
             logger.exception("aji-chat: handle_message raised: %s", exc)
+
+    async def _on_user_file(self, payload: dict[str, Any]) -> None:
+        """Materialize an inbound `user_file` event to disk and dispatch it as
+        a MessageEvent with `media_urls` populated — the same shape the Discord
+        adapter produces for audio attachments (gateway will route through
+        whatever transcription / audio handling Hermes has configured).
+        """
+        mime = str(payload.get("mime", "")) or "application/octet-stream"
+        b64 = str(payload.get("data", ""))
+        if not b64:
+            flog_warn("_on_user_file() empty data, ignored")
+            return
+
+        # Pick an extension. Audio recordings from the mobile composer arrive
+        # as audio/mp4 (.m4a); fall back to a mimetypes guess for anything
+        # else. Hermes's audio handlers key off file extension in places, so
+        # this matters.
+        ext = mimetypes.guess_extension(mime.split(";")[0].strip()) or ""
+        if mime == "audio/mp4" and ext in ("", ".mp4"):
+            ext = ".m4a"
+
+        name = payload.get("name") or f"aji-upload-{uuid.uuid4().hex}{ext}"
+        # Sanitize: only keep the basename, then ensure the extension matches
+        # what we derived from the mime so downstream code doesn't get confused.
+        name = os.path.basename(str(name))
+        if ext and not name.lower().endswith(ext):
+            name = name + ext
+
+        tmp_dir = os.path.join(tempfile.gettempdir(), "aji-uploads")
+        os.makedirs(tmp_dir, exist_ok=True)
+        local_path = os.path.join(tmp_dir, f"{uuid.uuid4().hex}-{name}")
+        try:
+            with open(local_path, "wb") as fh:
+                fh.write(base64.b64decode(b64))
+        except Exception as exc:
+            logger.warning("aji-chat: failed to write inbound file: %s", exc)
+            flog_warn("_on_user_file() write failed: %s", exc)
+            return
+
+        flog_info("_on_user_file() wrote %s (%d bytes)", local_path, os.path.getsize(local_path))
+
+        # Pick a MessageType so Hermes's downstream routing (e.g. transcription
+        # for voice/audio) kicks in. Mobile voice mode records audio/mp4 — treat
+        # it as VOICE (a recorded voice note), matching Discord's distinction
+        # between a native voice message and a user-uploaded audio file.
+        msg_type = MessageType.TEXT
+        if mime.startswith("audio/"):
+            msg_type = MessageType.VOICE
+        elif mime.startswith("image/"):
+            msg_type = MessageType.PHOTO
+        elif mime.startswith("video/"):
+            msg_type = MessageType.VIDEO
+
+        caption = str(payload.get("text") or "").strip()
+
+        source = SessionSource(
+            platform=self.platform,
+            chat_id=_DEFAULT_CHAT_ID,
+            chat_name="aji-chat",
+            chat_type="dm",
+            user_id=_DEFAULT_USER_ID,
+            user_name="aji",
+        )
+        event = MessageEvent(
+            text=caption,
+            message_type=msg_type,
+            source=source,
+            message_id=uuid.uuid4().hex,
+            media_urls=[local_path],
+            media_types=[mime],
+        )
+        try:
+            await self.handle_message(event)
+        except Exception as exc:
+            logger.exception("aji-chat: handle_message raised for user_file: %s", exc)
 
     async def _handle_stream_command(self, chat_id: str, text: str) -> None:
         parts = text.split()

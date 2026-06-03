@@ -1,4 +1,5 @@
-import { fileMessage, newId, textMessage } from './index'
+import type { ClientEvent } from './index'
+import { fileMessage, newId, textMessage, userFileMessage } from './index'
 
 describe('newId', () => {
   test('uses the provided prefix', () => {
@@ -115,5 +116,46 @@ describe('fileMessage', () => {
     expect('text' in event).toBe(false)
     expect('turn_id' in event).toBe(false)
     expect('agent' in event).toBe(false)
+  })
+})
+
+describe('userFileMessage', () => {
+  test('produces a user_file event with the mime and data', () => {
+    const event = userFileMessage('audio/mp4', 'AAAA')
+    expect(event.type).toBe('user_file')
+    expect(event.mime).toBe('audio/mp4')
+    expect(event.data).toBe('AAAA')
+  })
+
+  test('includes optional metadata when provided', () => {
+    const event = userFileMessage('audio/mp4', 'AAAA', {
+      name: 'voice-message.m4a',
+      duration: 4.2,
+      text: 'caption',
+      agent: 'hermes',
+    })
+    expect(event.name).toBe('voice-message.m4a')
+    expect(event.duration).toBe(4.2)
+    expect(event.text).toBe('caption')
+    expect(event.agent).toBe('hermes')
+  })
+
+  test('omits optional fields entirely when not provided', () => {
+    const event = userFileMessage('audio/mp4', 'AAAA')
+    expect('name' in event).toBe(false)
+    expect('duration' in event).toBe(false)
+    expect('text' in event).toBe(false)
+    expect('agent' in event).toBe(false)
+  })
+
+  test('narrows correctly inside a ClientEvent discriminated union', () => {
+    const event: ClientEvent = userFileMessage('audio/mp4', 'AAAA', { duration: 1.0 })
+    // The discriminant should narrow the union to UserFile, exposing the mime field
+    if (event.type === 'user_file') {
+      expect(event.mime).toBe('audio/mp4')
+      expect(event.duration).toBe(1.0)
+    } else {
+      throw new Error('expected user_file discriminant')
+    }
   })
 })

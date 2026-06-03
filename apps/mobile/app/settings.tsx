@@ -1,6 +1,5 @@
 import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { router } from 'expo-router'
-import Constants from 'expo-constants'
 import { useMemo, useState, type ReactNode } from 'react'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useDB } from '../db/DBProvider'
@@ -21,6 +20,8 @@ const BACK_ICON_LINE_HEIGHT = 32
 const SEGMENT_WRAPPER_PADDING = 3
 const SEGMENT_GAP = 2
 const SEGMENT_VERTICAL_PADDING = 5
+const APP_CONFIG = require('../app.json') as { expo?: { version?: string } }
+const EXPO_PACKAGE = require('expo/package.json') as { version?: string }
 
 export default function SettingsScreen() {
   const db = useDB()
@@ -30,8 +31,8 @@ export default function SettingsScreen() {
   const [isClearing, setIsClearing] = useState(false)
 
   const serverWs = SERVER_CONFIG.wsEndpoint
-  const appVersion = Constants.expoConfig?.version ?? '1.0.0'
-  const sdkVersion = Constants.expoConfig?.sdkVersion ?? 'Unknown'
+  const appVersion = APP_CONFIG.expo?.version ?? '1.0.0'
+  const sdkVersion = EXPO_PACKAGE.version ?? 'Unknown'
 
   function handleClearAll() {
     Alert.alert(

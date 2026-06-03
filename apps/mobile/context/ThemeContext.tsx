@@ -62,7 +62,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   // Resolve actual scheme: explicit choice or OS default (fall back to dark
   // when the OS scheme is unavailable, e.g. on older Android).
   const resolvedScheme: 'light' | 'dark' =
-    preference === 'auto' ? (systemScheme ?? 'dark') : preference
+    preference === 'auto' && systemScheme === 'light' ? 'light' : 'dark'
 
   const value = useMemo<ThemeContextValue>(() => ({
     colors:           resolvedScheme === 'light' ? lightColors : darkColors,

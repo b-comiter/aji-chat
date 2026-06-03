@@ -11,21 +11,13 @@ import { useEffect, useMemo, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { Feather } from '@expo/vector-icons'
 import * as FileSystem from 'expo-file-system/legacy'
-import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-audio'
+import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio'
 import { useTheme } from '../../context/ThemeContext'
 import { spacing, typography, radius } from '../../constants/theme'
 import type { ThemeColors } from '../../constants/theme'
 import type { Item } from '../../hooks/chatTypes'
 import { extensionForMime } from './fileHelpers'
-
-// Configure the audio session once per app run so playback works with the iOS
-// mute switch on. Idempotent guard avoids redundant native calls per row.
-let audioModeConfigured = false
-function ensureAudioMode(): void {
-  if (audioModeConfigured) return
-  audioModeConfigured = true
-  setAudioModeAsync({ playsInSilentMode: true }).catch(() => {})
-}
+import { ensureAudioMode } from '../../utils/audioSession'
 
 function formatTime(seconds: number): string {
   const total = Math.max(0, Math.floor(seconds))
