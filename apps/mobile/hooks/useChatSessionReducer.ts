@@ -8,6 +8,20 @@ type ReducerDeps = {
   ) => Extract<Item, { kind: 'prompt' }> | null
 }
 
+/**
+ * If the message `id` now reads as a Hermes approval, swap it in-place for the
+ * prompt card. Runs on both `text_delta` (the approval blocks, so `message_end`
+ * may never arrive) and `message_end` (non-blocking / DB replay). All the
+ * Hermes-specific matching lives in `deps.tryApprovalPrompt` — this just applies
+ * the result.
+ */
+function maybeConvertApproval(items: Item[], id: string, deps: ReducerDeps): Item[] {
+  const msg = items.find((it) => it.kind === 'message' && it.id === id)
+  if (msg?.kind !== 'message') return items
+  const approval = deps.tryApprovalPrompt(msg)
+  return approval ? items.map((it) => (it.id === id ? approval : it)) : items
+}
+
 export function reduceItemsForServerEvent(
   prev: Item[],
   event: ServerEvent,
@@ -28,18 +42,29 @@ export function reduceItemsForServerEvent(
     }
 
     case 'text_delta': {
+      let next: Item[]
       if (inWindow(event.id)) {
-        return prev.map((it) =>
+        next = prev.map((it) =>
           it.kind === 'message' && it.id === event.id ? { ...it, text: it.text + event.text } : it,
         )
+      } else {
+        // Out-of-order: create placeholder then append text.
+        const created = ensureMessageExists(prev, event.id, turnId)
+        next = deps.capWindow(
+          created.map((it) =>
+            it.kind === 'message' && it.id === event.id ? { ...it, text: it.text + event.text } : it,
+          ),
+        )
       }
-      // Out-of-order: create placeholder then append text.
-      const created = ensureMessageExists(prev, event.id, turnId)
-      return deps.capWindow(
-        created.map((it) =>
-          it.kind === 'message' && it.id === event.id ? { ...it, text: it.text + event.text } : it,
-        ),
-      )
+
+      // Fallback for configs where the pre_approval hook isn't firing: a Hermes
+      // text approval ("Reply `/approve` to execute …") streams in as a normal
+      // assistant message and then BLOCKS waiting for the reply, so `message_end`
+      // never arrives. Convert as soon as the pattern is present rather than on
+      // completion, else the buttons never show until after the user has replied.
+      // When the hook IS active the adapter suppresses this text (see adapter.py
+      // _APPROVAL_PROMPT_RE), so the structured permission_request is the only card.
+      return maybeConvertApproval(next, event.id, deps)
     }
 
     case 'message_end': {
@@ -47,12 +72,7 @@ export function reduceItemsForServerEvent(
         const withDone = prev.map((it) =>
           it.kind === 'message' && it.id === event.id ? { ...it, done: true } : it,
         )
-        const justDone = withDone.find((it) => it.kind === 'message' && it.id === event.id)
-        if (justDone?.kind === 'message') {
-          const approval = deps.tryApprovalPrompt(justDone)
-          if (approval) return withDone.map((it) => (it.id === event.id ? approval : it))
-        }
-        return withDone
+        return maybeConvertApproval(withDone, event.id, deps)
       }
       return deps.capWindow([
         ...prev,

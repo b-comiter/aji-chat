@@ -21,6 +21,7 @@ import type { PermissionRequest, PromptOption, ServerEvent } from '@aji/protocol
 const SERVER = process.env.AJI_SERVER ?? 'http://localhost:4000/event'
 const AGENT = 'claude-code'
 const PROMPT_SERVER = process.env.AJI_PROMPT_SERVER ?? 'http://localhost:4000/prompt/wait'
+const ACCESS_TOKEN = process.env.AJI_ACCESS_TOKEN?.trim() || undefined
 
 interface PromptResponse {
   type: 'prompt_response'
@@ -67,9 +68,11 @@ async function postJson(url: string, body: unknown, timeoutMs?: number): Promise
   const ctrl = new AbortController()
   const timer = timeoutMs != null ? setTimeout(() => ctrl.abort(), timeoutMs) : null
   try {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (ACCESS_TOKEN) headers['X-Aji-Token'] = ACCESS_TOKEN
     const response = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(body),
       signal: ctrl.signal,
     })
@@ -184,10 +187,23 @@ function writeHookJson(body: unknown): void {
 // prompts that Claude the model can actually act on when received via channel.
 // ---------------------------------------------------------------------------
 
+async function emitClaudeCodeServerInfo(): Promise<void> {
+  // Advertise Claude Code as a single-channel server so the mobile home screen
+  // opens its one chat directly instead of drilling into a (one-entry) channel
+  // list. Idempotent on the mobile side; the server also caches + replays it to
+  // clients that connect later.
+  await emit({
+    type: 'server_info',
+    serverId: AGENT,
+    monoChannel: true,
+    displayName: 'Claude Code',
+  })
+}
+
 async function emitClaudeCodeCommands(): Promise<void> {
   await emit({
     type: 'commands',
-    agent: AGENT,
+    serverId: AGENT,
     commands: [
       // Status / awareness
       { name: 'status',    description: 'What are you currently working on?',               category: 'Info' },
@@ -224,13 +240,15 @@ async function main(): Promise<void> {
       writeTurnId(sessionId, turnId)
 
       if (!fromAjiChat) {
-        await emit({ type: 'message_start', id, role: 'user', agent: AGENT, turn_id: turnId })
-        await emit({ type: 'text_delta', id, text: prompt, agent: AGENT, turn_id: turnId })
-        await emit({ type: 'message_end', id, agent: AGENT, turn_id: turnId })
+        await emit({ type: 'message_start', id, role: 'user', serverId: AGENT, turn_id: turnId })
+        await emit({ type: 'text_delta', id, text: prompt, serverId: AGENT, turn_id: turnId })
+        await emit({ type: 'message_end', id, serverId: AGENT, turn_id: turnId })
       }
-      await emit({ type: 'status', value: 'thinking', agent: AGENT })
-      // Populate the mobile command picker on first contact so commands are
-      // available immediately (server caches them for the session lifetime).
+      await emit({ type: 'status', value: 'thinking', serverId: AGENT })
+      // Advertise mono-channel + populate the mobile command picker on first
+      // contact so both are available immediately (server caches them for the
+      // session lifetime).
+      await emitClaudeCodeServerInfo()
       await emitClaudeCodeCommands()
       break
     }
@@ -238,13 +256,13 @@ async function main(): Promise<void> {
       // tool_use_id is stable across PreToolUse / PostToolUse for the same call
       const id = String(payload.tool_use_id ?? randomUUID())
       const turnId = readTurnId(sessionId)
-      await emit({ type: 'status', value: 'working', agent: AGENT })
+      await emit({ type: 'status', value: 'working', serverId: AGENT })
       await emit({
         type: 'tool_start',
         id,
         name: String(payload.tool_name ?? 'unknown'),
         args: (payload.tool_input as Record<string, unknown>) ?? {},
-        agent: AGENT,
+        serverId: AGENT,
         ...(turnId ? { turn_id: turnId } : {}),
       })
       break
@@ -257,7 +275,7 @@ async function main(): Promise<void> {
         title: `${String(payload.tool_name ?? 'Tool')} permission`,
         message: permissionMessage(payload),
         options,
-        agent: AGENT,
+        serverId: AGENT,
       })
 
       if (!response) break
@@ -304,7 +322,7 @@ async function main(): Promise<void> {
     case 'PostToolUse': {
       const id = String(payload.tool_use_id ?? randomUUID())
       const turnId = readTurnId(sessionId)
-      await emit({ type: 'tool_end', id, result: payload.tool_response, agent: AGENT, ...(turnId ? { turn_id: turnId } : {}) })
+      await emit({ type: 'tool_end', id, result: payload.tool_response, serverId: AGENT, ...(turnId ? { turn_id: turnId } : {}) })
       break
     }
     case 'Stop': {
@@ -313,13 +331,16 @@ async function main(): Promise<void> {
       const turnId = readTurnId(sessionId)
       if (text) {
         const id = randomUUID()
-        await emit({ type: 'message_start', id, role: 'assistant', agent: AGENT, ...(turnId ? { turn_id: turnId } : {}) })
-        await emit({ type: 'text_delta', id, text, agent: AGENT, ...(turnId ? { turn_id: turnId } : {}) })
-        await emit({ type: 'message_end', id, agent: AGENT, ...(turnId ? { turn_id: turnId } : {}) })
+        await emit({ type: 'message_start', id, role: 'assistant', serverId: AGENT, ...(turnId ? { turn_id: turnId } : {}) })
+        await emit({ type: 'text_delta', id, text, serverId: AGENT, ...(turnId ? { turn_id: turnId } : {}) })
+        await emit({ type: 'message_end', id, serverId: AGENT, ...(turnId ? { turn_id: turnId } : {}) })
       }
       clearTurnId(sessionId)
-      await emit({ type: 'status', value: 'idle', agent: AGENT })
-      // Refresh the mobile command picker when Claude goes idle — best time to send a command.
+      await emit({ type: 'status', value: 'idle', serverId: AGENT })
+      // Refresh mono-channel advertisement + the mobile command picker when
+      // Claude goes idle — best time to send (and re-seed the server cache if it
+      // restarted mid-session).
+      await emitClaudeCodeServerInfo()
       await emitClaudeCodeCommands()
       break
     }

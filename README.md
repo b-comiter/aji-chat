@@ -80,6 +80,84 @@ pnpm hermes:install
 
 Set up mobile env first: copy `apps/mobile/.env.example` to `.env` and set `EXPO_PUBLIC_SERVER_HOST` to your LAN IP.
 
+## Remote Access (off-network)
+
+By default, the server only listens on your LAN. Two separate tunnels are needed to use the app from mobile data:
+
+| Tunnel | What it exposes | When needed |
+|---|---|---|
+| Cloudflare Tunnel | aji-chat server (port 4000) | Always — this is the app's data channel |
+| `pnpm mobile --tunnel` | Expo Metro bundler | Dev builds only — not needed for standalone builds |
+
+### 1. Generate a shared secret
+
+```bash
+openssl rand -hex 32
+```
+
+Save the output as `YOUR_TOKEN`.
+
+### 2. Start the Cloudflare tunnel
+
+Install `cloudflared` and run a quick tunnel (no account required, URL changes on restart):
+
+```bash
+brew install cloudflared
+cloudflared tunnel --url http://localhost:4000
+```
+
+For a stable URL, [create a named tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started/) — requires a free Cloudflare account and a domain.
+
+### 3. Start the server with the token
+
+```bash
+AJI_ACCESS_TOKEN=YOUR_TOKEN pnpm server
+```
+
+Or export it in your shell profile so it persists across restarts.
+
+### 4. Configure the mobile app
+
+In `apps/mobile/.env`, set the tunnel URL (include `https://` so the app uses `wss://` for WebSocket) and the token:
+
+```bash
+EXPO_PUBLIC_SERVER_HOST=https://your-tunnel-url.trycloudflare.com
+EXPO_PUBLIC_SERVER_TOKEN=YOUR_TOKEN
+```
+
+Then restart Expo (`pnpm mobile`) to pick up the new env vars.
+
+### 5. Configure agents and tools
+
+Set `AJI_ACCESS_TOKEN` in the environment that runs each agent/tool so their HTTP posts are accepted by the server:
+
+```bash
+export AJI_ACCESS_TOKEN=YOUR_TOKEN
+```
+
+If Claude Code runs on the **same machine** as the server, leave `AJI_SERVER` at its default (`http://localhost:4000`) — the hook talks directly to localhost, not through the tunnel. If it runs on a **different machine**, also set:
+
+```bash
+export AJI_SERVER=https://your-tunnel-url.trycloudflare.com/event
+export AJI_PROMPT_SERVER=https://your-tunnel-url.trycloudflare.com/prompt/wait
+```
+
+Hermes reads `AJI_ACCESS_TOKEN` automatically from the environment — no other config needed.
+
+### 6. (Dev builds only) Tunnel the Metro bundler
+
+```bash
+pnpm mobile --tunnel
+```
+
+Expo creates its own tunnel for hot reload. Scan the new QR code it prints.
+
+### Security notes
+
+- `AJI_ACCESS_TOKEN` gates all server routes (HTTP and WebSocket). Do not run without it when the tunnel is active.
+- Unset `AJI_ACCESS_TOKEN` for local-only development — the token is only needed when the tunnel is running.
+- `/status` is intentionally exempt from auth (it only returns a connected-client count).
+
 ## Agent Integration
 
 ### Claude Code
@@ -114,7 +192,9 @@ See `packages/protocol/src/index.ts` for the authoritative wire types. Key shape
 
 **Phone → Server** (`ClientEvent`):
 - `user_message` — text typed on mobile
+- `user_file` — an attachment/voice clip (base64 inline)
 - `prompt_response` — user's choice in a permission/clarify prompt
+- `clear_channel` — reset a channel: `/clear` clears the client AND tells the agent to drop its own session for that channel
 - `get_commands` — request updated command list
 
 Optional fields:

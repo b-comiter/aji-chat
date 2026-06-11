@@ -1,29 +1,73 @@
 import type { Server as HttpServer } from 'node:http'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { serve } from '@hono/node-server'
 import { WebSocketServer, WebSocket } from 'ws'
-import type { ClientEvent, Commands, PermissionRequest, PromptResponse, ServerEvent } from '@aji/protocol'
+import type { ClientEvent, Commands, PermissionRequest, PromptResponse, ServerEvent, ServerInfo } from '@aji/protocol'
 import { textMessage } from '@aji/protocol'
+import { shouldDeliverToWebhook } from './routing'
+import {
+  loadChannels, registerChannel, deregisterChannel, channelsEvent, allServerIds,
+} from './channels'
+import {
+  loadAgents, saveAgents, bearerToken, agentIdForToken, getAgentRecord, hasToken, mintAgent,
+} from './agents'
+import { loadJson, saveJson } from './persist'
+import { registerDebugRoutes } from './debugRoutes'
 
-const PORT = 4000
+const PORT = Number(process.env.AJI_PORT) || 4000
+const ACCESS_TOKEN = process.env.AJI_ACCESS_TOKEN?.trim() || undefined
 
 const app = new Hono()
 app.use('*', cors())
+
+app.use('*', async (c, next) => {
+  if (!ACCESS_TOKEN || c.req.path === '/status') return next()
+  if (c.req.header('x-aji-token') !== ACCESS_TOKEN) {
+    return c.json({ error: 'Unauthorized' }, 401)
+  }
+  return next()
+})
+
 const clients = new Set<WebSocket>()
-const webhooks = new Set<string>()
+const webhooks = new Map<string, string | undefined>()
 const promptWaiters = new Map<string, { resolve: (event: PromptResponse | null) => void }>()
 
-// Latest commands per agent — keyed by event.agent, falling back to '__global__'.
-// Replayed to every new WS client on connect so late-joining screens don't miss them.
+// ---------------------------------------------------------------------------
+// Server info + commands caches
+// ---------------------------------------------------------------------------
+
+// Latest commands per server — replayed to every new WS client on connect.
 const commandsCache = new Map<string, Commands>()
 
+// Latest server_info per server — persisted so name + mono-channel flag survive
+// an aji-chat-server restart without waiting for the agent to reconnect.
+const SERVER_INFO_FILE = process.env.AJI_DATA_DIR
+  ? join(process.env.AJI_DATA_DIR, 'server_info.json')
+  : join(homedir(), '.aji-chat', 'server_info.json')
+const serverInfoCache = new Map<string, ServerInfo>()
+
+function loadServerInfo(): void {
+  const obj = loadJson<Record<string, ServerInfo>>(SERVER_INFO_FILE)
+  if (obj) for (const [serverId, info] of Object.entries(obj)) serverInfoCache.set(serverId, info)
+}
+function saveServerInfo(): void {
+  const obj: Record<string, ServerInfo> = {}
+  for (const [serverId, info] of serverInfoCache) obj[serverId] = info
+  saveJson(SERVER_INFO_FILE, obj)
+}
+
 // Ring buffer of recent events for offline-reconnect replay.
-// Clients send get_missed_events with their last known seq; server replays entries
-// with seq > after_seq back to that client only.
 const MAX_BUFFER = 500
 const eventBuffer: Array<{ seq: number; event: ServerEvent }> = []
 let nextSeq = 0
+
+// Load persisted state at startup.
+loadAgents()
+loadChannels()
+loadServerInfo()
 
 // ---------------------------------------------------------------------------
 // Logging
@@ -44,6 +88,17 @@ function log(direction: '➡️' | '⬅️' | '✅' | '❌' | ' ', tag: string, 
   }
 }
 
+/**
+ * Dedicated, easy-to-grep line for an incoming approval prompt. Prints only the
+ * protocol-level fields (id, title, channel, message, options) — the server is a
+ * dumb router, so it stays out of any agent-specific encoding of `message`.
+ */
+function logPermissionRequest(event: PermissionRequest): void {
+  log('➡️', `permission_request  id=${event.id} channel=${event.channel ?? '-'} title="${event.title}"`)
+  log(' ', `  options: ${event.options.map((o) => o.id).join(', ') || '(none)'}`)
+  log(' ', `  message: ${event.message.slice(0, 500) || '(empty)'}`)
+}
+
 // ---------------------------------------------------------------------------
 // Broadcast helpers
 // ---------------------------------------------------------------------------
@@ -56,36 +111,40 @@ function bufferAndSend(ws: WebSocket, event: ServerEvent): void {
 }
 
 function replayCommandsTo(ws: WebSocket): void {
-  for (const cached of commandsCache.values()) {
-    bufferAndSend(ws, cached)
-  }
+  for (const cached of commandsCache.values()) bufferAndSend(ws, cached)
 }
 
-function broadcast(event: ServerEvent): number {
+function replayServerInfoTo(ws: WebSocket): void {
+  for (const cached of serverInfoCache.values()) bufferAndSend(ws, cached)
+}
+
+function replayChannelsTo(ws: WebSocket): void {
+  for (const serverId of allServerIds()) bufferAndSend(ws, channelsEvent(serverId))
+}
+
+function broadcast(event: ServerEvent): void {
   const seq = nextSeq++
   eventBuffer.push({ seq, event })
   if (eventBuffer.length > MAX_BUFFER) eventBuffer.shift()
 
   const payload = JSON.stringify({ seq, event })
-  let sent = 0
   for (const client of clients) {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(payload)
-      sent += 1
-    }
+    if (client.readyState === WebSocket.OPEN) client.send(payload)
   }
   if (event.type === 'file') {
-    // Don't log the full base64 data for files — can be huge and floods the console.
     log(' ', '(file event data omitted)', { ...event, data: '[base64 data]' })
+  } else if (event.type === 'commands') {
+    log(' ', '(commands event data omitted)', { ...event, commands: '[...]' })
   } else {
-    log('➡️', `broadcast:${event.type}`, { seq, event, sent })
+    log('➡️', event.type, { seq, event })
   }
-  return sent
 }
 
 function dispatchToWebhooks(event: ClientEvent): void {
   const body = JSON.stringify(event)
-  for (const url of webhooks) {
+  const target = 'serverId' in event ? event.serverId : undefined
+  for (const [url, serverId] of webhooks) {
+    if (!shouldDeliverToWebhook(serverId, target)) continue
     fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -130,22 +189,61 @@ function waitForPrompt(prompt: PermissionRequest): Promise<PromptResponse | null
 app.post('/event', async (c) => {
   const event = (await c.req.json()) as ServerEvent
 
+  const agentId = agentIdForToken(bearerToken(c))
+  if (agentId) (event as { agentId?: string }).agentId = agentId
+
   if (event.type === 'commands') {
-    commandsCache.set(event.agent ?? '__global__', event)
+    commandsCache.set(event.serverId ?? '__global__', event)
+  } else if (event.type === 'server_info') {
+    serverInfoCache.set(event.serverId, event)
+    saveServerInfo()
+  } else if (event.type === 'permission_request') {
+    logPermissionRequest(event)
   }
-  const sent = broadcast(event)
-  return c.json({ sent })
+  broadcast(event)
+  return c.json({ ok: true })
 })
 
-/** Convenience: expand a plain string into message_start/text_delta/message_end. */
-app.post('/send', async (c) => {
-  const { message } = await c.req.json<{ message: string }>()
-  log(' ', 'POST /send', message.slice(0, 120))
-  let sent = 0
-  for (const event of textMessage(message)) {
-    sent += broadcast(event)
+/**
+ * Agent registration / token minting. No (or unknown) bearer token → mint a new
+ * { agentId, token } and persist it. Known token → return the existing agentId.
+ * Optional `{ name }` updates the display name.
+ */
+app.post('/agent/register', async (c) => {
+  const body = await c.req.json<{ name?: string }>().catch(() => ({} as { name?: string }))
+  const token = bearerToken(c)
+
+  if (token && hasToken(token)) {
+    const rec = getAgentRecord(token)!
+    rec.lastSeen = Date.now()
+    if (body.name) rec.name = body.name
+    saveAgents()
+    log(' ', `agent re-register agentId=${rec.agentId}`)
+    return c.json({ agentId: rec.agentId })
   }
-  return c.json({ sent })
+
+  const { token: newToken, agentId } = mintAgent(body.name ?? 'agent')
+  log(' ', `agent minted agentId=${agentId} name=${body.name ?? 'agent'}`)
+  return c.json({ agentId, token: newToken })
+})
+
+/**
+ * Convenience: expand a plain string into message_start/text_delta/message_end.
+ * Optional `serverId` and `channel` route the message to a specific conversation.
+ */
+app.post('/send', async (c) => {
+  const { message, serverId, channel } = await c.req.json<{
+    message: string
+    serverId?: string
+    channel?: string
+  }>()
+  log(' ', 'POST /send', `serverId=${serverId ?? '-'} channel=${channel ?? '-'} ${message.slice(0, 100)}`)
+  const agentId = agentIdForToken(bearerToken(c))
+  for (const event of textMessage(message, 'assistant', undefined, { serverId, channel })) {
+    if (agentId) (event as { agentId?: string }).agentId = agentId
+    broadcast(event)
+  }
+  return c.json({ ok: true })
 })
 
 /** Broadcast a permission prompt and wait indefinitely for the first client response. */
@@ -153,9 +251,6 @@ app.post('/prompt/wait', async (c) => {
   const { prompt } = await c.req.json<{ prompt: PermissionRequest }>()
   log(' ', `POST /prompt/wait  id=${prompt.id} title="${prompt.title}"`)
 
-  // If the hook process exits mid-wait (e.g. desktop native dialog was approved
-  // and Claude Code killed the hook), the HTTP connection drops and the abort
-  // signal fires. Cancel immediately so mobile doesn't linger.
   c.req.raw.signal.addEventListener('abort', () => {
     const waiter = promptWaiters.get(prompt.id)
     if (waiter) {
@@ -176,9 +271,7 @@ app.post('/prompt/wait', async (c) => {
 
 /**
  * Cancel a pending prompt. Dismisses it on all connected clients and resolves
- * any in-flight `/prompt/wait` waiter as null. Used by the Claude Code hook
- * when the desktop's native permission dialog was approved — we need to tell
- * the mobile client to take the prompt down.
+ * any in-flight `/prompt/wait` waiter as null.
  */
 app.post('/prompt/cancel/:id', (c) => {
   const id = c.req.param('id')
@@ -192,142 +285,22 @@ app.post('/prompt/cancel/:id', (c) => {
   return c.json({ cancelled: !!waiter })
 })
 
-/**
- * Receive a DB dump from the mobile client and print it to the server console.
- * Triggered by the /view-db slash command in the chat screen.
- */
-app.post('/db/dump', async (c) => {
-  const { agents, itemCounts } = await c.req.json<{
-    agents: Array<{
-      id: string
-      display_name: string
-      last_status: string
-      last_message_preview: string | null
-      last_event_at: number | null
-    }>
-    itemCounts: Record<string, { messages: number; tools: number; prompts: number }>
-  }>()
+registerDebugRoutes(app, log)
 
-  log(' ', 'POST /db/dump')
-
-  if (agents.length === 0) {
-    console.log('\n[DB DUMP] No agents in database.\n')
-    return c.json({ logged: true })
-  }
-
-  const rows = agents.map((a) => {
-    const counts = itemCounts[a.id] ?? { messages: 0, tools: 0, prompts: 0 }
-    return {
-      id:          a.id,
-      name:        a.display_name,
-      status:      a.last_status,
-      messages:    counts.messages,
-      tools:       counts.tools,
-      prompts:     counts.prompts,
-      preview:     (a.last_message_preview ?? '').slice(0, 40) || '—',
-    }
-  })
-
-  console.log('\n[DB DUMP]')
-  console.table(rows)
-  console.log('')
-
-  return c.json({ logged: true })
-})
-
-/**
- * Receive a chat history dump from the mobile client and print it to the
- * server console. Triggered by the /view-chat-history slash command.
- * Pass with-tools on the mobile side to include tool rows.
- */
-app.post('/chat/dump', async (c) => {
-  const { chatId, items } = await c.req.json<{
-    chatId: string
-    items: Array<{
-      kind: 'message' | 'tool'
-      role?: string
-      text?: string
-      name?: string
-      args?: Record<string, unknown>
-      result?: unknown
-      done: boolean
-    }>
-  }>()
-
-  log(' ', `POST /chat/dump  chat=${chatId} items=${items.length}`)
-
-  if (items.length === 0) {
-    console.log(`\n[CHAT DUMP] No items for chat "${chatId}".\n`)
-    return c.json({ logged: true })
-  }
-
-  const rows = items.map((it, i) => {
-    if (it.kind === 'tool') {
-      const argsStr = JSON.stringify(it.args ?? {})
-      const preview = `${it.name}(${argsStr})`.slice(0, 100)
-      return { '#': i + 1, role: '(tool)', content: preview, done: it.done ? '✓' : '…' }
-    }
-    return {
-      '#': i + 1,
-      role: it.role ?? '—',
-      content: (it.text ?? '').replace(/\n/g, ' ').slice(0, 100) || '—',
-      done: it.done ? '✓' : '…',
-    }
-  })
-
-  console.log(`\n[CHAT DUMP] chat=${chatId}`)
-  console.table(rows)
-  console.log('')
-
-  return c.json({ logged: true })
-})
-
-/**
- * Receive the last N messages from the mobile client and print them to the
- * server console. Triggered by the /view-last-n-msgs slash command.
- */
-app.post('/last-messages/dump', async (c) => {
-  const { chatId, messages } = await c.req.json<{
-    chatId: string
-    messages: Array<{
-      id: string
-      role: 'assistant' | 'user' | 'system'
-      text: string
-      done: boolean
-    }>
-  }>()
-
-  log(' ', `POST /last-messages/dump  chat=${chatId} messages=${messages.length}`)
-
-  if (messages.length === 0) {
-    console.log(`\n[LAST MESSAGES] No messages for chat "${chatId}".\n`)
-    return c.json({ logged: true })
-  }
-
-  console.log(`\n[LAST MESSAGES] chat=${chatId} (${messages.length} message${messages.length !== 1 ? 's' : ''})`)
-
-  const rows = messages.map((msg, i) => ({
-    '#': i + 1,
-    role: msg.role,
-    text: msg.text.replace(/\n/g, ' ').slice(0, 1000) || '—',
-    done: msg.done ? '✓' : '…',
-  }))
-  console.table(rows)
-
-  return c.json({ logged: true })
+/** Channel registry for a server — agents call this to discover available channels. */
+app.get('/channels', (c) => {
+  const serverId = c.req.query('serverId')
+  if (!serverId) return c.json({ error: 'serverId query param required' }, 400)
+  return c.json({ serverId, channels: channelsEvent(serverId).channels })
 })
 
 /** Connected client count — used by the simulator UI for status polling. */
 app.get('/status', (c) => {
   const connected = [...clients].filter(ws => ws.readyState === WebSocket.OPEN).length
-  // Not logged — polled every few seconds by the simulator; would flood output.
   return c.json({ clients: connected })
 })
 
-/**
- * Inject a prompt response directly — lets the simulator's "Simulate mobile
- * response" button resolve a live /prompt/wait without needing a real phone.
- */
+/** Inject a prompt response directly — lets the simulator resolve a live /prompt/wait. */
 app.post('/prompt/respond', async (c) => {
   const { id, choice } = await c.req.json<{ id: string; choice: string }>()
   log('⬅️', `POST /prompt/respond  id=${id} choice=${choice}`)
@@ -337,9 +310,9 @@ app.post('/prompt/respond', async (c) => {
 
 /** Register a webhook URL to receive ClientEvents forwarded from the phone. */
 app.post('/webhook', async (c) => {
-  const { url } = await c.req.json<{ url: string }>()
-  webhooks.add(url)
-  log(' ', `POST /webhook registered  url=${url} total=${webhooks.size}`)
+  const { url, serverId } = await c.req.json<{ url: string; serverId?: string }>()
+  webhooks.set(url, serverId)
+  log(' ', `POST /webhook registered  url=${url} serverId=${serverId ?? '*'} total=${webhooks.size}`)
   return c.json({ registered: webhooks.size })
 })
 
@@ -361,13 +334,21 @@ const server = serve({ fetch: app.fetch, port: PORT }, (info) => {
 
 const wss = new WebSocketServer({ server, path: '/ws' })
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, request) => {
+  if (ACCESS_TOKEN) {
+    const url = new URL(request.url ?? '/', 'http://localhost')
+    if (url.searchParams.get('token') !== ACCESS_TOKEN) {
+      ws.close(4401, 'Unauthorized')
+      return
+    }
+  }
+
   clients.add(ws)
   log('✅', `ws:connect  total=${clients.size}`)
 
-  // Replay cached commands so late-joining clients get the current command list
-  // for every active agent without having to ask.
   replayCommandsTo(ws)
+  replayServerInfoTo(ws)
+  replayChannelsTo(ws)
 
   ws.on('message', (raw) => {
     try {
@@ -376,17 +357,19 @@ wss.on('connection', (ws) => {
       if (event.type === 'prompt_response') {
         resolvePrompt(event)
       } else if (event.type === 'get_commands') {
-        // Client is explicitly requesting the current command list (e.g. after
-        // a reconnect or before the agent has had a chance to broadcast).
         if (ws.readyState === WebSocket.OPEN) replayCommandsTo(ws)
+      } else if (event.type === 'create_channel') {
+        registerChannel(event.serverId, event.channel, event.displayName)
+        broadcast(channelsEvent(event.serverId))
+      } else if (event.type === 'delete_channel') {
+        deregisterChannel(event.serverId, event.channel)
+        broadcast(channelsEvent(event.serverId))
       } else if (event.type === 'get_missed_events') {
         const after = event.after_seq
         const missed = eventBuffer.filter((e) => e.seq > after)
         log(' ', `ws:get_missed_events  after=${after} replaying=${missed.length}`)
         for (const entry of missed) {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify(entry))
-          }
+          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(entry))
         }
       }
       dispatchToWebhooks(event)

@@ -1,5 +1,6 @@
 const DEFAULT_SERVER_HOST = 'localhost'
 const DEFAULT_SERVER_PORT = process.env.EXPO_PUBLIC_SERVER_PORT ?? '4000'
+const SERVER_TOKEN = process.env.EXPO_PUBLIC_SERVER_TOKEN?.trim() || undefined
 
 type SupportedProtocol = 'http' | 'https' | 'ws' | 'wss'
 
@@ -24,6 +25,7 @@ export function getServerConfig() {
     const ws = new URL(`ws://${DEFAULT_SERVER_HOST}`)
     ws.port = DEFAULT_SERVER_PORT
     ws.pathname = '/ws'
+    if (SERVER_TOKEN) ws.searchParams.set('token', SERVER_TOKEN)
 
     const http = new URL(`http://${DEFAULT_SERVER_HOST}`)
     http.port = DEFAULT_SERVER_PORT
@@ -33,6 +35,7 @@ export function getServerConfig() {
       hostLabel: `${DEFAULT_SERVER_HOST}:${DEFAULT_SERVER_PORT} (default)`,
       wsEndpoint: ws.toString(),
       httpBase: http.origin,
+      token: SERVER_TOKEN,
     }
   }
 
@@ -41,20 +44,24 @@ export function getServerConfig() {
   const useSecure = parsedProtocol === 'https' || parsedProtocol === 'wss'
   const wsProtocol = useSecure ? 'wss' : 'ws'
   const httpProtocol = useSecure ? 'https' : 'http'
-  const port = parsed.port || DEFAULT_SERVER_PORT
+  // For secure URLs (e.g. Cloudflare tunnel) with no explicit port, don't
+  // append a default — they terminate TLS at 443 and don't expose 4000.
+  const port = parsed.port || (useSecure ? '' : DEFAULT_SERVER_PORT)
 
   const ws = new URL(`${wsProtocol}://${parsed.hostname}`)
-  ws.port = port
+  if (port) ws.port = port
   ws.pathname = '/ws'
+  if (SERVER_TOKEN) ws.searchParams.set('token', SERVER_TOKEN)
 
   const http = new URL(`${httpProtocol}://${parsed.hostname}`)
-  http.port = port
+  if (port) http.port = port
 
   return {
     isConfigured: true,
-    hostLabel: `${parsed.hostname}:${port}`,
+    hostLabel: port ? `${parsed.hostname}:${port}` : parsed.hostname,
     wsEndpoint: ws.toString(),
     httpBase: http.origin,
+    token: SERVER_TOKEN,
   }
 }
 

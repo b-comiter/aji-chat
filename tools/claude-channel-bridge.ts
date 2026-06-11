@@ -23,8 +23,8 @@
  * only stderr (console.error) — or the transport will be corrupted.
  *
  * Env:
- *   AJI_SERVER  base URL of the aji-chat server   (default http://localhost:4000)
- *   AJI_AGENT   which agent this bridge represents (default claude-code)
+ *   AJI_SERVER  base URL of the aji-chat server    (default http://localhost:4000)
+ *   AJI_AGENT   which server this bridge represents (default claude-code)
  */
 import * as http from 'node:http'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
@@ -34,6 +34,7 @@ import type { ClientEvent, UserMessage } from '@aji/protocol'
 
 const AJI_SERVER = (process.env.AJI_SERVER ?? 'http://localhost:4000').replace(/\/$/, '')
 const AJI_AGENT = process.env.AJI_AGENT ?? 'claude-code'
+const ACCESS_TOKEN = process.env.AJI_ACCESS_TOKEN?.trim()
 
 // stdout belongs to the MCP transport — log only to stderr.
 function log(...args: unknown[]): void {
@@ -42,15 +43,16 @@ function log(...args: unknown[]): void {
 
 /**
  * Pure routing predicate (exported for tests): does this client event belong to
- * the agent this bridge represents? A `user_message` with no `agent` is treated
- * as a match so older mobile builds (pre-agent-field) still reach the session.
+ * the server this bridge represents? A `user_message` with no `serverId` is
+ * treated as a match so older mobile builds (pre-serverId-field) still reach the
+ * session.
  */
 export function shouldForward(
   event: ClientEvent,
-  agent: string,
+  serverId: string,
 ): event is UserMessage {
   if (event.type !== 'user_message') return false
-  return event.agent === undefined || event.agent === agent
+  return event.serverId === undefined || event.serverId === serverId
 }
 
 const server = new Server(
@@ -129,8 +131,10 @@ async function registerWebhook(port: number): Promise<void> {
   try {
     await fetch(`${AJI_SERVER}/webhook`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: webhookUrl }),
+      headers: { 'Content-Type': 'application/json', ...(ACCESS_TOKEN ? { 'X-Aji-Token': ACCESS_TOKEN } : {}) },
+      // Scope the webhook to this server so the aji-chat server only forwards
+      // events targeting claude-code (not messages meant for other agents).
+      body: JSON.stringify({ url: webhookUrl, serverId: AJI_AGENT }),
     })
     log('registered webhook', webhookUrl, 'with', AJI_SERVER)
   } catch (err) {
@@ -143,7 +147,7 @@ async function deregisterWebhook(): Promise<void> {
   try {
     await fetch(`${AJI_SERVER}/webhook`, {
       method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...(ACCESS_TOKEN ? { 'X-Aji-Token': ACCESS_TOKEN } : {}) },
       body: JSON.stringify({ url: webhookUrl }),
     })
     log('deregistered webhook', webhookUrl)

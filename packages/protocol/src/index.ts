@@ -31,17 +31,41 @@ export type AgentStatus = 'thinking' | 'working' | 'idle'
 export type TurnId = string
 
 /**
- * Identifies which agent *sent* the event ('claude-code', 'hermes', 'simulate').
- * Events without this field are attributed to 'unknown'.
+ * Identifies the *server* a event belongs to ('claude-code', 'hermes',
+ * 'simulate'). This is the conversation container — the mobile home screen lists
+ * one row per server. Events without it are attributed to 'unknown'.
+ *
+ * (Formerly the overloaded `agent` field. See `AgentId` for the distinct
+ * connected-agent identity.)
+ */
+export type ServerId = string
+
+/**
+ * Identifies the connected *agent* (harness/bot) that produced an event — the
+ * server-minted, persistent identity behind a bearer token. Distinct from
+ * `ServerId`: a server is the container, an agent is *who posted* into it
+ * (eventually many agents per server). The aji-chat server stamps this from the
+ * validated token at ingress, so it is platform-derived and unspoofable.
  */
 export type AgentId = string
+
+/**
+ * Identifies a *channel* within a server, Discord-style. A conversation is the
+ * pair `(serverId, channel)`: e.g. server "hermes" + channel "daily-brief".
+ * Optional on the wire — events without it default to the `"general"` channel,
+ * which preserves the original single-conversation-per-server behavior. On the
+ * Hermes side a channel maps to a `chat_id` (one session per channel).
+ */
+export type ChannelId = string
 
 export interface MessageStart {
   type: 'message_start'
   id: string
   role: Role
   turn_id?: TurnId
-  agent?: AgentId
+  serverId?: ServerId
+  agentId?: AgentId
+  channel?: ChannelId
 }
 
 export interface TextDelta {
@@ -49,14 +73,18 @@ export interface TextDelta {
   id: string
   text: string
   turn_id?: TurnId
-  agent?: AgentId
+  serverId?: ServerId
+  agentId?: AgentId
+  channel?: ChannelId
 }
 
 export interface MessageEnd {
   type: 'message_end'
   id: string
   turn_id?: TurnId
-  agent?: AgentId
+  serverId?: ServerId
+  agentId?: AgentId
+  channel?: ChannelId
 }
 
 export interface ToolStart {
@@ -65,7 +93,9 @@ export interface ToolStart {
   name: string
   args: Record<string, unknown>
   turn_id?: TurnId
-  agent?: AgentId
+  serverId?: ServerId
+  agentId?: AgentId
+  channel?: ChannelId
 }
 
 export interface ToolEnd {
@@ -76,13 +106,17 @@ export interface ToolEnd {
   /** Set when the tool errored. */
   error?: string
   turn_id?: TurnId
-  agent?: AgentId
+  serverId?: ServerId
+  agentId?: AgentId
+  channel?: ChannelId
 }
 
 export interface Status {
   type: 'status'
   value: AgentStatus
-  agent?: AgentId
+  serverId?: ServerId
+  agentId?: AgentId
+  channel?: ChannelId
 }
 
 /**
@@ -109,7 +143,9 @@ export interface FileMessage {
   /** Optional caption / transcript shown alongside the file. */
   text?: string
   turn_id?: TurnId
-  agent?: AgentId
+  serverId?: ServerId
+  agentId?: AgentId
+  channel?: ChannelId
 }
 
 /**
@@ -124,7 +160,9 @@ export interface PermissionRequest {
   message: string
   options: PromptOption[]
   turn_id?: TurnId
-  agent?: AgentId
+  serverId?: ServerId
+  agentId?: AgentId
+  channel?: ChannelId
 }
 
 /**
@@ -137,7 +175,9 @@ export interface Clarify {
   question: string
   choices: PromptOption[]
   turn_id?: TurnId
-  agent?: AgentId
+  serverId?: ServerId
+  agentId?: AgentId
+  channel?: ChannelId
 }
 
 /**
@@ -147,7 +187,9 @@ export interface Clarify {
 export interface PromptDismiss {
   type: 'prompt_dismiss'
   id: string
-  agent?: AgentId
+  serverId?: ServerId
+  agentId?: AgentId
+  channel?: ChannelId
 }
 
 /**
@@ -177,7 +219,51 @@ export interface CommandItem {
 export interface Commands {
   type: 'commands'
   commands: CommandItem[]
-  agent?: AgentId
+  serverId?: ServerId
+  agentId?: AgentId
+  channel?: ChannelId
+}
+
+/**
+ * Server-level metadata an agent advertises about its server (Discord-style
+ * "server settings"). Emitted on connect (alongside `commands`). The mobile
+ * caches it per server; `monoChannel` is an *advertised default* the user can
+ * override locally (a mono-channel server, e.g. Claude Code, skips the
+ * channel-list drill-down and opens its single chat directly).
+ */
+export interface ServerInfo {
+  type: 'server_info'
+  serverId: ServerId
+  /** When true, the server has a single implicit channel (no channel list). */
+  monoChannel?: boolean
+  /** Optional human-readable server name advertised by the agent. */
+  displayName?: string
+  agentId?: AgentId
+}
+
+/**
+ * One channel in a server's registry. The aji-chat server owns this list (it is
+ * the source of truth, persisted alongside the agent registry); agents read it
+ * on demand via `GET /channels` and do not advertise it themselves.
+ */
+export interface ChannelInfo {
+  /** Channel id within the server, e.g. "daily-brief". */
+  id: ChannelId
+  /** Human-readable name; defaults to `id` when absent. */
+  displayName?: string
+}
+
+/**
+ * The full channel list for a server. Broadcast by the server whenever the
+ * registry changes (e.g. after a `create_channel`) and replayed to every client
+ * on connect — mirroring how `Commands` is cached + replayed. The mobile client
+ * upserts these into its local channel table as a thin cache.
+ */
+export interface Channels {
+  type: 'channels'
+  serverId: ServerId
+  channels: ChannelInfo[]
+  agentId?: AgentId
 }
 
 export interface PromptOption {
@@ -204,6 +290,8 @@ export type ServerEvent =
   | Clarify
   | PromptDismiss
   | Commands
+  | ServerInfo
+  | Channels
 
 // ---------------------------------------------------------------------------
 // Client → Server
@@ -213,11 +301,13 @@ export interface UserMessage {
   type: 'user_message'
   text: string
   /**
-   * Which agent/chat this message is destined for (the mobile chatId).
-   * Optional for backward compatibility; adapters that route by agent
+   * Which server this message is destined for (the mobile server id).
+   * Optional for backward compatibility; adapters that route by server
    * (e.g. the Claude Code channel bridge) filter on this field.
    */
-  agent?: AgentId
+  serverId?: ServerId
+  /** Channel within the destination server; absent ⇒ `"general"`. */
+  channel?: ChannelId
 }
 
 /**
@@ -239,8 +329,10 @@ export interface UserFile {
   duration?: number
   /** Optional caption sent alongside the file. */
   text?: string
-  /** Destination agent (mobile chatId), mirrors `UserMessage.agent`. */
-  agent?: AgentId
+  /** Destination server (mobile server id), mirrors `UserMessage.serverId`. */
+  serverId?: ServerId
+  /** Channel within the destination server; absent ⇒ `"general"`. */
+  channel?: ChannelId
 }
 
 export interface PromptResponse {
@@ -249,6 +341,53 @@ export interface PromptResponse {
   id: string
   /** The id of the chosen PromptOption */
   choice: string
+}
+
+/**
+ * Reset a conversation. Sent when the user clears a channel's history on the
+ * client (e.g. the `/clear` command) so the agent can also tear down its own
+ * per-conversation session — history and context window — for that channel.
+ *
+ * Agent-agnostic: the dumb-router server just forwards it to webhooks, and each
+ * adapter maps it to its own reset (the Hermes plugin starts a fresh session for
+ * the `(serverId, channel)` room; adapters with no session concept may ignore
+ * it). Clearing on the client alone would leave the agent thinking the prior
+ * context still exists, so this keeps the two sides in sync.
+ */
+export interface ClearChannel {
+  type: 'clear_channel'
+  /** Destination server (mobile server id); mirrors `UserMessage.serverId`. */
+  serverId?: ServerId
+  /** Channel within the destination server; absent ⇒ `"general"`. */
+  channel?: ChannelId
+}
+
+/**
+ * Create a channel in a server's registry. Sent when the user adds a channel
+ * from the mobile channel list. The server (which owns the registry) upserts it,
+ * persists, and broadcasts the updated `Channels` list back to all clients. The
+ * mobile write is optimistic; the broadcast is the authoritative reconciliation.
+ * Idempotent: creating an existing channel just refreshes its `displayName`.
+ */
+export interface CreateChannel {
+  type: 'create_channel'
+  serverId: ServerId
+  channel: ChannelId
+  /** Human-readable name; defaults to `channel` when absent. */
+  displayName?: string
+}
+
+/**
+ * Remove a channel from a server's registry. Sent when the user deletes a channel
+ * from the mobile channel list. The server drops it from the registry, persists,
+ * and broadcasts the updated `Channels` list. Idempotent: deleting an unknown
+ * channel is a no-op (covers local-only channels never registered server-side).
+ * The phone also deletes the channel's local message history on its own side.
+ */
+export interface DeleteChannel {
+  type: 'delete_channel'
+  serverId: ServerId
+  channel: ChannelId
 }
 
 /**
@@ -270,7 +409,7 @@ export interface GetMissedEvents {
   after_seq: number
 }
 
-export type ClientEvent = UserMessage | UserFile | PromptResponse | GetCommands | GetMissedEvents
+export type ClientEvent = UserMessage | UserFile | PromptResponse | ClearChannel | CreateChannel | DeleteChannel | GetCommands | GetMissedEvents
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -295,12 +434,22 @@ export function newId(prefix = 'id'): string {
  * message. Useful for "send me a plain message from the server" cases.
  * Pass `turn_id` to group this message with a wider agent turn.
  */
-export function textMessage(text: string, role: Role = 'assistant', turn_id?: TurnId): ServerEvent[] {
+export function textMessage(
+  text: string,
+  role: Role = 'assistant',
+  turn_id?: TurnId,
+  opts: { serverId?: ServerId; channel?: ChannelId } = {},
+): ServerEvent[] {
   const id = newId('msg')
+  const tail = {
+    ...(turn_id ? { turn_id } : {}),
+    ...(opts.serverId !== undefined ? { serverId: opts.serverId } : {}),
+    ...(opts.channel !== undefined ? { channel: opts.channel } : {}),
+  }
   return [
-    { type: 'message_start', id, role, ...(turn_id ? { turn_id } : {}) },
-    { type: 'text_delta', id, text, ...(turn_id ? { turn_id } : {}) },
-    { type: 'message_end', id, ...(turn_id ? { turn_id } : {}) },
+    { type: 'message_start', id, role, ...tail },
+    { type: 'text_delta', id, text, ...tail },
+    { type: 'message_end', id, ...tail },
   ]
 }
 
@@ -321,7 +470,8 @@ export function userFileMessage(
     name?: string
     duration?: number
     text?: string
-    agent?: AgentId
+    serverId?: ServerId
+    channel?: ChannelId
   } = {},
 ): UserFile {
   return {
@@ -331,7 +481,8 @@ export function userFileMessage(
     ...(opts.name !== undefined ? { name: opts.name } : {}),
     ...(opts.duration !== undefined ? { duration: opts.duration } : {}),
     ...(opts.text !== undefined ? { text: opts.text } : {}),
-    ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
+    ...(opts.serverId !== undefined ? { serverId: opts.serverId } : {}),
+    ...(opts.channel !== undefined ? { channel: opts.channel } : {}),
   }
 }
 
@@ -344,7 +495,8 @@ export function fileMessage(
     duration?: number
     text?: string
     turn_id?: TurnId
-    agent?: AgentId
+    serverId?: ServerId
+    channel?: ChannelId
   } = {},
 ): FileMessage {
   return {
@@ -357,6 +509,7 @@ export function fileMessage(
     ...(opts.duration !== undefined ? { duration: opts.duration } : {}),
     ...(opts.text !== undefined ? { text: opts.text } : {}),
     ...(opts.turn_id ? { turn_id: opts.turn_id } : {}),
-    ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
+    ...(opts.serverId !== undefined ? { serverId: opts.serverId } : {}),
+    ...(opts.channel !== undefined ? { channel: opts.channel } : {}),
   }
 }

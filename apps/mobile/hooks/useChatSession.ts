@@ -26,6 +26,7 @@ import type { AgentStatus, ClientEvent, CommandItem, ServerEvent } from '@aji/pr
 import type { SQLiteDatabase } from 'expo-sqlite'
 import { loadCachedCommands, loadOlderThan, loadRecentItems } from '../db/database'
 import type { ItemRow } from '../db/database'
+import { convKey } from '../db/convKey'
 import { rowToItem } from './chatTypes'
 import type { Item } from './chatTypes'
 import { tryApprovalPrompt } from './hermesApproval'
@@ -46,6 +47,7 @@ type SendEventFn = (event: ClientEvent) => void
 
 export function useChatSession(
   chatId: string | undefined,
+  channel: string,
   db: SQLiteDatabase,
   conn: 'connected' | 'connecting' | 'disconnected',
   subscribe: SubscribeFn,
@@ -123,7 +125,7 @@ export function useChatSession(
     let cancelled = false
 
     async function load() {
-      const cursorRows: ItemRow[] = await loadRecentItems(db, chatId!, BATCH_SIZE)
+      const cursorRows: ItemRow[] = await loadRecentItems(db, chatId!, channel, BATCH_SIZE)
       const intaken = intakeRows(cursorRows)
 
       if (cancelled) return
@@ -147,7 +149,7 @@ export function useChatSession(
     return () => {
       cancelled = true
     }
-  }, [db, chatId, intakeRows])
+  }, [db, chatId, channel, intakeRows])
 
   // Hydrate slash command cache for this chat so reload/offline still shows picker data.
   useEffect(() => {
@@ -178,7 +180,7 @@ export function useChatSession(
     if (cursor == null) return
     loadingOlderRef.current = true
     try {
-      const rows = await loadOlderThan(db, chatId, cursor, BATCH_SIZE)
+      const rows = await loadOlderThan(db, chatId, channel, cursor, BATCH_SIZE)
       if (rows.length === 0) {
         setHasMoreOlder(false)
         return
@@ -202,7 +204,7 @@ export function useChatSession(
     } finally {
       loadingOlderRef.current = false
     }
-  }, [chatId, db, intakeRows, refreshOldestCursor])
+  }, [chatId, channel, db, intakeRows, refreshOldestCursor])
 
   // -------------------------------------------------------------------------
   // WS event handler — appends live arrivals to the in-memory window.
@@ -229,8 +231,8 @@ export function useChatSession(
 
   useEffect(() => {
     if (!chatId) return
-    return subscribe(chatId, handleEvent)
-  }, [chatId, subscribe, handleEvent])
+    return subscribe(convKey(chatId, channel), handleEvent)
+  }, [chatId, channel, subscribe, handleEvent])
 
   return {
     items,

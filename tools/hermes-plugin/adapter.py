@@ -8,16 +8,16 @@ protocol:
   Hermes call                      | aji-chat events
   --------------------------------- | --------------------------------------
   on_processing_start(event)        | status:thinking (mints turn_id)
-  send(chat_id, content)            | message_start + text_delta + message_end
+  send(chat_id, content)            | message_start + text_delta (left open)
   edit_message(..., finalize=False) | text_delta (delta against last_sent)
   edit_message(..., finalize=True)  | text_delta (final delta) + message_end
-  on_processing_complete(...)       | status:idle (clears turn_id)
+  on_processing_complete(...)       | message_end for still-open msgs, status:idle
   send_typing(chat_id)              | status:working
   send_voice / send_video /         | file (base64 inline, mime by extension)
     send_document / send_image_file |
   pre_tool_call (hook)              | tool_start
   post_tool_call (hook)             | tool_end
-  pre_approval_request (hook)       | permission_request → await future → choice
+  pre_approval_request (hook)       | permission_request (/approve · /deny buttons)
 
 Media (the send_* file methods) all funnel through `_emit_file`, which reads
 the local file, base64-encodes it, and emits one `file` event. Ogg/Opus audio
@@ -34,20 +34,25 @@ protocol is append-only: each text_delta is just the new characters. So we
 keep a `last_sent` text per message_id in SessionState and diff each edit
 against it to compute the incremental delta.
 
-We choose to emit `message_end` in send() AND again in edit_message(finalize=True).
-Why both?
+When streaming is ON, send() does NOT emit message_end — it leaves the message
+open (tracked in last_sent + _open_message_scope) so the streaming cursor keeps
+showing while edit_message() appends deltas; edit_message(..., finalize=True)
+emits the final delta + message_end and forgets it.
 
-  - Non-streaming sends (status messages, single-shot responses) only call
-    send(); without message_end here, the mobile UI would show a perpetual
-    streaming cursor on those.
-  - Streaming sends emit a duplicate message_end at finalize, but the mobile
-    handler is idempotent (it just sets done=true again).
+When streaming is OFF (and for out-of-turn cron pushes), send() already carries
+the COMPLETE text and nothing edits it, so send() emits message_end right away.
+Leaving it open instead would strand the message on mobile — a perpetual
+streaming cursor, and (since mobile only persists on message_end) it would
+vanish when the user navigates away before the turn ends. The lone exception is
+the in-place "⏳ Working…/Subagent" heartbeat (long_running_notifications),
+which keeps getting edit_message'd, so it stays open until on_processing_complete
+closes it along with any other still-open message for the turn (then status:idle).
 
-The trade-off: during streaming, the mobile's "cursor" indicator disappears
-after the initial send() because the message is marked done. Text continues
-to append cleanly, just without a per-character cursor animation. The header's
-status:thinking/working pill carries the "agent is working" signal in the
-meantime.
+Consequence worth knowing: a Hermes text approval is a one-shot send() that
+then BLOCKS waiting for the user's /approve reply, so on_processing_complete()
+hasn't run and no message_end arrives for it. The mobile reducer converts the
+approval text into a prompt card on text_delta (not message_end) for exactly
+this reason — see apps/mobile/hooks/useChatSessionReducer.ts.
 """
 from __future__ import annotations
 
@@ -57,8 +62,6 @@ import logging
 import mimetypes
 import os
 import re
-import shutil
-import subprocess
 import tempfile
 import uuid
 from typing import Any, Optional
@@ -68,6 +71,10 @@ from .client import AjiClient
 from .state import SessionState
 from .webhook_server import WebhookServer
 from ._log import flog, flog_info, flog_warn
+from .media import (
+    IOS_INCOMPATIBLE_AUDIO_EXTS, guess_mime, set_platform_streaming,
+    probe_duration_seconds, transcode_ogg_to_m4a,
+)
 
 # Hermes imports — resolved at runtime by the Hermes plugin loader.
 # Static analysis won't find these unless the Hermes repo is on PYTHONPATH;
@@ -89,12 +96,55 @@ logger = logging.getLogger(__name__)
 # Order matters: longer prefixes first.
 _CURSOR_SUFFIXES = (" ▉", " ▍", "▉", "▍")
 
-# Default identifiers for the single-user aji-chat case. The protocol carries
-# chat_id but the current aji-chat server is single-tenant, so we use a stable
-# constant chat_id and user_id.
-_DEFAULT_CHAT_ID = "default"
+# aji-chat is Discord-style: a *server* (this platform, "hermes") holds many
+# *channels*. Each channel maps to its own Hermes `chat_id` — i.e. its own
+# session / history / context window — via the `room:` prefix. The mobile app
+# sends a `channel` on every event; absent ⇒ the default channel below.
+_DEFAULT_CHANNEL = "general"
 _DEFAULT_USER_ID = "aji-mobile"
-_STREAMING_CONFIG_KEY = "display.platforms.aji-chat.streaming"
+
+
+def _chat_id_for_channel(channel: Optional[str]) -> str:
+    """Map a mobile channel id to a Hermes chat_id (one session per channel)."""
+    return f"room:{channel or _DEFAULT_CHANNEL}"
+
+
+# Bot-token analogue. Stored in ~/.hermes/.env exactly like DISCORD_BOT_TOKEN, so
+# the same agent identity (and, later, its grants) persists across restarts.
+_AGENT_TOKEN_ENV = "AJI_AGENT_TOKEN"
+
+
+def _hermes_env_path() -> str:
+    """Path to Hermes's env file (where bot tokens live). Honors HERMES_HOME."""
+    base = os.getenv("HERMES_HOME") or os.path.join(os.path.expanduser("~"), ".hermes")
+    return os.path.join(base, ".env")
+
+
+def _persist_agent_token(token: str) -> None:
+    """Write/update AJI_AGENT_TOKEN in ~/.hermes/.env and the live process env,
+    mirroring how DISCORD_BOT_TOKEN is stored. Never raises."""
+    try:
+        path = _hermes_env_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        line = f"{_AGENT_TOKEN_ENV}={token}"
+        existing: list[str] = []
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as fh:
+                existing = fh.read().splitlines()
+        replaced = False
+        for i, ln in enumerate(existing):
+            if ln.strip().startswith(f"{_AGENT_TOKEN_ENV}="):
+                existing[i] = line
+                replaced = True
+                break
+        if not replaced:
+            existing.append(line)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(existing) + "\n")
+        os.environ[_AGENT_TOKEN_ENV] = token
+        flog_info("_persist_agent_token() wrote %s to %s", _AGENT_TOKEN_ENV, path)
+    except Exception as exc:
+        flog_warn("_persist_agent_token() failed: %s", exc)
 
 # Hermes's send_progress_messages() formats tool calls as text before calling
 # send() on the adapter, e.g.:
@@ -106,6 +156,15 @@ _TOOL_PROGRESS_RE = re.compile(
     r"^[^\x00-\x7F]+\s+\w+\([^\)]*\)\n\{",
     re.DOTALL,
 )
+
+# Hermes also sends its native approval prompt as ordinary text via send(), e.g.:
+#   ⚠️ **Dangerous command requires approval:** … Reply `/approve` to execute …
+# The pre_approval_request hook already emits a structured permission_request for
+# the same approval (full untruncated command + /approve · /deny buttons), so we
+# suppress this redundant text — but only when the hook actually fired (see
+# SessionState.consume_recent_approval_card), so configs without the hook still
+# get the text-derived card on mobile. Anchor matches mobile/hooks/hermesApproval.ts.
+_APPROVAL_PROMPT_RE = re.compile(r"Reply\s+`/approve`\s+to execute")
 
 
 def _strip_cursor(text: str) -> str:
@@ -125,6 +184,10 @@ _current_adapter: "Optional[AjiChatAdapter]" = None
 def get_current_adapter() -> "Optional[AjiChatAdapter]":
     """Used by hooks.py to reach the live adapter's client and state."""
     return _current_adapter
+
+
+_RECONNECT_DELAYS = [1, 2, 4, 8, 16, 30]
+_POLL_INTERVAL = 300
 
 
 class AjiChatAdapter(BasePlatformAdapter):
@@ -155,7 +218,11 @@ class AjiChatAdapter(BasePlatformAdapter):
         )
 
         self._state = SessionState()
-        self._client = AjiClient(server_url=server_url, state=self._state)
+        # Load our persisted agent token (Discord/Telegram bot-token analogue).
+        # Absent on first ever connect — the server mints one we then persist.
+        self._client = AjiClient(
+            server_url=server_url, state=self._state, token=os.getenv(_AGENT_TOKEN_ENV),
+        )
         self._webhook = WebhookServer(
             host=plugin_host,
             port=plugin_port,
@@ -163,9 +230,17 @@ class AjiChatAdapter(BasePlatformAdapter):
             on_user_message=self._on_user_message,
             on_user_file=self._on_user_file,
             on_get_commands=self.push_commands,
+            on_clear_channel=self._on_clear_channel,
+            server_id=self._client.server_id,
         )
         self._running = False
-        self._last_status: str = ""
+        # Cached "is gateway token streaming on for aji-chat?" — resolved lazily
+        # from config on first send and refreshed by the /stream command. Drives
+        # whether send() finalizes a message immediately (see send()).
+        self._streaming_cached: Optional[bool] = None
+        # Per-channel last status (chat_id -> value) so a status change in one
+        # channel isn't suppressed by an identical value in another.
+        self._last_status: dict[str, str] = {}
         # message_id -> (chat_id, turn_id) for open messages tracked in state.last_sent.
         self._open_message_scope: dict[str, tuple[str, Optional[str]]] = {}
         # Captured in connect() once the event loop is confirmed running.
@@ -197,6 +272,25 @@ class AjiChatAdapter(BasePlatformAdapter):
         asyncio.create_task(self._registration_monitor())
         return True
 
+    async def _on_server_connect(self, info: dict[str, Any]) -> None:
+        """Tasks to run on first connect or reconnect after an outage.
+
+        Extracted from _registration_monitor so the retry loop stays readable.
+        """
+        if info.get("token") and not self._client.token:
+            self._client.set_token(str(info["token"]))
+            _persist_agent_token(str(info["token"]))
+        await self._client.register_webhook(self._webhook.url)
+        logger.info("aji-chat webhook registered at %s", self._webhook.url)
+        flog_info("_on_server_connect() agentId=%s", info.get("agentId"))
+        # Advertise server metadata (Hermes is multi-channel).
+        # serverId is stamped by emit() from the client's server_id.
+        await self._client.emit({
+            "type": "server_info",
+            "monoChannel": False, "displayName": "Hermes",
+        })
+        await self.push_commands()
+
     async def _registration_monitor(self) -> None:
         """Register the webhook and keep it alive across aji-chat server restarts.
 
@@ -206,9 +300,6 @@ class AjiChatAdapter(BasePlatformAdapter):
         back after a restart its webhook registry is cleared, so we re-register
         and re-push commands so mobile gets a fresh list.
         """
-        _RECONNECT_DELAYS = [1, 2, 4, 8, 16, 30]
-        _POLL_INTERVAL = 300
-
         registered = False
         attempt = 0
 
@@ -216,12 +307,13 @@ class AjiChatAdapter(BasePlatformAdapter):
             try:
                 await self._client.probe()  # lightweight: GET /status
                 if not registered:
-                    await self._client.register_webhook(self._webhook.url)
+                    # Identify this agent. On first ever connect (no token) the
+                    # server mints one; persist it so the same agentId sticks
+                    # across restarts (bot-token style).
+                    info = await self._client.register_agent(name="Hermes") or {}
+                    await self._on_server_connect(info)
                     registered = True
                     attempt = 0
-                    logger.info("aji-chat webhook registered at %s", self._webhook.url)
-                    flog_info("_registration_monitor() registered")
-                    await self.push_commands()
                 await asyncio.sleep(_POLL_INTERVAL)
             except Exception as exc:
                 if registered:
@@ -250,17 +342,34 @@ class AjiChatAdapter(BasePlatformAdapter):
     # Inbound: webhook → MessageEvent → handle_message
     # -------------------------------------------------------------------
 
+    def _source_for_channel(self, channel: str) -> SessionSource:
+        """Build the Hermes SessionSource for an aji-chat channel — one room (and
+        thus one session / history / context window) per channel. Shared by every
+        inbound handler so the chat_id / chat_name shape stays consistent."""
+        return SessionSource(
+            platform=self.platform,
+            chat_id=_chat_id_for_channel(channel),
+            chat_name=f"aji-chat #{channel}",
+            chat_type="group",
+            user_id=_DEFAULT_USER_ID,
+            user_name="aji",
+        )
+
     async def _on_user_message(self, payload: dict[str, Any]) -> None:
         text = str(payload.get("text", "")).strip()
-        flog("_on_user_message() text=%.120r", text)
+        channel = payload.get("channel") or _DEFAULT_CHANNEL
+        chat_id = _chat_id_for_channel(channel)
+        flog("_on_user_message() channel=%s text=%.120r", channel, text)
         if not text:
             flog("_on_user_message() empty text, ignored")
             return
 
-        # Adapter-owned command for toggling Hermes display streaming on this platform.
-        # We handle it locally so mobile can flip the setting without routing to the LLM.
-        if text.startswith("/stream"):
-            await self._handle_stream_command(_DEFAULT_CHAT_ID, text)
+        # Adapter-owned command for toggling Hermes display streaming on this
+        # platform. We handle it locally so mobile can flip the setting without
+        # routing to the LLM. Match the command token exactly so "/streaming" or
+        # a "/stream"-prefixed word isn't swallowed.
+        if text.split()[0] == "/stream":
+            await self._handle_stream_command(chat_id, text)
             return
 
         # Slash commands are routed as COMMAND type so gateway/run.py dispatches
@@ -269,14 +378,10 @@ class AjiChatAdapter(BasePlatformAdapter):
         msg_type = MessageType.COMMAND if text.startswith("/") else MessageType.TEXT
         flog("_on_user_message() msg_type=%s", msg_type)
 
-        source = SessionSource(
-            platform=self.platform,
-            chat_id=_DEFAULT_CHAT_ID,
-            chat_name="aji-chat",
-            chat_type="dm",
-            user_id=_DEFAULT_USER_ID,
-            user_name="aji",
-        )
+        # chat_id = "room:<channel>" gives each channel its own Hermes session
+        # (separate history + context window). /new in one channel doesn't reset
+        # another.
+        source = self._source_for_channel(channel)
         event = MessageEvent(
             text=text,
             message_type=msg_type,
@@ -288,6 +393,29 @@ class AjiChatAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.exception("aji-chat: handle_message raised: %s", exc)
 
+    async def _on_clear_channel(self, payload: dict[str, Any]) -> None:
+        """Reset this channel's Hermes session when the user runs /clear on mobile.
+
+        The mobile client has already wiped its own copy of the history; we mirror
+        that on the agent side by dispatching the built-in `/new` command for this
+        channel's room, which starts a fresh session (clears history + context
+        window). Reusing the command path keeps this in lockstep with however
+        `/new` is implemented rather than poking at session internals here.
+        """
+        channel = payload.get("channel") or _DEFAULT_CHANNEL
+        flog_info("_on_clear_channel() channel=%s", channel)
+        source = self._source_for_channel(channel)
+        event = MessageEvent(
+            text="/new",
+            message_type=MessageType.COMMAND,
+            source=source,
+            message_id=uuid.uuid4().hex,
+        )
+        try:
+            await self.handle_message(event)
+        except Exception as exc:
+            logger.exception("aji-chat: clear_channel /new dispatch raised: %s", exc)
+
     async def _on_user_file(self, payload: dict[str, Any]) -> None:
         """Materialize an inbound `user_file` event to disk and dispatch it as
         a MessageEvent with `media_urls` populated — the same shape the Discord
@@ -296,6 +424,7 @@ class AjiChatAdapter(BasePlatformAdapter):
         """
         mime = str(payload.get("mime", "")) or "application/octet-stream"
         b64 = str(payload.get("data", ""))
+        channel = payload.get("channel") or _DEFAULT_CHANNEL
         if not b64:
             flog_warn("_on_user_file() empty data, ignored")
             return
@@ -342,14 +471,7 @@ class AjiChatAdapter(BasePlatformAdapter):
 
         caption = str(payload.get("text") or "").strip()
 
-        source = SessionSource(
-            platform=self.platform,
-            chat_id=_DEFAULT_CHAT_ID,
-            chat_name="aji-chat",
-            chat_type="dm",
-            user_id=_DEFAULT_USER_ID,
-            user_name="aji",
-        )
+        source = self._source_for_channel(channel)
         event = MessageEvent(
             text=caption,
             message_type=msg_type,
@@ -378,11 +500,14 @@ class AjiChatAdapter(BasePlatformAdapter):
             await self._send_one_shot_message(chat_id, "Usage: /stream <on|off>")
             return
 
-        ok, detail = await _set_platform_streaming(enabled)
+        ok, detail = await set_platform_streaming(enabled)
         if not ok:
             await self._send_one_shot_message(chat_id, f"Failed to set streaming: {detail}")
             return
 
+        # Keep the cached flag in sync so send()'s finalize-immediately decision
+        # tracks the new setting even before the gateway restart fully applies it.
+        self._streaming_cached = enabled
         state = "enabled" if enabled else "disabled"
         await self._send_one_shot_message(
             chat_id,
@@ -435,9 +560,7 @@ class AjiChatAdapter(BasePlatformAdapter):
             from hermes_cli.commands import (  # type: ignore[import-not-found]
                 COMMAND_REGISTRY,
                 _is_gateway_available,
-                _iter_plugin_command_entries,
             )
-
             for cmd in COMMAND_REGISTRY:
                 if not _is_gateway_available(cmd):
                     continue
@@ -453,7 +576,12 @@ class AjiChatAdapter(BasePlatformAdapter):
                 if cmd.subcommands:
                     entry["subcommands"] = list(cmd.subcommands)
                 commands.append(entry)
+        except Exception as exc:
+            logger.warning("aji-chat: could not build built-in command list: %s", exc)
+            flog_warn("push_commands() COMMAND_REGISTRY failed: %s", exc)
 
+        try:
+            from hermes_cli.commands import _iter_plugin_command_entries  # type: ignore[import-not-found]
             for name, description, args_hint in _iter_plugin_command_entries():
                 entry = {
                     "name": name,
@@ -463,20 +591,18 @@ class AjiChatAdapter(BasePlatformAdapter):
                 if args_hint:
                     entry["args_hint"] = args_hint
                 commands.append(entry)
-
-            # Adapter-owned command (processed in _on_user_message).
-            if not any(c.get("name") == "stream" for c in commands):
-                commands.append({
-                    "name": "stream",
-                    "description": "Toggle aji-chat streaming display mode",
-                    "category": "Plugin",
-                    "args_hint": "<on|off>",
-                })
-
         except Exception as exc:
-            logger.warning("aji-chat: could not build command list: %s", exc)
-            flog_warn("push_commands() failed to build list: %s", exc)
-            return
+            logger.warning("aji-chat: could not build plugin command list: %s", exc)
+            flog_warn("push_commands() plugin commands failed: %s", exc)
+
+        # Adapter-owned command (processed in _on_user_message).
+        if not any(c.get("name") == "stream" for c in commands):
+            commands.append({
+                "name": "stream",
+                "description": "Toggle aji-chat streaming display mode",
+                "category": "Plugin",
+                "args_hint": "<on|off>",
+            })
 
         flog_info("push_commands() sending %d commands", len(commands))
         await self._client.emit({"type": "commands", "commands": commands})
@@ -484,6 +610,39 @@ class AjiChatAdapter(BasePlatformAdapter):
     # -------------------------------------------------------------------
     # Outbound: send / edit_message → aji-chat events
     # -------------------------------------------------------------------
+
+    def _is_streaming(self) -> bool:
+        """Whether gateway token-streaming is on for aji-chat (cached).
+
+        Mirrors the gateway's own decision (gateway/run.py): a per-platform
+        `display.platforms.aji-chat.streaming` override wins; otherwise follow
+        the top-level streaming config. When streaming is OFF, send() carries a
+        complete message and nothing edits it, so send() can close it right away
+        (see send()). Resolved once and refreshed by the /stream command."""
+        if self._streaming_cached is not None:
+            return self._streaming_cached
+        result = True
+        try:
+            from hermes_cli.config import read_raw_config  # type: ignore[import-not-found]
+            from gateway.display_config import resolve_display_setting  # type: ignore[import-not-found]
+            val = resolve_display_setting(read_raw_config(), "aji-chat", "streaming")
+            if val is not None:
+                result = bool(val)
+            else:
+                from gateway.config import load_gateway_config  # type: ignore[import-not-found]
+                scfg = getattr(load_gateway_config(), "streaming", None)
+                result = (
+                    bool(getattr(scfg, "enabled", True))
+                    and getattr(scfg, "transport", "auto") != "off"
+                    if scfg is not None
+                    else True
+                )
+        except Exception as exc:
+            flog_warn("_is_streaming() resolve failed; assuming streaming on: %s", exc)
+            result = True
+        self._streaming_cached = result
+        flog_info("_is_streaming() resolved=%s", result)
+        return result
 
     async def send(
         self,
@@ -500,6 +659,14 @@ class AjiChatAdapter(BasePlatformAdapter):
             flog("send() suppressed tool-progress text (hooks handle this)")
             return SendResult(success=True, message_id=f"msg_{uuid.uuid4().hex}")
 
+        # Drop Hermes's native approval text when the pre_approval hook already
+        # emitted a structured permission_request for it — otherwise mobile shows
+        # two identical cards. consume_recent_approval_card() only returns True if
+        # the hook just fired, so hook-less configs still get the text-based card.
+        if _APPROVAL_PROMPT_RE.search(cleaned) and self._state.consume_recent_approval_card():
+            flog("send() suppressed Hermes text approval prompt (pre_approval hook emitted the card)")
+            return SendResult(success=True, message_id=f"msg_{uuid.uuid4().hex}")
+
         message_id = f"msg_{uuid.uuid4().hex}"
         turn_id = self._state.current_turn(chat_id)
 
@@ -512,6 +679,25 @@ class AjiChatAdapter(BasePlatformAdapter):
                 {"type": "text_delta", "id": message_id, "text": cleaned},
                 chat_id=chat_id, turn_id=turn_id,
             )
+
+        # Close the message now when nothing will follow up on it — otherwise it
+        # stays "open" (unfinalized), which on mobile shows a perpetual streaming
+        # cursor and (since mobile only persists on message_end) makes it vanish
+        # when the user navigates away before the turn ends. Two such cases:
+        #   - turn_id is None: out-of-turn push (cron delivery) — no
+        #     on_processing_complete will ever run to close it.
+        #   - streaming disabled: send() already carries the COMPLETE message text
+        #     and nothing edits it afterwards. The lone exception is the in-place
+        #     "⏳ Working…/Subagent" heartbeat, which keeps getting edit_message'd,
+        #     so it must stay open until on_processing_complete closes it.
+        is_heartbeat = cleaned.startswith("⏳")
+        if turn_id is None or (not self._is_streaming() and not is_heartbeat):
+            await self._client.emit(
+                {"type": "message_end", "id": message_id},
+                chat_id=chat_id, turn_id=turn_id,
+            )
+            return SendResult(success=True, message_id=message_id)
+
         self._state.remember_sent(message_id, cleaned)
         self._open_message_scope[message_id] = (chat_id, turn_id)
         return SendResult(success=True, message_id=message_id)
@@ -568,7 +754,7 @@ class AjiChatAdapter(BasePlatformAdapter):
 
     async def send_typing(self, chat_id: str, metadata: Optional[dict[str, Any]] = None) -> None:
         flog("send_typing() chat_id=%s", chat_id)
-        await self._emit_status("working")
+        await self._emit_status("working", chat_id)
 
     async def send_image(
         self,
@@ -658,13 +844,13 @@ class AjiChatAdapter(BasePlatformAdapter):
 
         src_path = path
         cleanup_path: Optional[str] = None
-        mime = _guess_mime(path)
+        mime = guess_mime(path)
         display_name = name or os.path.basename(path)
 
         # Transcode iOS-incompatible audio (Ogg/Opus) to m4a so the clip plays
         # on both iOS and Android. Falls back to the original if ffmpeg is absent.
-        if os.path.splitext(path)[1].lower() in _IOS_INCOMPATIBLE_AUDIO_EXTS:
-            transcoded = await _transcode_ogg_to_m4a(path)
+        if os.path.splitext(path)[1].lower() in IOS_INCOMPATIBLE_AUDIO_EXTS:
+            transcoded = await transcode_ogg_to_m4a(path)
             if transcoded:
                 src_path = transcoded
                 cleanup_path = transcoded
@@ -677,7 +863,8 @@ class AjiChatAdapter(BasePlatformAdapter):
             with open(src_path, "rb") as fh:
                 raw = fh.read()
             data_b64 = base64.b64encode(raw).decode("ascii")
-            duration = await _probe_duration_seconds(src_path)
+            is_av = mime.startswith(("audio/", "video/"))
+            duration = await probe_duration_seconds(src_path) if is_av else None
 
             file_id = f"file_{uuid.uuid4().hex}"
             turn_id = self._state.current_turn(chat_id)
@@ -709,31 +896,35 @@ class AjiChatAdapter(BasePlatformAdapter):
                     pass
 
     def get_chat_info(self, chat_id: str) -> dict[str, Any]:
-        return {"name": "aji-chat", "type": "dm", "chat_id": chat_id}
+        channel = chat_id[len("room:"):] if chat_id.startswith("room:") else chat_id
+        return {"name": f"aji-chat #{channel}", "type": "group", "chat_id": chat_id}
 
     # -------------------------------------------------------------------
     # Turn lifecycle (status pill + turn_id minting)
     # -------------------------------------------------------------------
 
-    async def _emit_status(self, value: str) -> None:
-        """Emit a status event, skipping the round-trip when value hasn't changed."""
-        if self._last_status == value:
-            flog("_emit_status() skipped duplicate value=%s", value)
+    async def _emit_status(self, value: str, chat_id: str) -> None:
+        """Emit a status event for one channel, skipping the round-trip when that
+        channel's value hasn't changed. The chat_id is threaded through so the
+        client stamps the right `channel` — otherwise channel A's thinking/working
+        pill would show up in channel B."""
+        if self._last_status.get(chat_id) == value:
+            flog("_emit_status() skipped duplicate chat_id=%s value=%s", chat_id, value)
             return
-        self._last_status = value
-        await self._client.emit({"type": "status", "value": value})
+        self._last_status[chat_id] = value
+        await self._client.emit({"type": "status", "value": value}, chat_id=chat_id)
 
     async def on_processing_start(self, event: MessageEvent) -> None:
-        chat_id = event.source.chat_id if event.source else _DEFAULT_CHAT_ID
+        chat_id = event.source.chat_id if event.source else _chat_id_for_channel(None)
         turn_id = f"turn_{uuid.uuid4().hex}"
         flog_info("on_processing_start() chat_id=%s turn_id=%.12s", chat_id, turn_id)
         self._state.start_turn(chat_id, turn_id)
-        await self._emit_status("thinking")
+        await self._emit_status("thinking", chat_id)
 
     async def on_processing_complete(
         self, event: MessageEvent, outcome: ProcessingOutcome
     ) -> None:
-        chat_id = event.source.chat_id if event.source else _DEFAULT_CHAT_ID
+        chat_id = event.source.chat_id if event.source else _chat_id_for_channel(None)
         flog_info("on_processing_complete() chat_id=%s outcome=%s", chat_id, outcome)
 
         # Close only messages opened for this chat/turn that were never finalized
@@ -760,7 +951,7 @@ class AjiChatAdapter(BasePlatformAdapter):
             self._open_message_scope.pop(message_id, None)
 
         self._state.end_turn(chat_id)
-        await self._emit_status("idle")
+        await self._emit_status("idle", chat_id)
 
     # -------------------------------------------------------------------
     # Internal accessor for hooks.py (avoids circular import in plugin code)
@@ -783,88 +974,6 @@ class AjiChatAdapter(BasePlatformAdapter):
 
 
 # ---------------------------------------------------------------------------
-# Media helpers — mime guessing, duration probing, Ogg→m4a transcode
-# ---------------------------------------------------------------------------
-
-# Audio Hermes TTS emits by default but iOS/AVFoundation can't decode. We
-# transcode these to m4a/AAC, which plays on both iOS and Android.
-_IOS_INCOMPATIBLE_AUDIO_EXTS = {".ogg", ".opus", ".oga"}
-
-
-def _guess_mime(path: str, fallback: str = "application/octet-stream") -> str:
-    mime, _ = mimetypes.guess_type(path)
-    return mime or fallback
-
-
-async def _set_platform_streaming(enabled: bool) -> tuple[bool, str]:
-    """Set display.platforms.aji-chat.streaming via Hermes CLI.
-
-    Returns (ok, detail). detail is stderr/exception text on failure.
-    """
-    value = "true" if enabled else "false"
-    cmd = ["hermes", "config", "set", _STREAMING_CONFIG_KEY, value]
-    try:
-        proc = await asyncio.to_thread(
-            subprocess.run,
-            cmd,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=10,
-        )
-    except Exception as exc:
-        return False, str(exc)
-
-    if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "unknown error").strip()
-        return False, detail
-    return True, "ok"
-
-
-async def _probe_duration_seconds(path: str) -> Optional[float]:
-    """Best-effort media duration (seconds) via ffprobe. None if unavailable."""
-    ffprobe = shutil.which("ffprobe")
-    if not ffprobe:
-        return None
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            ffprobe, "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1", path,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-        )
-        out, _ = await proc.communicate()
-        if proc.returncode == 0:
-            return round(float(out.decode().strip()), 2)
-    except Exception:
-        pass
-    return None
-
-
-async def _transcode_ogg_to_m4a(src_path: str) -> Optional[str]:
-    """Transcode Ogg/Opus → AAC-in-m4a (iOS-playable). Returns the new temp
-    path, or None when ffmpeg is unavailable or the transcode fails."""
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        flog_warn("transcode skipped: ffmpeg not on PATH")
-        return None
-    out_path = os.path.join(tempfile.gettempdir(), f"aji-audio-{uuid.uuid4().hex}.m4a")
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            ffmpeg, "-y", "-i", src_path, "-c:a", "aac", "-b:a", "96k", out_path,
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
-        )
-        _, err = await proc.communicate()
-        if proc.returncode == 0 and os.path.exists(out_path):
-            return out_path
-        flog_warn("transcode failed rc=%s: %.200s", proc.returncode,
-                  err.decode(errors="replace") if err else "")
-    except Exception as exc:
-        flog_warn("transcode error: %s", exc)
-    return None
-
-
-# ---------------------------------------------------------------------------
 # Standalone sender — cron delivery from a process without the live adapter
 # ---------------------------------------------------------------------------
 
@@ -878,7 +987,11 @@ async def _standalone_send(
     force_document: bool = False,
 ) -> dict[str, Any]:
     """One-shot POST to aji-chat's /send endpoint. Used when ``hermes cron``
-    runs in a separate process and there's no in-process adapter to call."""
+    runs in a separate process and there's no in-process adapter to call.
+
+    `chat_id` comes from the cron destination (e.g. ``AJI_HOME_CHANNEL=room:daily-brief``).
+    We strip the ``room:`` prefix to recover the channel and target it so the
+    briefing lands in #daily-brief instead of broadcasting to every channel."""
     import httpx
 
     server_url = (
@@ -887,12 +1000,22 @@ async def _standalone_send(
         or "http://localhost:4000"
     ).rstrip("/")
 
+    channel = chat_id[len("room:"):] if chat_id.startswith("room:") else (chat_id or _DEFAULT_CHANNEL)
+
+    # Carry the agent token if we have one persisted, so the server can stamp the
+    # agentId on the cron message (same identity as the live adapter).
+    token = os.getenv(_AGENT_TOKEN_ENV)
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
-            response = await client.post(f"{server_url}/send", json={"message": message})
+            response = await client.post(
+                f"{server_url}/send",
+                json={"message": message, "serverId": "hermes", "channel": channel},
+                headers=headers,
+            )
             response.raise_for_status()
-            body = response.json()
-        return {"success": True, "message_id": None, "sent_to_clients": body.get("sent", 0)}
+        return {"success": True, "message_id": None}
     except Exception as exc:
         return {"success": False, "error": str(exc)}
 
@@ -927,6 +1050,9 @@ def register(ctx: Any) -> None:
         required_env=["AJI_SERVER_URL"],
         install_hint="aji-chat plugin needs AJI_SERVER_URL (e.g. http://localhost:4000)",
         standalone_sender_fn=_standalone_send,
+        # Cron destination, Discord-style. Set AJI_HOME_CHANNEL to a channel
+        # target, e.g. "room:daily-brief" (the "room:" prefix is optional —
+        # "daily-brief" works too). Cron output lands in that channel only.
         cron_deliver_env_var="AJI_HOME_CHANNEL",
         max_message_length=10_000,  # aji-chat has no platform-imposed limit
         emoji="📱",
@@ -934,8 +1060,18 @@ def register(ctx: Any) -> None:
         # auth boundary.  Set AJI_ALLOW_ALL_USERS=true to open the gateway.
         allow_all_env="AJI_ALLOW_ALL_USERS",
         platform_hint=(
-            "You are on aji-chat. Tool calls render as structured cards "
-            "Aji-chat accepts plain text and Markdown."
+            "You are on aji-chat, which has multiple channels (each a separate "
+            "conversation). Markdown renders inline.\n"
+            "Reach aji-chat with the aji-chat tools ONLY:\n"
+            "- Send a FILE (image, screenshot, PDF, HTML, markdown, audio, any "
+            "document): aji_file(path, channel?, caption?) with the file's "
+            "absolute path. Writing a file to disk does NOT send it.\n"
+            "- Post or read TEXT in another channel: "
+            "aji_channel(action='list'|'send', channel, message).\n"
+            "- Channel names must be exact — call aji_channel(action='list') "
+            "first to get them (e.g. 'general', 'daily-brief').\n"
+            "Do NOT use `hermes send`, send_message, or the terminal to reach "
+            "aji-chat: native send cannot resolve aji-chat channels and will fail."
         ),
     )
 
@@ -944,3 +1080,29 @@ def register(ctx: Any) -> None:
     ctx.register_hook("post_tool_call", hooks.on_post_tool_call)
     ctx.register_hook("pre_approval_request", hooks.on_pre_approval)
     ctx.register_hook("post_approval_response", hooks.on_post_approval)
+
+    # Agent-facing tool: discover + message channels from any session. Registered
+    # into the shared "messaging" toolset so it rides alongside `send_message`.
+    # Guarded — older Hermes builds without register_tool must not break loading.
+    if hasattr(ctx, "register_tool"):
+        from . import channel_tools
+        try:
+            ctx.register_tool(
+                name="aji_channel",
+                toolset="messaging",
+                schema=channel_tools.AJI_CHANNEL_SCHEMA,
+                handler=channel_tools.handle_aji_channel,
+                emoji="📡",
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("aji-chat: failed to register aji_channel tool: %s", exc)
+        try:
+            ctx.register_tool(
+                name="aji_file",
+                toolset="messaging",
+                schema=channel_tools.AJI_FILE_SCHEMA,
+                handler=channel_tools.handle_aji_file,
+                emoji="📎",
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("aji-chat: failed to register aji_file tool: %s", exc)

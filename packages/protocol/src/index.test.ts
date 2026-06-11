@@ -1,4 +1,4 @@
-import type { ClientEvent } from './index'
+import type { ClientEvent, ServerEvent } from './index'
 import { fileMessage, newId, textMessage, userFileMessage } from './index'
 
 describe('newId', () => {
@@ -71,6 +71,22 @@ describe('textMessage', () => {
       expect('turn_id' in event).toBe(false)
     }
   })
+
+  test('propagates serverId and channel to all three events when provided', () => {
+    const events = textMessage('hi', 'assistant', undefined, { serverId: 'hermes', channel: 'daily-brief' })
+    for (const event of events) {
+      expect((event as { serverId?: string }).serverId).toBe('hermes')
+      expect((event as { channel?: string }).channel).toBe('daily-brief')
+    }
+  })
+
+  test('omits serverId and channel entirely when not provided', () => {
+    const events = textMessage('hi')
+    for (const event of events) {
+      expect('serverId' in event).toBe(false)
+      expect('channel' in event).toBe(false)
+    }
+  })
 })
 
 describe('fileMessage', () => {
@@ -100,13 +116,15 @@ describe('fileMessage', () => {
       duration: 1.5,
       text: 'a caption',
       turn_id: 'turn-9',
-      agent: 'simulate',
+      serverId: 'simulate',
+      channel: 'general',
     })
     expect(event.name).toBe('clip.mp3')
     expect(event.duration).toBe(1.5)
     expect(event.text).toBe('a caption')
     expect(event.turn_id).toBe('turn-9')
-    expect(event.agent).toBe('simulate')
+    expect(event.serverId).toBe('simulate')
+    expect(event.channel).toBe('general')
   })
 
   test('omits optional fields entirely when not provided', () => {
@@ -115,7 +133,8 @@ describe('fileMessage', () => {
     expect('duration' in event).toBe(false)
     expect('text' in event).toBe(false)
     expect('turn_id' in event).toBe(false)
-    expect('agent' in event).toBe(false)
+    expect('serverId' in event).toBe(false)
+    expect('channel' in event).toBe(false)
   })
 })
 
@@ -132,12 +151,14 @@ describe('userFileMessage', () => {
       name: 'voice-message.m4a',
       duration: 4.2,
       text: 'caption',
-      agent: 'hermes',
+      serverId: 'hermes',
+      channel: 'planning',
     })
     expect(event.name).toBe('voice-message.m4a')
     expect(event.duration).toBe(4.2)
     expect(event.text).toBe('caption')
-    expect(event.agent).toBe('hermes')
+    expect(event.serverId).toBe('hermes')
+    expect(event.channel).toBe('planning')
   })
 
   test('omits optional fields entirely when not provided', () => {
@@ -145,7 +166,8 @@ describe('userFileMessage', () => {
     expect('name' in event).toBe(false)
     expect('duration' in event).toBe(false)
     expect('text' in event).toBe(false)
-    expect('agent' in event).toBe(false)
+    expect('serverId' in event).toBe(false)
+    expect('channel' in event).toBe(false)
   })
 
   test('narrows correctly inside a ClientEvent discriminated union', () => {
@@ -157,5 +179,57 @@ describe('userFileMessage', () => {
     } else {
       throw new Error('expected user_file discriminant')
     }
+  })
+})
+
+describe('ServerInfo / ServerEvent identity fields', () => {
+  test('ServerInfo narrows in a ServerEvent union and carries monoChannel', () => {
+    const event: ServerEvent = {
+      type: 'server_info',
+      serverId: 'claude-code',
+      monoChannel: true,
+      displayName: 'Claude Code',
+    }
+    if (event.type === 'server_info') {
+      expect(event.serverId).toBe('claude-code')
+      expect(event.monoChannel).toBe(true)
+      expect(event.displayName).toBe('Claude Code')
+    } else {
+      throw new Error('expected server_info discriminant')
+    }
+  })
+
+  test('events carry distinct serverId and agentId', () => {
+    const event: ServerEvent = {
+      type: 'message_start',
+      id: 'm1',
+      role: 'assistant',
+      serverId: 'hermes',
+      agentId: 'agent_abc',
+      channel: 'general',
+    }
+    expect(event.serverId).toBe('hermes')
+    expect(event.agentId).toBe('agent_abc')
+  })
+})
+
+describe('ClearChannel', () => {
+  test('narrows in a ClientEvent union and carries serverId + channel', () => {
+    const event: ClientEvent = {
+      type: 'clear_channel',
+      serverId: 'hermes',
+      channel: 'daily-brief',
+    }
+    if (event.type === 'clear_channel') {
+      expect(event.serverId).toBe('hermes')
+      expect(event.channel).toBe('daily-brief')
+    } else {
+      throw new Error('expected clear_channel discriminant')
+    }
+  })
+
+  test('serverId and channel are optional', () => {
+    const event: ClientEvent = { type: 'clear_channel' }
+    expect(event.type).toBe('clear_channel')
   })
 })

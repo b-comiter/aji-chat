@@ -8,7 +8,7 @@ A Hermes platform adapter that mirrors agent activity into the aji-chat mobile a
 - **Slash commands.** Type `/` in the mobile composer to see a live-filtered picker of every Hermes command (`/help`, `/model`, `/stop`, `/new`, …) and any plugin-registered commands. Selecting one fills the composer; sending routes it through Hermes's built-in command dispatch rather than the LLM.
 - **Structured tool cards.** Tool calls appear as discrete cards (name, args, result), not formatted text.
 - **Turn grouping.** Each user turn gets a unique `turn_id` stamped on its events; the mobile UI groups them visually.
-- **Approval prompts.** When Hermes needs permission, a card appears on mobile with the option buttons — tapping resolves the awaiting hook.
+- **Approval prompts.** When Hermes needs permission, a card appears on mobile with `/approve` and `/deny` buttons. Tapping one sends that slash command back as a user message, which Hermes dispatches to resolve the approval (the `pre_approval_request` hook is observer-only, so the decision rides the command path rather than a hook return value).
 - **Status pill.** The mobile header shows `thinking` / `working` / `idle` based on Hermes's processing lifecycle.
 
 ## Installation
@@ -56,6 +56,58 @@ pnpm server                                       # aji-chat server on :4000
 hermes gateway run                                # picks up plugin, registers webhook
 # mobile app connects to ws://<host>:4000/ws
 ```
+
+## Agent-facing capabilities
+
+Two things tell the **agent** (the LLM) what aji-chat can do — and the README is
+**not** one of them (it's developer docs; Hermes never feeds it to the model):
+
+1. **`platform_hint`** (in `register()`) — a short string injected into the system
+   prompt. It tells the agent that aji-chat is Discord-style (server → channels,
+   each channel a separate conversation), that markdown renders inline, how to
+   **deliver a file** (`aji_file`), and how to reach other channels.
+2. **Tool schemas** — descriptions on the tools the agent can call.
+
+### `aji_channel` tool
+
+Registered via `ctx.register_tool(..., toolset="messaging")` (see
+`channel_tools.py`), so it rides alongside Hermes's built-in `send_message`.
+It lets the agent reach a channel **other than the one it's replying in**:
+
+- `aji_channel(action='list')` — list channels Hermes currently knows (from the
+  gateway channel directory; session-derived, so a channel appears once it's been
+  messaged).
+- `aji_channel(action='send', channel='<name>', message='<text>')` — post to a
+  channel by name. Routed through the server's `/send` with the agent's
+  `AJI_AGENT_TOKEN` bearer (so the server stamps `agentId`); a new channel name is
+  **created automatically** on the user's phone.
+
+Why not just Hermes's `send_message`? Its target parser assumes numeric chat ids,
+so it can *list* aji-chat channels but can't reliably *send* to our
+`room:<channel>` ids — `aji_channel` posts directly and sidesteps that.
+
+### `aji_file` tool
+
+Also registered into the `messaging` toolset (see `channel_tools.py`). It gives
+the agent an **explicit, discoverable** way to deliver a file — the previous
+`MEDIA:/path` hint relied on the model emitting a magic token in free text, which
+it skipped (it would write a file to `/tmp` and then claim it had sent it).
+
+- `aji_file(path, channel?, caption?)` — read the absolute `path`, base64-encode
+  it, guess the mime (markdown/html nudged so the phone picks the right viewer),
+  and POST a `file` event to the server's `/event` (carrying the agent token, so
+  it's stamped `agentId=hermes`). `channel` defaults to `general`; `caption`
+  becomes the file's inline `text`.
+
+The handler is synchronous and self-contained (a blocking `httpx` POST), the same
+pattern as `aji_channel` — tool handlers run off the adapter's event loop, so it
+must not touch the adapter's async client. It enforces a 25 MB cap (inline base64
+bloats the ring buffer + SQLite; see `docs/file-url-transport.md` for the
+out-of-band follow-up).
+
+The adapter's `send_voice`/`send_video`/`send_document`/`send_image_file` methods
+still exist for Hermes-core media flows and funnel through `_emit_file`, but they
+are **not** tools the LLM can call — `aji_file` is the agent-facing entry point.
 
 ## Architecture
 
@@ -168,14 +220,14 @@ The logger (`aji_chat_plugin`) is isolated from Hermes's own log stream
    `pre_tool_call` when `tool_name == "clarify"` to render a structured choice
    card instead of letting the question flow as a plain message. Depends on
    whether `register_hook` allows the hook to override the tool result.
-2. **Inline image rendering.** Local files all flow through `_emit_file` →
-   `file` events: `send_voice`/`send_video`/`send_document`/`send_image_file`
-   read the file, base64-encode it, and emit it (Ogg/Opus audio is transcoded
-   to m4a/AAC first via ffmpeg, since iOS can't decode Ogg). The mobile renders
-   `audio/*` with a player and everything else as a tappable file chip — it does
-   not yet render images *inline*, so URL-based `send_image` still falls back to
-   text (a link reads better than a chip). Inline image previews are the
-   remaining gap.
+2. **URL-based file transport.** Files are delivered inline as base64 (via the
+   `aji_file` tool, or `_emit_file` for Hermes-core media flows; Ogg/Opus audio
+   is transcoded to m4a/AAC first via ffmpeg, since iOS can't decode Ogg). Mobile
+   now renders `audio/*` with a player, `image/*` inline (tap → full-screen
+   zoom + save/share), and documents (markdown/html/pdf/text) as a chip that
+   opens a full-screen viewer. The remaining gap is the **transport**: inline
+   base64 bloats the server ring buffer + SQLite, so large media should move to a
+   server-hosted URL with lazy fetch — see `docs/file-url-transport.md`.
 3. **Skill commands in the picker.** `push_commands()` currently includes only
    `COMMAND_REGISTRY` built-ins and plugin-registered commands. Skills (e.g.
    `/code-review`) are reachable by typing but don't appear in the `/` picker.

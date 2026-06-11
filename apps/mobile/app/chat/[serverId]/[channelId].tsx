@@ -1,5 +1,9 @@
 /**
- * Per-agent chat screen with inverted FlatList (WhatsApp model).
+ * Per-channel chat screen with inverted FlatList (WhatsApp model).
+ *
+ * Routed as /chat/[serverId]/[channelId] — the leaf of the Server → Channel
+ * drill-down. `serverId` is the protocol `agent` (the server); `channelId`
+ * scopes the conversation within it.
  *
  * **Responsibilities split across:**
  *  - useChatSession   — items (chronological), agent status, commands (WS + DB)
@@ -7,61 +11,59 @@
  *  - useChatAnimations — keyboard offset
  *  - MessageList      — inverted rendering (newest at visual bottom)
  *
- * **Architecture:**
- *  - Items stored chronologically (oldest first → newest last)
- *  - Render metadata (groupStartIds, newestId) computed once per items change
- *  - renderItem uses id-based lookups (not array indices)
- *  - MessageList reverses items for display; inverted prop handles the rest
- *
- * **Scroll behavior:**
- *  - Chat opens at visual bottom (newest message) — free from inverted semantics
- *  - User scrolls up → reads history, pagination loads older messages
- *  - New messages arrive → appear at bottom, user not yanked (inverted's free behavior)
- *  - User sends → explicit scrollToBottom() animates to newest
- *  - No scroll position save/restore (acceptable UX trade-off)
- *
  * See docs/chat-scroll-architecture.md for full design rationale.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import { Alert, Animated } from 'react-native'
 import { useLocalSearchParams } from 'expo-router'
 import * as ImagePicker from 'expo-image-picker'
 import * as DocumentPicker from 'expo-document-picker'
+import * as Clipboard from 'expo-clipboard'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
-import { useDB } from '../../db/DBProvider'
-import { agentDisplayName } from '../../db/database'
-import { useWS } from '../../context/WebSocketContext'
-import { useTheme } from '../../context/ThemeContext'
-import type { Item } from '../../hooks/chatTypes'
-import { useChatSession } from '../../hooks/useChatSession'
-import { useChatActions, LOCAL_COMMANDS } from '../../hooks/useChatActions'
-import { useKeyboardOffset } from '../../hooks/useChatAnimations'
-import { ChatHeader } from '../../components/headers/ChatHeader'
-import { Composer } from '../../components/chat/Composer'
-import { MessageList } from '../../components/chat/MessageList'
-import type { MessageListHandle } from '../../components/chat/MessageList'
-import { CommandPicker } from '../../components/chat/CommandPicker'
-import { Row } from '../../components/chat/MessageRow'
-import { ToolSheet } from '../../components/chat/ToolSheet'
+import { useDB } from '../../../db/DBProvider'
+import { serverDisplayName, DEFAULT_CHANNEL, deleteItem } from '../../../db/database'
+import { useWS } from '../../../context/WebSocketContext'
+import { useTheme } from '../../../context/ThemeContext'
+import type { Item } from '../../../hooks/chatTypes'
+import { useChatSession } from '../../../hooks/useChatSession'
+import { useChatActions, LOCAL_COMMANDS } from '../../../hooks/useChatActions'
+import { useKeyboardOffset } from '../../../hooks/useChatAnimations'
+import { ChatHeader } from '../../../components/headers/ChatHeader'
+import { Composer } from '../../../components/chat/Composer'
+import { MessageList } from '../../../components/chat/MessageList'
+import type { MessageListHandle } from '../../../components/chat/MessageList'
+import { CommandPicker } from '../../../components/chat/CommandPicker'
+import { Row } from '../../../components/chat/MessageRow'
+import { MessageActionMenu, messageCopyText } from '../../../components/chat/MessageActionMenu'
+import type { MessageMenuTarget, Rect } from '../../../components/chat/MessageActionMenu'
+import { ToolSheet } from '../../../components/chat/ToolSheet'
+import { FileViewer } from '../../../components/chat/FileViewer'
+
+type FileItem = Extract<Item, { kind: 'file' }>
 
 export default function ChatScreen() {
-  const { chatId } = useLocalSearchParams<{ chatId?: string | string[] }>()
-  const resolvedChatId = useMemo(() => {
-    if (Array.isArray(chatId)) return chatId[0] ?? undefined
-    return chatId?.trim() ? chatId : undefined
-  }, [chatId])
-  const db = useDB()
-  const { conn, sendEvent, subscribe, setActiveChatId } = useWS()
+  const { serverId, channelId } = useLocalSearchParams<{
+    serverId?: string | string[]
+    channelId?: string | string[]
+  }>()
+  const resolvedServerId = useMemo(() => {
+    const v = Array.isArray(serverId) ? serverId[0] : serverId
+    return v?.trim() ? v : undefined
+  }, [serverId])
+  const resolvedChannel = useMemo(() => {
+    const v = Array.isArray(channelId) ? channelId[0] : channelId
+    return v?.trim() ? v : DEFAULT_CHANNEL
+  }, [channelId])
 
-  useEffect(() => {
-    setActiveChatId(resolvedChatId ?? null)
-    return () => setActiveChatId(null)
-  }, [resolvedChatId, setActiveChatId])
+  const db = useDB()
+  const { conn, sendEvent, subscribe } = useWS()
   const { colors } = useTheme()
 
   const { bottom: safeBottom } = useSafeAreaInsets()
   const [draft, setDraft] = useState('')
   const [isToolSheetOpen, setIsToolSheetOpen] = useState<Item[] | null>(null)
+  const [selectedFile, setSelectedFile] = useState<FileItem | null>(null)
+  const [menuTarget, setMenuTarget] = useState<MessageMenuTarget | null>(null)
   const messageListRef = useRef<MessageListHandle | null>(null)
 
   const {
@@ -71,9 +73,9 @@ export default function ChatScreen() {
     commands,
     hasMoreOlder,
     loadOlder,
-  } = useChatSession(resolvedChatId, db, conn, subscribe, sendEvent)
+  } = useChatSession(resolvedServerId, resolvedChannel, db, conn, subscribe, sendEvent)
 
-  const { sendMessage, sendAudio, sendAttachment, respond } = useChatActions({ chatId: resolvedChatId, db, conn, sendEvent, items, setItems })
+  const { sendMessage, sendAudio, sendAttachment, respond } = useChatActions({ chatId: resolvedServerId, channel: resolvedChannel, db, conn, sendEvent, items, setItems })
   const kbOffset = useKeyboardOffset(safeBottom)
 
   const toolsByAgentMsgId = useMemo(() => {
@@ -163,8 +165,8 @@ export default function ChatScreen() {
       .slice(0, 20)
   }, [pickerQuery, allCommands])
 
-  const displayName = resolvedChatId ? agentDisplayName(resolvedChatId) : 'Chat'
-  const avatarLabel = useMemo(() => getAvatarLabel(displayName), [displayName])
+  const serverName = resolvedServerId ? serverDisplayName(resolvedServerId) : 'Chat'
+  const avatarLabel = useMemo(() => getAvatarLabel(serverName), [serverName])
   const canSend = trimmedDraft.length > 0 && conn === 'connected' && (!hasPendingPrompt || trimmedDraft.startsWith('/'))
 
   const handleSend = useCallback(() => {
@@ -229,6 +231,37 @@ export default function ChatScreen() {
     setDraft(`/${name} `)
   }, [])
 
+  // ── Long-press message menu (copy / delete) ───────────────────────────────
+
+  const handleLongPressItem = useCallback((item: Item, rect: Rect) => {
+    setMenuTarget({ item, rect })
+  }, [])
+
+  const handleCopyItem = useCallback(async (item: Item) => {
+    const text = messageCopyText(item)
+    if (text) await Clipboard.setStringAsync(text)
+  }, [])
+
+  const handleDeleteItem = useCallback((item: Item) => {
+    // Local-only delete ("delete for me"): the protocol has no single-message
+    // delete and history is local-first, so we drop it from the window + SQLite.
+    Alert.alert(
+      'Delete message',
+      'Remove this message from this device? This can’t be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => {
+            setItems((prev) => prev.filter((it) => it.id !== item.id))
+            deleteItem(db, item.id).catch(console.warn)
+          },
+        },
+      ],
+    )
+  }, [db, setItems])
+
   const renderItem = useCallback(
     ({ item }: { item: Item }) => {
       const isGroupStart = groupStartIds.has(item.id)
@@ -246,16 +279,19 @@ export default function ChatScreen() {
           tools={tools}
           avatarLabel={avatarLabel}
           onOpenTools={setIsToolSheetOpen}
+          onOpenFile={setSelectedFile}
+          onLongPressItem={handleLongPressItem}
         />
       )
     },
-    [groupStartIds, dividerMap, toolsByAgentMsgId, respond, avatarLabel],
+    [groupStartIds, dividerMap, toolsByAgentMsgId, respond, avatarLabel, handleLongPressItem],
   )
 
   return (
     <Animated.View style={{ flex: 1, backgroundColor: colors.bg, paddingBottom: kbOffset }}>
       <ChatHeader
-        displayName={displayName}
+        displayName={serverName}
+        channel={resolvedChannel}
         agentStatus={agentStatus}
         connStatus={conn}
       />
@@ -282,6 +318,13 @@ export default function ChatScreen() {
         tools={isToolSheetOpen ?? []}
         visible={isToolSheetOpen !== null}
         onClose={() => setIsToolSheetOpen(null)}
+      />
+      <FileViewer item={selectedFile} onClose={() => setSelectedFile(null)} />
+      <MessageActionMenu
+        target={menuTarget}
+        onClose={() => setMenuTarget(null)}
+        onCopy={handleCopyItem}
+        onDelete={handleDeleteItem}
       />
     </Animated.View>
   )

@@ -1,21 +1,63 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { AccessibilityInfo, Pressable, StyleSheet, Text, View } from 'react-native'
-import * as Clipboard from 'expo-clipboard'
+import { memo, useCallback, useMemo, useRef } from 'react'
+import { Pressable, StyleSheet, Text, View } from 'react-native'
+import type { View as RNView } from 'react-native'
+import * as Haptics from 'expo-haptics'
+import { Feather } from '@expo/vector-icons'
 import { MarkdownMessage } from '../MarkdownMessage'
 import { useTheme } from '../../context/ThemeContext'
 import { spacing, typography, radius } from '../../constants/theme'
 import type { ThemeColors } from '../../constants/theme'
 import type { Item } from '../../hooks/chatTypes'
+import { stripStreamingCursor } from '../../hooks/chatTypes'
 import { Avatar } from './Avatar'
 import { PromptRow } from './PromptRow'
 import { AudioMessage } from './AudioMessage'
-import { filePreviewLabel, isAudioMime } from './fileHelpers'
+import { ImageMessage } from './ImageMessage'
+import { fileViewerKind, fileIconName, approxBytesFromBase64, formatBytes } from './fileHelpers'
+import type { Rect } from './MessageActionMenu'
 
-// Regex matching common streaming cursor glyphs and simple ANSI show/hide sequences
-const STREAM_CURSOR_RE = /\s*(?:▉|▍|█|▌|\||_|\x1b\[\?25[lh])\s*$/
+type FileItem = Extract<Item, { kind: 'file' }>
 
-function stripStreamingCursor(text: string): string {
-  return text.replace(STREAM_CURSOR_RE, '')
+// Haptics no-op on web / on dev clients built before expo-haptics was linked
+// (the native call throws/rejects there) — mirrors the guard in DraggableList.
+function safeHaptic() {
+  try {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {})
+  } catch {
+    /* haptics unavailable — ignore */
+  }
+}
+
+function FileChip({
+  item,
+  styles,
+  colors,
+  onPress,
+}: {
+  item: FileItem
+  styles: ReturnType<typeof makeStyles>
+  colors: ThemeColors
+  onPress: (item: FileItem) => void
+}) {
+  const bytes = approxBytesFromBase64(item.data)
+  return (
+    <Pressable
+      onPress={() => onPress(item)}
+      style={styles.fileChip}
+      accessibilityRole="button"
+      accessibilityLabel={item.name ? `Open file ${item.name}` : 'Open file'}
+      accessibilityHint="Opens the file full screen"
+    >
+      <View style={styles.fileIconBox}>
+        <Feather name={fileIconName(item) as any} size={20} color={colors.accent} />
+      </View>
+      <View style={styles.fileChipMeta}>
+        <Text style={styles.fileChipName} numberOfLines={1}>{item.name ?? item.mime}</Text>
+        <Text style={styles.fileChipSub} numberOfLines={1}>{item.mime} · {formatBytes(bytes)}</Text>
+      </View>
+      <Feather name="chevron-right" size={18} color={colors.textDim} />
+    </Pressable>
+  )
 }
 
 type Props = {
@@ -26,38 +68,26 @@ type Props = {
   tools: Item[]
   avatarLabel: string
   onOpenTools: (tools: Item[]) => void
+  onOpenFile: (item: FileItem) => void
+  onLongPressItem?: (item: Item, rect: Rect) => void
 }
 
-export const Row = memo(function Row({ item, onChoose, isGroupStart, dividerKind, tools, avatarLabel, onOpenTools }: Props) {
+export const Row = memo(function Row({ item, onChoose, isGroupStart, dividerKind, tools, avatarLabel, onOpenTools, onOpenFile, onLongPressItem }: Props) {
   const { colors } = useTheme()
   const styles = useMemo(() => makeStyles(colors), [colors])
-  const [copied, setCopied] = useState(false)
-  const copiedTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Ref on the bubble/content so the long-press can measure its on-screen rect
+  // and hand it to the centered action-menu overlay (owned by the chat screen).
+  const contentRef = useRef<RNView | null>(null)
 
-  useEffect(() => {
-    return () => {
-      if (copiedTimeoutRef.current) {
-        clearTimeout(copiedTimeoutRef.current)
-      }
-    }
-  }, [])
-
-  const handleLongPress = useCallback(async () => {
-    if (item.kind !== 'message') return
-    const text = item.role === 'user' ? item.text : stripStreamingCursor(item.text)
-    if (!text) return
-    try {
-      await Clipboard.setStringAsync(text)
-      setCopied(true)
-      AccessibilityInfo.announceForAccessibility('Copied')
-      if (copiedTimeoutRef.current) {
-        clearTimeout(copiedTimeoutRef.current)
-      }
-      copiedTimeoutRef.current = setTimeout(() => setCopied(false), 1500)
-    } catch {
-      // Ignore clipboard failures so message rendering remains responsive.
-    }
-  }, [item])
+  const handleLongPress = useCallback(() => {
+    if (!onLongPressItem) return
+    const node = contentRef.current
+    if (!node) return
+    safeHaptic()
+    node.measureInWindow((x, y, width, height) => {
+      if (width > 0 && height > 0) onLongPressItem(item, { x, y, width, height })
+    })
+  }, [onLongPressItem, item])
 
   if (item.kind === 'message') {
     const isUser = item.role === 'user'
@@ -76,11 +106,12 @@ export const Row = memo(function Row({ item, onChoose, isGroupStart, dividerKind
         <View testID="message-container" style={isUser ? styles.msgAlignRight : styles.msgAlignLeft}>
           {shouldRenderPlainText ? (
             <Pressable
+              ref={contentRef}
               onLongPress={handleLongPress}
-              delayLongPress={400}
+              delayLongPress={280}
               accessibilityRole="button"
-              accessibilityLabel="Copy message"
-              accessibilityHint="Long press to copy this message"
+              accessibilityLabel="Message"
+              accessibilityHint="Long press for message actions"
             >
               <View style={[styles.bubble, isUser ? styles.bubbleUser : styles.bubbleAgent]}>
                 <Text style={[styles.bubbleText, isUser && styles.bubbleTextUser]}>
@@ -103,9 +134,18 @@ export const Row = memo(function Row({ item, onChoose, isGroupStart, dividerKind
             </Pressable>
           ) : (
             <>
-              <View style={styles.markdownContainer}>
-                <MarkdownMessage content={displayText} />
-              </View>
+              <Pressable
+                ref={contentRef}
+                onLongPress={handleLongPress}
+                delayLongPress={280}
+                accessibilityRole="button"
+                accessibilityLabel="Message"
+                accessibilityHint="Long press for message actions"
+              >
+                <View style={styles.markdownContainer}>
+                  <MarkdownMessage content={displayText} selectable={false} />
+                </View>
+              </Pressable>
               {hasTools && (
                 <Pressable
                   onPress={() => onOpenTools(tools)}
@@ -121,13 +161,6 @@ export const Row = memo(function Row({ item, onChoose, isGroupStart, dividerKind
               )}
             </>
           )}
-          {copied && (
-            <View style={[styles.copiedRow, isUser && styles.copiedRowRight]}>
-              <View style={styles.copiedPill}>
-                <Text style={styles.copiedPillText}>Copied</Text>
-              </View>
-            </View>
-          )}
         </View>
 
       </View>
@@ -136,6 +169,7 @@ export const Row = memo(function Row({ item, onChoose, isGroupStart, dividerKind
 
   if (item.kind === 'file') {
     const isUser = item.role === 'user'
+    const kind = fileViewerKind(item)
     return (
       <View style={[styles.msgWrapper, dividerKind === 'light' && styles.msgBorderLight,
       dividerKind === 'heavy' && styles.msgBorderHeavy]}>
@@ -145,15 +179,17 @@ export const Row = memo(function Row({ item, onChoose, isGroupStart, dividerKind
           </View>
         )}
         <View style={isUser ? styles.msgAlignRight : styles.msgAlignLeft}>
-          <View style={[styles.bubble, styles.fileBubble, isUser ? styles.bubbleUser : styles.bubbleAgent]}>
-            {isAudioMime(item.mime) ? (
-              <AudioMessage item={item} tint={isUser} />
+          <Pressable ref={contentRef} onLongPress={handleLongPress} delayLongPress={280}>
+            {kind === 'image' ? (
+              <ImageMessage item={item} tint={isUser} onPress={onOpenFile} />
+            ) : kind === 'audio' ? (
+              <View style={[styles.bubble, styles.fileBubble, isUser ? styles.bubbleUser : styles.bubbleAgent]}>
+                <AudioMessage item={item} tint={isUser} />
+              </View>
             ) : (
-              <Text style={[styles.bubbleText, isUser && styles.bubbleTextUser]}>
-                {filePreviewLabel(item)}
-              </Text>
+              <FileChip item={item} styles={styles} colors={colors} onPress={onOpenFile} />
             )}
-          </View>
+          </Pressable>
         </View>
       </View>
     )
@@ -199,6 +235,29 @@ function makeStyles(colors: ThemeColors) {
       maxWidth: '100%',
     },
     fileBubble: { maxWidth: '85%' },
+    fileChip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      maxWidth: 280,
+      backgroundColor: colors.surface,
+      borderWidth: 1,
+      borderColor: colors.border,
+      borderRadius: radius.xl,
+      paddingHorizontal: spacing.md,
+      paddingVertical: spacing.md,
+    },
+    fileIconBox: {
+      width: 40,
+      height: 40,
+      borderRadius: radius.md,
+      backgroundColor: colors.surface2,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    fileChipMeta: { flex: 1, gap: 2 },
+    fileChipName: { color: colors.text, fontSize: typography.sizeMd, fontWeight: typography.weightSemibold },
+    fileChipSub: { color: colors.textDim, fontSize: typography.sizeSm },
     bubbleAgent: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
     bubbleUser: { backgroundColor: colors.accent, maxWidth: '85%' },
     bubbleText: { color: colors.text, fontSize: typography.sizeLg, lineHeight: typography.lineHeightNormal },
@@ -216,24 +275,6 @@ function makeStyles(colors: ThemeColors) {
       color: colors.tool,
       fontSize: typography.sizeSm,
       fontWeight: typography.weightSemibold,
-    },
-    copiedRow: {
-      flexDirection: 'row',
-      marginTop: 3,
-    },
-    copiedRowRight: {
-      justifyContent: 'flex-end',
-    },
-    copiedPill: {
-      backgroundColor: colors.surface3,
-      borderRadius: radius.full,
-      paddingHorizontal: spacing.sm,
-      paddingVertical: 2,
-    },
-    copiedPillText: {
-      color: colors.textMuted,
-      fontSize: typography.sizeSm,
-      fontWeight: typography.weightMedium,
     },
   })
 }

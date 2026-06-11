@@ -1,5 +1,5 @@
 import * as Clipboard from 'expo-clipboard'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { Feather } from '@expo/vector-icons'
 import hljs from 'highlight.js'
@@ -219,6 +219,12 @@ function CopyButton({ code }: { code: string }) {
   )
 }
 
+// Whether code blocks render selectable text. Selectable is nice in the
+// full-screen FileViewer, but in a chat row it makes iOS pop its own text-copy
+// menu on long-press, fighting the custom message action menu — so the chat row
+// turns it off. Defaults to true to preserve the standalone/viewer behavior.
+const CodeSelectableContext = createContext(true)
+
 // ---------------------------------------------------------------------------
 // CodeBlock — proper React component so highlight result can be memoized
 // ---------------------------------------------------------------------------
@@ -231,6 +237,7 @@ function CodeBlock({ code, language }: { code: string; language?: string }) {
   const displayLang = language ?? 'plaintext'
 
   const codeBgColor = useMemo(() => getCachedBgColor(dotColor), [dotColor])
+  const selectable = useContext(CodeSelectableContext)
   const highlightedLines = useMemo(
     () => highlightCode(code, language, colors, tokenColors),
     [code, language, colors, tokenColors],
@@ -250,7 +257,7 @@ function CodeBlock({ code, language }: { code: string; language?: string }) {
         contentContainerStyle={{ minWidth: '100%' }}
       >
         <View style={[styles.codeContainer, { backgroundColor: codeBgColor }]}>
-          <Text style={styles.code} selectable>
+          <Text style={styles.code} selectable={selectable}>
             {highlightedLines}
           </Text>
         </View>
@@ -323,6 +330,9 @@ function makeMdStyles(colors: ThemeColors): MarkedStyles {
 // ---------------------------------------------------------------------------
 interface MarkdownMessageProps {
   content: string
+  /** Whether code blocks render selectable text. Off in the chat row so the
+   *  long-press message menu isn't shadowed by iOS's native copy callout. */
+  selectable?: boolean
 }
 
 /**
@@ -376,7 +386,7 @@ function normalizeMarkdownInput(rawInput: string): string {
     });
 }
 
-export function MarkdownMessage({ content }: MarkdownMessageProps) {
+export function MarkdownMessage({ content, selectable = true }: MarkdownMessageProps) {
   const { colors } = useTheme()
 
   const normalizedContent = useMemo(() => normalizeMarkdownInput(content), [content])
@@ -393,16 +403,18 @@ export function MarkdownMessage({ content }: MarkdownMessageProps) {
     }), [colors])
 
   return (
-      <Markdown
-        value={normalizedContent} 
-        renderer={sharedRenderer} 
-        styles={mdStyles} 
-        theme={markdownTheme} 
-        flatListProps={{ 
-          style: { backgroundColor: 'transparent' },
-          contentContainerStyle: { backgroundColor: 'transparent' }
-        }} 
-      />
+      <CodeSelectableContext.Provider value={selectable}>
+        <Markdown
+          value={normalizedContent}
+          renderer={sharedRenderer}
+          styles={mdStyles}
+          theme={markdownTheme}
+          flatListProps={{
+            style: { backgroundColor: 'transparent' },
+            contentContainerStyle: { backgroundColor: 'transparent' }
+          }}
+        />
+      </CodeSelectableContext.Provider>
   )
 }
 

@@ -64,9 +64,9 @@ async function main(): Promise<void> {
 
   const base = `http://localhost:${port}/`
 
-  await post(base, { type: 'user_message', text: 'hello from mobile', agent: 'claude-code' })
-  await post(base, { type: 'user_message', text: 'no agent field' })
-  await post(base, { type: 'user_message', text: 'for hermes', agent: 'hermes' })
+  await post(base, { type: 'user_message', text: 'hello from mobile', serverId: 'claude-code' })
+  await post(base, { type: 'user_message', text: 'no serverId field' })
+  await post(base, { type: 'user_message', text: 'for hermes', serverId: 'hermes' })
   await post(base, { type: 'get_commands' })
 
   await delay(400)
@@ -77,7 +77,7 @@ async function main(): Promise<void> {
   const ok =
     forwarded.length === 2 &&
     forwarded.includes('hello from mobile') &&
-    forwarded.includes('no agent field') &&
+    forwarded.includes('no serverId field') &&
     !forwarded.some((t) => t.includes('for hermes'))
 
   if (!ok) {

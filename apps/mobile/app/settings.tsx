@@ -30,7 +30,7 @@ export default function SettingsScreen() {
   const styles = useMemo(() => makeStyles(colors), [colors])
   const [isClearing, setIsClearing] = useState(false)
 
-  const serverWs = SERVER_CONFIG.wsEndpoint
+  const serverWs = SERVER_CONFIG.hostLabel
   const appVersion = APP_CONFIG.expo?.version ?? '1.0.0'
   const sdkVersion = EXPO_PACKAGE.version ?? 'Unknown'
 

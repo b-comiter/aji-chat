@@ -1,11 +1,12 @@
 /**
- * Home screen — Telegram-style agent list.
+ * Home screen — Telegram-style server list.
  *
- * Shows one row per known agent, sorted by last activity. Loads from
+ * Shows one row per known server, sorted by last activity. Loads from
  * SQLite on mount (instant), then patches in-memory state as live WS
- * events arrive. Tap a row to open that agent's chat history.
+ * events arrive. Tap a row to open the server (its channel list, or its single
+ * chat if the server is mono-channel).
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   FlatList,
   Modal,
@@ -14,21 +15,37 @@ import {
   Text,
   View,
 } from 'react-native'
-import { router } from 'expo-router'
+import { router, useFocusEffect } from 'expo-router'
 import { useDB } from '../db/DBProvider'
 import { useWS } from '../context/WebSocketContext'
 import { IndexHeader } from '../components/headers/IndexHeader'
-import { StatusIcon } from '../components/headers/StatusIcon'
+import { ServerAvatar } from '../components/ServerAvatar'
 import { useTheme } from '../context/ThemeContext'
-import { getAllAgents, agentDisplayName, AGENT_DISPLAY_NAMES, type AgentRow } from '../db/database'
+import {
+  getAllServers,
+  serverDisplayName,
+  SERVER_DISPLAY_NAMES,
+  isMonoChannel,
+  DEFAULT_CHANNEL,
+  type ServerRow,
+} from '../db/database'
 import type { ServerEvent } from '@aji/protocol'
 import { spacing, typography } from '../constants/theme'
 import type { ThemeColors } from '../constants/theme'
 
-// Agents the user can manually open a chat with (excludes 'unknown')
-const CONNECTABLE_AGENTS = Object.entries(AGENT_DISPLAY_NAMES)
+// Servers the user can manually open (excludes 'unknown')
+const CONNECTABLE_SERVERS = Object.entries(SERVER_DISPLAY_NAMES)
   .filter(([id]) => id !== 'unknown')
   .map(([id, label]) => ({ id, label }))
+
+/** Navigate into a server: mono-channel servers skip the channel list. */
+function openServer(server: Pick<ServerRow, 'id' | 'mono_channel_advertised' | 'mono_channel_override'>) {
+  if (isMonoChannel(server)) {
+    router.push(`/chat/${server.id}/${DEFAULT_CHANNEL}`)
+  } else {
+    router.push(`/server/${server.id}`)
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -47,48 +64,26 @@ function relativeTime(ts: number | null): string {
   return `${days}d ago`
 }
 
-function statusColor(status: string, colors: ThemeColors): string {
-  switch (status) {
-    case 'thinking':
-    case 'working':
-      return colors.warn
-    case 'idle':
-      return colors.success
-    default:
-      return colors.textDim
-  }
-}
-
-function statusLabel(status: string): string {
-  switch (status) {
-    case 'thinking':
-      return 'Thinking'
-    case 'working':
-      return 'Working'
-    case 'idle':
-      return 'Idle'
-    default:
-      return 'Unknown'
-  }
-}
-
-function createPlaceholderAgent(chatId: string, status: AgentRow['last_status'] = 'idle'): AgentRow {
+function createPlaceholderServer(serverId: string, status: ServerRow['last_status'] = 'idle'): ServerRow {
   return {
-    id: chatId,
-    display_name: agentDisplayName(chatId),
+    id: serverId,
+    display_name: serverDisplayName(serverId),
     last_message_preview: null,
     last_event_at: Date.now(),
     last_status: status,
+    avatar: null,
+    mono_channel_advertised: null,
+    mono_channel_override: null,
   }
 }
 
-function upsertMissingAgent(prev: AgentRow[], chatId: string, status: AgentRow['last_status'] = 'idle'): AgentRow[] {
-  if (prev.some((agent) => agent.id === chatId)) return prev
-  return [createPlaceholderAgent(chatId, status), ...prev]
+function upsertMissingServer(prev: ServerRow[], serverId: string, status: ServerRow['last_status'] = 'idle'): ServerRow[] {
+  if (prev.some((s) => s.id === serverId)) return prev
+  return [createPlaceholderServer(serverId, status), ...prev]
 }
 
-function applyLiveAgentEvent(prev: AgentRow[], event: ServerEvent): AgentRow[] {
-  const chatId = event.agent ?? 'unknown'
+function applyLiveServerEvent(prev: ServerRow[], event: ServerEvent): ServerRow[] {
+  const serverId = ('serverId' in event ? event.serverId : undefined) ?? 'unknown'
 
   switch (event.type) {
     case 'message_start':
@@ -96,17 +91,17 @@ function applyLiveAgentEvent(prev: AgentRow[], event: ServerEvent): AgentRow[] {
     case 'permission_request':
     case 'clarify':
     case 'file':
-      return upsertMissingAgent(prev, chatId)
+      return upsertMissingServer(prev, serverId)
 
     case 'message_end':
-      return prev.map((agent) =>
-        agent.id === chatId ? { ...agent, last_event_at: Date.now() } : agent,
+      return prev.map((s) =>
+        s.id === serverId ? { ...s, last_event_at: Date.now() } : s,
       )
 
     case 'status': {
-      const withPlaceholder = upsertMissingAgent(prev, chatId, event.value)
-      return withPlaceholder.map((agent) =>
-        agent.id === chatId ? { ...agent, last_status: event.value } : agent,
+      const withPlaceholder = upsertMissingServer(prev, serverId, event.value)
+      return withPlaceholder.map((s) =>
+        s.id === serverId ? { ...s, last_status: event.value } : s,
       )
     }
 
@@ -124,34 +119,37 @@ export default function HomeScreen() {
   const { conn, subscribe } = useWS()
   const { colors } = useTheme()
   const styles = useMemo(() => makeStyles(colors), [colors])
-  const [agents, setAgents] = useState<AgentRow[]>([])
+  const [servers, setServers] = useState<ServerRow[]>([])
   const [pickerOpen, setPickerOpen] = useState(false)
 
-  // Load agent list from DB on mount
+  // Reload the server list whenever the screen gains focus. Covers the initial
+  // mount AND returning from the per-server settings page (avatar / name /
+  // mono-channel edits write straight to SQLite with no WS event to patch in).
+  useFocusEffect(
+    useCallback(() => {
+      let cancelled = false
+      getAllServers(db).then((rows) => {
+        if (!cancelled) setServers(rows)
+      })
+      return () => {
+        cancelled = true
+      }
+    }, [db]),
+  )
+
+  // Subscribe to all WS events to patch in-memory server rows in real-time
   useEffect(() => {
-    let cancelled = false
-
-    getAllAgents(db).then((rows) => {
-      if (!cancelled) setAgents(rows)
-    })
-
-    return () => {
-      cancelled = true
-    }
-  }, [db])
-
-  // Subscribe to all WS events to patch in-memory agent rows in real-time
-  useEffect(() => {
-    let cancelled = false
-
     return subscribe('*', (event: ServerEvent) => {
-      setAgents((prev) => applyLiveAgentEvent(prev, event))
+      setServers((prev) => applyLiveServerEvent(prev, event))
 
-      // After message_end or file, re-read agent rows to get updated preview
-      if (event.type === 'message_end' || event.type === 'file') {
-        getAllAgents(db).then((rows) => {
-          if (!cancelled) setAgents(rows)
-        })
+      // Re-read after events that change persisted columns we don't patch
+      // in-memory (preview text, advertised name/mono-channel from server_info).
+      // The subscribe() return unsubscribes on unmount, so the handler can't
+      // fire post-unmount — no cancellation guard needed on the re-read.
+      if (event.type === 'message_end' || event.type === 'file' || event.type === 'server_info') {
+        getAllServers(db).then(setServers).catch((err) =>
+          console.warn('[Home] server re-read failed', err),
+        )
       }
     })
   }, [subscribe, db])
@@ -173,17 +171,17 @@ export default function HomeScreen() {
       >
         <Pressable style={styles.modalBackdrop} onPress={() => setPickerOpen(false)}>
           <View style={styles.pickerCard}>
-            <Text style={styles.pickerTitle}>Open chat with…</Text>
-            {CONNECTABLE_AGENTS.map((agent) => (
+            <Text style={styles.pickerTitle}>Open server…</Text>
+            {CONNECTABLE_SERVERS.map((server) => (
               <Pressable
-                key={agent.id}
+                key={server.id}
                 style={styles.pickerRow}
                 onPress={() => {
                   setPickerOpen(false)
-                  router.push(`/chat/${agent.id}`)
+                  router.push(`/server/${server.id}`)
                 }}
               >
-                <Text style={styles.pickerLabel}>{agent.label}</Text>
+                <Text style={styles.pickerLabel}>{server.label}</Text>
                 <Text style={styles.pickerChevron}>›</Text>
               </Pressable>
             ))}
@@ -191,10 +189,10 @@ export default function HomeScreen() {
         </Pressable>
       </Modal>
 
-      {/* Agent list */}
-      {agents.length === 0 ? (
+      {/* Server list */}
+      {servers.length === 0 ? (
         <View style={styles.emptyWrap}>
-          <Text style={styles.emptyTitle}>No agents yet</Text>
+          <Text style={styles.emptyTitle}>No servers yet</Text>
           <Text style={styles.emptySub}>
             Waiting for an agent to connect…{'\n'}
             Run <Text style={styles.code}>pnpm simulate</Text> to test.
@@ -202,10 +200,10 @@ export default function HomeScreen() {
         </View>
       ) : (
         <FlatList
-          data={agents}
-          keyExtractor={(a) => a.id}
+          data={servers}
+          keyExtractor={(s) => s.id}
           renderItem={({ item }) => (
-            <AgentRow agent={item} onPress={() => router.push(`/chat/${item.id}`)} />
+            <ServerListRow server={item} onPress={() => openServer(item)} />
           )}
           contentContainerStyle={styles.list}
         />
@@ -215,28 +213,28 @@ export default function HomeScreen() {
 }
 
 // ---------------------------------------------------------------------------
-// AgentRow
+// ServerListRow
 // ---------------------------------------------------------------------------
 
-function AgentRow({ agent, onPress }: { agent: AgentRow; onPress: () => void }) {
+function ServerListRow({ server, onPress }: { server: ServerRow; onPress: () => void }) {
   const { colors } = useTheme()
   const styles = useMemo(() => makeStyles(colors), [colors])
   return (
     <Pressable style={styles.row} onPress={onPress}>
-      <StatusIcon
-        color={statusColor(agent.last_status, colors)}
-        size={10}
-        pulse={agent.last_status !== 'idle'}
-        accessibilityLabel={`Agent status ${statusLabel(agent.last_status)}`}
+      <ServerAvatar
+        avatar={server.avatar}
+        status={server.last_status}
+        label={server.display_name}
+        size={44}
       />
       <View style={styles.rowBody}>
         <View style={styles.rowTop}>
-          <Text style={styles.agentName}>{agent.display_name}</Text>
-          <Text style={styles.timestamp}>{relativeTime(agent.last_event_at)}</Text>
+          <Text style={styles.agentName}>{server.display_name}</Text>
+          <Text style={styles.timestamp}>{relativeTime(server.last_event_at)}</Text>
         </View>
-        {agent.last_message_preview ? (
+        {server.last_message_preview ? (
           <Text style={styles.preview} numberOfLines={1}>
-            {agent.last_message_preview}
+            {server.last_message_preview}
           </Text>
         ) : (
           <Text style={styles.previewEmpty}>No messages yet</Text>

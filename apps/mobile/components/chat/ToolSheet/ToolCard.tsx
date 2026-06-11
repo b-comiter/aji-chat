@@ -1,4 +1,5 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
+import type { ReactElement } from 'react'
 import { Animated, Easing, Pressable, ScrollView, Text, View } from 'react-native'
 import type { StyleProp, ViewStyle } from 'react-native'
 import hljs from 'highlight.js'
@@ -29,10 +30,10 @@ function highlightJson(
   code: string,
   colors: ThemeColors,
   tokenColors: Record<string, string>,
-): Array<string | JSX.Element> {
+): Array<string | ReactElement> {
   try {
     const { value: html } = hljs.highlight(code, { language: 'json', ignoreIllegals: true })
-    const elements: Array<string | JSX.Element> = []
+    const elements: Array<string | ReactElement> = []
     const stack: Array<{ color: string; token?: string }> = [{ color: colors.text }]
 
     let i = 0
@@ -217,7 +218,7 @@ function ToolCardInner({ tool, startOpen, colors, collapseSignal, onOpenChange }
 
   const renderCodeBlock = (
     content: string,
-    highlighted: Array<string | JSX.Element>,
+    highlighted: Array<string | ReactElement>,
     containerStyle?: StyleProp<ViewStyle>,
   ) => (
     <View style={[styles.codeShell, containerStyle]}>

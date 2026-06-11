@@ -10,13 +10,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { Feather } from '@expo/vector-icons'
-import * as FileSystem from 'expo-file-system/legacy'
 import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio'
 import { useTheme } from '../../context/ThemeContext'
 import { spacing, typography, radius } from '../../constants/theme'
 import type { ThemeColors } from '../../constants/theme'
 import type { Item } from '../../hooks/chatTypes'
-import { extensionForMime } from './fileHelpers'
+import { writeFileToCache } from './fileCache'
 import { ensureAudioMode } from '../../utils/audioSession'
 
 function formatTime(seconds: number): string {
@@ -37,20 +36,9 @@ export function AudioMessage({ item, tint }: { item: FileItem; tint: boolean }) 
   useEffect(() => {
     ensureAudioMode()
     let cancelled = false
-    const path = `${FileSystem.cacheDirectory}aji-file-${item.id}.${extensionForMime(item.mime, item.name)}`
-    ;(async () => {
-      try {
-        const info = await FileSystem.getInfoAsync(path)
-        if (!info.exists) {
-          await FileSystem.writeAsStringAsync(path, item.data, {
-            encoding: FileSystem.EncodingType.Base64,
-          })
-        }
-        if (!cancelled) setUri(path)
-      } catch (err) {
-        console.warn('[AudioMessage] failed to write cache file', err)
-      }
-    })()
+    writeFileToCache(item)
+      .then((path) => { if (!cancelled) setUri(path) })
+      .catch((err) => console.warn('[AudioMessage] failed to write cache file', err))
     return () => {
       cancelled = true
     }

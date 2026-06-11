@@ -10,10 +10,13 @@ import { StatusIcon } from './StatusIcon'
 
 export function ChatHeader({
   displayName,
+  channel,
   agentStatus,
   connStatus,
 }: {
   displayName: string
+  /** Channel within the server. Shown as a `›  #channel` suffix when present. */
+  channel?: string
   agentStatus: AgentStatus
   connStatus: 'connected' | 'connecting' | 'disconnected'
 }) {
@@ -36,7 +39,12 @@ export function ChatHeader({
           <Text style={styles.backText}>‹</Text>
         </Pressable>
       }
-      title={<Text style={styles.title} numberOfLines={1}>{displayName}</Text>}
+      title={
+        <Text style={styles.title} numberOfLines={1}>
+          {displayName}
+          {channel ? <Text style={styles.channel}>{`  ›  #${channel}`}</Text> : null}
+        </Text>
+      }
       right={
         <View style={styles.statusContainer}>
           <StatusIcon
@@ -60,6 +68,7 @@ function makeStyles(colors: ThemeColors) {
     backBtn: { paddingRight: 4 },
     backText: { color: colors.accent, fontSize: 28, lineHeight: 32 },
     title: { color: colors.text, fontSize: typography.sizeXl, fontWeight: typography.weightSemibold },
+    channel: { color: colors.textDim, fontSize: typography.sizeMd, fontWeight: typography.weightRegular },
     statusContainer: { position: 'relative', width: 12, height: 12, alignItems: 'center', justifyContent: 'center' },
     connDotWrap: { position: 'absolute', bottom: 0, right: 0, borderRadius: radius.full },
   })

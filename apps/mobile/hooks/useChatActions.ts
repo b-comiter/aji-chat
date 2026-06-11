@@ -15,18 +15,21 @@ import { newId, userFileMessage } from '@aji/protocol'
 import type { SQLiteDatabase } from 'expo-sqlite'
 import { File } from 'expo-file-system'
 import {
-  clearAgentHistory,
+  clearServerHistory,
   getDbDump,
-  insertItem,
-  updateAgentPreview,
+  persistItem,
   updateItemData,
-  upsertAgent,
   wipeAllHistory,
 } from '../db/database'
 import { SERVER_CONFIG } from '../constants/server'
 import type { Item } from './chatTypes'
 
 const SERVER_HTTP = SERVER_CONFIG.httpBase
+const SERVER_TOKEN = SERVER_CONFIG.token
+
+function ajiHeaders(): Record<string, string> {
+  return SERVER_TOKEN ? { 'X-Aji-Token': SERVER_TOKEN } : {}
+}
 
 async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs = 5000): Promise<Response> {
   const ctrl = new AbortController()
@@ -43,7 +46,7 @@ async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs = 5
 // ---------------------------------------------------------------------------
 
 export const LOCAL_COMMANDS: CommandItem[] = [
-  { name: 'clear',             description: 'Clear chat history for this agent',                  category: 'Dev' },
+  { name: 'clear',             description: 'Clear chat history for this channel',                category: 'Dev' },
   { name: 'view-db',           description: 'Dump database contents to server log',               category: 'Dev' },
   { name: 'view-chat-history', description: "Log this agent's chat messages to server console",   category: 'Dev', args_hint: '[with-tools]' },
   { name: 'view-last-n-msgs',  description: 'Log the last N messages to server console',          category: 'Dev', args_hint: '<count>' },
@@ -54,10 +57,12 @@ type SetItems = (updater: (prev: Item[]) => Item[]) => void
 
 interface CommandContext {
   chatId?: string
+  channel: string
   db: SQLiteDatabase
   items: Item[]
   setItems: SetItems
   addSystemMessage: (text: string) => void
+  sendEvent: (event: ClientEvent) => void
   router: typeof router
 }
 
@@ -66,8 +71,15 @@ type CommandFactory = (ctx: CommandContext) => CommandHandler
 
 const LOCAL_COMMAND_HANDLERS: Record<string, CommandFactory> = {
   clear: (ctx) => async () => {
-    await clearAgentHistory(ctx.db, ctx.chatId ?? 'unknown')
+    await clearServerHistory(ctx.db, ctx.chatId ?? 'unknown', ctx.channel)
     ctx.setItems(() => [])
+    // Tell the agent to reset its own session for this channel too — clearing
+    // only the client would leave the agent's history/context out of sync.
+    ctx.sendEvent({
+      type: 'clear_channel',
+      ...(ctx.chatId ? { serverId: ctx.chatId } : {}),
+      channel: ctx.channel,
+    })
     ctx.addSystemMessage('Chat history cleared.')
   },
 
@@ -76,7 +88,7 @@ const LOCAL_COMMAND_HANDLERS: Record<string, CommandFactory> = {
     try {
       await fetchWithTimeout(`${SERVER_HTTP}/db/dump`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...ajiHeaders() },
         body: JSON.stringify(dump),
       })
       ctx.addSystemMessage('DB dump sent to server log.')
@@ -99,7 +111,7 @@ const LOCAL_COMMAND_HANDLERS: Record<string, CommandFactory> = {
     try {
       await fetchWithTimeout(`${SERVER_HTTP}/chat/dump`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...ajiHeaders() },
         body: JSON.stringify({ chatId: ctx.chatId ?? 'unknown', items: payload }),
       })
       ctx.addSystemMessage(`Chat history sent to server log${withTools ? ' (with tools)' : ''}.`)
@@ -117,7 +129,7 @@ const LOCAL_COMMAND_HANDLERS: Record<string, CommandFactory> = {
     try {
       await fetchWithTimeout(`${SERVER_HTTP}/last-messages/dump`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...ajiHeaders() },
         body: JSON.stringify({ chatId: ctx.chatId ?? 'unknown', messages }),
       })
       ctx.addSystemMessage(`Last ${count} message${count !== 1 ? 's' : ''} sent to server log.`)
@@ -139,6 +151,7 @@ const LOCAL_COMMAND_HANDLERS: Record<string, CommandFactory> = {
 
 interface UseChatActionsParams {
   chatId: string | undefined
+  channel: string
   db: SQLiteDatabase
   conn: 'connected' | 'connecting' | 'disconnected'
   sendEvent: (event: ClientEvent) => void
@@ -148,6 +161,7 @@ interface UseChatActionsParams {
 
 export function useChatActions({
   chatId,
+  channel,
   db,
   conn,
   sendEvent,
@@ -171,30 +185,41 @@ export function useChatActions({
   }, [setItems])
 
   const respond = useCallback((promptId: string, choice: string) => {
-    // Hermes text-approval choices are slash commands (/approve, /deny, etc.).
-    // Send them as a plain user_message to the agent rather than a prompt_response
-    // — there is no server-side waiter for these, they are Hermes's own text protocol.
-    if (choice.startsWith('/')) {
-      sendEvent({ type: 'user_message', text: choice, ...(chatId ? { agent: chatId } : {}) })
-    } else {
-      sendEvent({ type: 'prompt_response', id: promptId, choice })
-    }
-
-    // Persist resolved state so the prompt doesn't re-block the composer on reload.
-    const current = itemsRef.current.find(
-      (it): it is Extract<Item, { kind: 'prompt' }> => it.kind === 'prompt' && it.id === promptId,
-    )
-    if (current) {
-      const choiceLabel = current.options.find((o) => o.id === choice)?.label ?? choice
-      updateItemData(db, promptId, { ...current, resolved: true, resolvedChoice: choice, choiceLabel }).catch(console.warn)
-    }
-
+    // Optimistic UI: mark the card resolved immediately.
     setItems((prev) => prev.map((it) => {
       if (it.kind !== 'prompt' || it.id !== promptId) return it
       const choiceLabel = it.options.find((o) => o.id === choice)?.label ?? choice
       return { ...it, resolved: true, resolvedChoice: choice, choiceLabel }
     }))
-  }, [chatId, db, sendEvent, setItems])
+
+    // Hermes text-approval choices are slash commands (/approve, /deny, etc.).
+    // Send them as a plain user_message to the agent rather than a prompt_response
+    // — there is no server-side waiter for these, they are Hermes's own text protocol.
+    const send = () => {
+      if (choice.startsWith('/')) {
+        sendEvent({ type: 'user_message', text: choice, ...(chatId ? { serverId: chatId } : {}), channel })
+      } else {
+        sendEvent({ type: 'prompt_response', id: promptId, choice })
+      }
+    }
+
+    // Persist resolved state BEFORE sending, so the prompt_dismiss the server
+    // broadcasts back can't delete the row before it's marked resolved (which
+    // would drop the answered card from history on reload — see the
+    // prompt_dismiss handler in WebSocketContext). Send regardless if the write
+    // fails: the user's response must never be blocked by a DB error.
+    const current = itemsRef.current.find(
+      (it): it is Extract<Item, { kind: 'prompt' }> => it.kind === 'prompt' && it.id === promptId,
+    )
+    if (current) {
+      const choiceLabel = current.options.find((o) => o.id === choice)?.label ?? choice
+      updateItemData(db, promptId, { ...current, resolved: true, resolvedChoice: choice, choiceLabel })
+        .then(send)
+        .catch((err) => { console.warn(err); send() })
+    } else {
+      send()
+    }
+  }, [chatId, channel, db, sendEvent, setItems])
 
   const handleLocalCommand = useCallback(async (cmd: string, args: string[]): Promise<boolean> => {
     const factory = LOCAL_COMMAND_HANDLERS[cmd]
@@ -219,7 +244,7 @@ export function useChatActions({
       }
     }
 
-    const ctx: CommandContext = { chatId, db, items: itemsRef.current, setItems, addSystemMessage, router }
+    const ctx: CommandContext = { chatId, channel, db, items: itemsRef.current, setItems, addSystemMessage, sendEvent, router }
     try {
       await factory(ctx)(args)
       return true
@@ -228,7 +253,7 @@ export function useChatActions({
       addSystemMessage(`Error running /${cmd}: ${err instanceof Error ? err.message : 'unknown error'}`)
       return true
     }
-  }, [chatId, db, addSystemMessage, setItems])
+  }, [chatId, channel, db, addSystemMessage, setItems, sendEvent])
 
   // Accepts the trimmed text so the screen owns draft state and clearing.
   const sendMessage = useCallback((text: string) => {
@@ -250,17 +275,15 @@ export function useChatActions({
     const msgData: Item = { kind: 'message', id: msgId, role: 'user', text, done: true }
 
     setItems((prev) => [...prev, msgData])
-    // Stamp the target agent (chatId) so server-side adapters — e.g. the Claude
-    // Code channel bridge — can route this message to the right session.
-    sendEvent({ type: 'user_message', text, ...(chatId ? { agent: chatId } : {}) })
+    // Stamp the target server (chatId) + channel so server-side adapters — e.g.
+    // the Hermes plugin — route this message to the right per-channel session.
+    sendEvent({ type: 'user_message', text, ...(chatId ? { serverId: chatId } : {}), channel })
 
     if (chatId) {
-      upsertAgent(db, chatId)
-        .then(() => insertItem(db, { id: msgId, chatId, kind: 'message', data: msgData }))
-        .then(() => updateAgentPreview(db, chatId, text))
+      persistItem(db, { id: msgId, serverId: chatId, channel, kind: 'message', data: msgData }, text)
         .catch(console.warn)
     }
-  }, [conn, chatId, db, sendEvent, setItems, handleLocalCommand])
+  }, [conn, chatId, channel, db, sendEvent, setItems, handleLocalCommand])
 
   // Voice mode: ship a recorded audio clip to the agent. Mirrors `sendMessage`
   // but the local Item is a `file` (so the existing AudioMessage row renders
@@ -295,20 +318,19 @@ export function useChatActions({
     sendEvent(userFileMessage(mime, base64, {
       name,
       duration: durationSec,
-      ...(chatId ? { agent: chatId } : {}),
+      ...(chatId ? { serverId: chatId } : {}),
+      channel,
     }))
 
     if (chatId) {
-      upsertAgent(db, chatId)
-        .then(() => insertItem(db, { id: fileId, chatId, kind: 'file', data: localItem }))
-        .then(() => updateAgentPreview(db, chatId, '🎤 Voice message'))
+      persistItem(db, { id: fileId, serverId: chatId, channel, kind: 'file', data: localItem }, '🎤 Voice message')
         .catch(console.warn)
     }
 
     // Drop the temp recording file — the local Item's base64 (and AudioMessage's
     // own cache file keyed by item id) handle replay independently.
     try { new File(uri).delete() } catch {}
-  }, [conn, chatId, db, sendEvent, setItems, addSystemMessage])
+  }, [conn, chatId, channel, db, sendEvent, setItems, addSystemMessage])
 
   // General-purpose attachment sender. Shared by camera, photo library, and
   // file picker — all of them resolve to a local URI + mime + optional name.
@@ -345,17 +367,16 @@ export function useChatActions({
     setItems((prev) => [...prev, localItem])
     sendEvent(userFileMessage(mime, base64, {
       ...(name !== undefined ? { name } : {}),
-      ...(chatId ? { agent: chatId } : {}),
+      ...(chatId ? { serverId: chatId } : {}),
+      channel,
     }))
 
     if (chatId) {
       const preview = name ? `📎 ${name}` : `📎 Attachment`
-      upsertAgent(db, chatId)
-        .then(() => insertItem(db, { id: fileId, chatId, kind: 'file', data: localItem }))
-        .then(() => updateAgentPreview(db, chatId, preview))
+      persistItem(db, { id: fileId, serverId: chatId, channel, kind: 'file', data: localItem }, preview)
         .catch(console.warn)
     }
-  }, [conn, chatId, db, sendEvent, setItems, addSystemMessage])
+  }, [conn, chatId, channel, db, sendEvent, setItems, addSystemMessage])
 
   return { sendMessage, sendAudio, sendAttachment, addSystemMessage, respond }
 }

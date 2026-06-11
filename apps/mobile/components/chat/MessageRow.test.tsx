@@ -35,6 +35,7 @@ function renderRow(item: Item) {
       tools={[]}
       avatarLabel="SI"
       onOpenTools={noop}
+      onOpenFile={noop}
     />,
   )
 }
@@ -59,7 +60,7 @@ describe('Row — file items', () => {
     await waitFor(() => {})
   })
 
-  test('renders a non-audio file as a chip label', () => {
+  test('renders an image file as a tappable inline thumbnail', () => {
     const item: Item = {
       kind: 'file',
       id: 'file_2',
@@ -70,6 +71,21 @@ describe('Row — file items', () => {
       done: true,
     }
     const screen = renderRow(item)
-    expect(screen.getByText('📎 photo.png')).toBeTruthy()
+    expect(screen.getByLabelText('Image photo.png')).toBeTruthy()
+  })
+
+  test('renders a document file as a tappable chip with name + type', () => {
+    const item: Item = {
+      kind: 'file',
+      id: 'file_3',
+      role: 'assistant',
+      mime: 'text/html',
+      data: 'AAAA',
+      name: 'report.html',
+      done: true,
+    }
+    const screen = renderRow(item)
+    expect(screen.getByText('report.html')).toBeTruthy()
+    expect(screen.getByLabelText('Open file report.html')).toBeTruthy()
   })
 })

@@ -21,7 +21,7 @@
  *     expo-document-picker (File)
  */
 import { forwardRef, memo, useEffect, useMemo, useRef, useState } from 'react'
-import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
+import { Pressable, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native'
 import { Feather } from '@expo/vector-icons'
 import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio'
 import { useTheme } from '../../context/ThemeContext'
@@ -53,6 +53,13 @@ type Props = {
 }
 
 type Mode = 'text' | 'voice-recording' | 'voice-review'
+
+// Auto-grow bounds for the text input. MIN matches the 40px side buttons so a
+// one-line composer lines up. The MAX is computed per-device as a fraction of
+// the screen height (see the component) so the field can grow to show a sizable
+// chunk of a long message before it falls back to internal scrolling.
+const MIN_INPUT_HEIGHT = 40
+const MAX_INPUT_HEIGHT_FRACTION = 0.45
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -184,6 +191,11 @@ export const Composer = memo(
   ) {
     const { colors } = useTheme()
     const styles = useMemo(() => makeStyles(colors), [colors])
+
+    // Cap auto-grow at a fraction of the screen so a long draft stays mostly
+    // visible while typing, yet still leaves room for the conversation + keyboard.
+    const { height: windowHeight } = useWindowDimensions()
+    const maxInputHeight = Math.round(windowHeight * MAX_INPUT_HEIGHT_FRACTION)
 
     const isSlashDraft = draft.trimStart().startsWith('/')
     const softBlocked = !!blocked && !isSlashDraft
@@ -375,10 +387,13 @@ export const Composer = memo(
             />
           </Pressable>
 
-          {/* Center: text input */}
+          {/* Center: text input. No JS height control — a multiline TextInput
+              auto-grows live between minHeight (styles.input) and maxHeight as
+              you type, and shrinks back natively when the draft clears. The old
+              onContentSizeChange→height approach only updated on blur. */}
           <TextInput
             ref={ref}
-            style={[styles.input, softBlocked && styles.inputBlocked]}
+            style={[styles.input, softBlocked && styles.inputBlocked, { maxHeight: maxInputHeight }]}
             value={draft}
             onChangeText={setDraft}
             onFocus={() => { setInputFocused(true); setShowAttachMenu(false) }}
@@ -445,16 +460,19 @@ function makeStyles(colors: ThemeColors) {
     },
     composer: {
       flexDirection: 'row',
-      alignItems: 'center',
+      alignItems: 'flex-end',
       paddingHorizontal: spacing.md,
       paddingVertical: 10,
       gap: spacing.sm,
     },
     composerBlocked: { opacity: 0.55 },
 
-    // Text input
+    // Text input. minHeight gives the one-line floor (matches the 40px side
+    // buttons); maxHeight is applied inline (per-device). The TextInput grows
+    // between them on its own as lines wrap.
     input: {
       flex: 1,
+      minHeight: MIN_INPUT_HEIGHT,
       backgroundColor: colors.surface,
       borderRadius: 20,
       paddingHorizontal: spacing.lg,
