@@ -35,7 +35,6 @@ coverage/
 
 # Environment
 .env
-.env.*
 
 # React Native
 *.keystore
@@ -81,9 +80,14 @@ apps/mobile/assets/*
 # Ignore mobile build
 /apps/mobile/.expo/
 /apps/mobile/.expo-shared/
+/ios/
+/android/
 
 # Ignore server build
 /apps/server/dist/
 
 # Ignore pnpm store
 .pnpm-store/
+
+.claude/
+CLAUDE.md

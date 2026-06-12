@@ -1,10 +1,146 @@
 // ---------------------------------------------------------------------------
+// Dark theme — premium navy + gold palette
+// ---------------------------------------------------------------------------
+
+export const ajiDarkColors = {
+  // Backgrounds
+  bg:         '#0F172A',
+  headerBg:   '#182235',
+  surface:    '#182235',
+  surface2:   '#1F2C43',
+  surface3:   '#273752',
+
+  // Borders
+  border:     '#2B3B56',
+  borderAlt:  '#3A4D6E',
+  borderCode: '#445979',
+
+  // Text
+  text:       '#F8FAFC',
+  textMuted:  '#94A3B8',
+  textDim:    '#7C8AA6',
+  textFaint:  '#4B5C79',
+  textOnAccent: '#0F172A',
+
+  // Accent
+  accent:     '#E2C58E',
+  accentDim:  '#D6B67A',
+
+  // Semantic
+  success:    '#4ABF8A',
+  warn:       '#D9A441',
+  danger:     '#F87171',
+
+  // Tool / AI
+  tool:       '#E2C58E',
+  toolDim:    '#2A3A56',
+
+  // Chat bubbles
+  assistantBubbleBg:    '#182235',
+  assistantBubbleBorder:'#223F73',
+  assistantBubbleText:  '#F8FAFC',
+  userBubbleBg:         '#D6B67A',
+  userBubbleText:       '#0F172A',
+} as const
+
+// ---------------------------------------------------------------------------
+// Light theme — premium navy + gold palette
+// ---------------------------------------------------------------------------
+
+export const ajiLightColors = {
+  // Backgrounds
+  bg:         '#F8F9FC',
+  headerBg:   '#FFFFFF',
+  surface:    '#FFFFFF',
+  surface2:   '#EFF2F8',
+  surface3:   '#E4EAF4',
+
+  // Borders
+  border:     '#D9DFEA',
+  borderAlt:  '#C1CCDE',
+  borderCode: '#C8D2E4',
+
+  // Text
+  text:       '#111827',
+  textMuted:  '#6B7280',
+  textDim:    '#8B94A6',
+  textFaint:  '#BCC6D8',
+  textOnAccent: '#0F172A',
+
+  // Accent
+  accent:     '#D6B67A',
+  accentDim:  '#F7E8C6',
+
+  // Semantic
+  success:    '#2E7D5B',
+  warn:       '#C08A2B',
+  danger:     '#B85050',
+
+  // Tool / AI
+  tool:       '#1B3563',
+  toolDim:    '#E8EEF9',
+
+  // Chat bubbles
+  assistantBubbleBg:    '#1B3563',
+  assistantBubbleBorder:'#223F73',
+  assistantBubbleText:  '#F8FAFC',
+  userBubbleBg:         '#F7E8C6',
+  userBubbleText:       '#0F172A',
+} as const
+
+// ---------------------------------------------------------------------------
+// Traditional themes — previous GitHub-inspired palettes
+// ---------------------------------------------------------------------------
+
+export const traditionalDarkColors = {
+  // Backgrounds
+  bg:         '#0d1117',
+  headerBg:   '#161b22',
+  surface:    '#161b22',
+  surface2:   '#1c2129',
+  surface3:   '#242b35',
+
+  // Borders
+  border:     '#21262d',
+  borderAlt:  '#3a424d',
+  borderCode: '#30363d',
+
+  // Text
+  text:       '#e6edf3',
+  textMuted:  '#8b949e',
+  textDim:    '#6e7681',
+  textFaint:  '#3d444d',
+  textOnAccent: '#ffffff',
+
+  // Accent
+  accent:     '#5e8eff',
+  accentDim:  '#2d4380',
+
+  // Semantic
+  success:    '#3fb950',
+  warn:       '#d29922',
+  danger:     '#f85149',
+
+  // Tool / AI
+  tool:       '#b392f0',
+  toolDim:    '#4c3b73',
+
+  // Chat bubbles
+  assistantBubbleBg:    '#161b22',
+  assistantBubbleBorder:'#21262d',
+  assistantBubbleText:  '#e6edf3',
+  userBubbleBg:         '#5e8eff',
+  userBubbleText:       '#ffffff',
+} as const
+
+// ---------------------------------------------------------------------------
 // Dark theme — GitHub-inspired dark palette
 // ---------------------------------------------------------------------------
 
 export const darkColors = {
   // Backgrounds — mirrors mobile-mockup.html :root CSS variables
   bg:         '#0d1117',   // --bg
+  headerBg:   '#161b22',   // navigation chrome (status bar + header bar)
   surface:    '#161b22',   // --surface
   surface2:   '#1c2129',   // --surface-2
   surface3:   '#242b35',   // --surface-3
@@ -41,6 +177,7 @@ export const darkColors = {
 export const lightColors = {
   // Backgrounds
   bg:         '#ffffff',
+  headerBg:   '#f6f8fa',
   surface:    '#f6f8fa',
   surface2:   '#eaeef2',
   surface3:   '#e0e4e9',

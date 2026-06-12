@@ -7,8 +7,8 @@
  * aji-chat hook entries (matched by the `claude-aji-chat-hook` substring in
  * their command) before adding fresh ones.
  *
- * Usage:  pnpm hooks:install
- * Undo:   pnpm hooks:uninstall
+ * Usage:  pnpm claude-hook:install
+ * Undo:   pnpm claude-hook:uninstall
  */
 import * as fs from 'node:fs'
 import * as path from 'node:path'
@@ -19,7 +19,7 @@ const SETTINGS_PATH = path.join(os.homedir(), '.claude', 'settings.json')
 const HOOK_EVENTS = ['UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'PostToolUse', 'Stop'] as const
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const TSX = path.resolve(__dirname, '..', 'node_modules', '.bin', 'tsx')
+const TSX = path.resolve(__dirname, '..', '..', 'node_modules', '.bin', 'tsx')
 const HOOK = path.resolve(__dirname, 'claude-aji-chat-hook.ts')
 const MARKER = 'claude-aji-chat-hook'
 const COMMAND = `${TSX} ${HOOK}`
@@ -70,7 +70,7 @@ function install(): void {
   console.log(`  Command: ${COMMAND}`)
   console.log()
   console.log(`Next: run \`pnpm server\` and start a Claude Code session.`)
-  console.log(`Undo: \`pnpm hooks:uninstall\``)
+  console.log(`Undo: \`pnpm claude-hook:uninstall\``)
 }
 
 install()

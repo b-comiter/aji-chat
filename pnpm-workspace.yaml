@@ -2,4 +2,9 @@ packages:
   - "apps/*"
   - "packages/*"
 allowBuilds:
+  '@swc/core': true
   esbuild: true
+  msgpackr-extract: true
+  unrs-resolver: true
+minimumReleaseAgeExclude:
+  - expo-file-system@19.0.23

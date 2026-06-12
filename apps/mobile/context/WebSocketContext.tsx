@@ -28,13 +28,23 @@ import type { ClientEvent, ServerEvent } from '@aji/protocol'
 import { useDB } from '../db/DBProvider'
 import {
   deleteItem,
-  insertItem,
-  updateAgentPreview,
-  updateAgentStatus,
-  upsertAgent,
+  getItemById,
+  getSetting,
+  persistItem,
+  saveCachedCommands,
+  setSetting,
+  updateServerStatus,
+  upsertServer,
+  applyServerInfo,
+  updateChannelStatus,
+  upsertChannel,
+  DEFAULT_CHANNEL,
 } from '../db/database'
+import { convKey } from '../db/convKey'
+import { filePreviewLabel } from '../components/chat/fileHelpers'
+import { SERVER_CONFIG } from '../constants/server'
 
-const SERVER_WS = `ws://${process.env.EXPO_PUBLIC_SERVER_HOST}:4000/ws`
+const SERVER_WS = SERVER_CONFIG.wsEndpoint
 const BACKOFF = [1000, 2000, 4000, 8000, 16000, 30000]
 
 export type ConnStatus = 'connecting' | 'connected' | 'disconnected'
@@ -46,8 +56,12 @@ export type ConnStatus = 'connecting' | 'connected' | 'disconnected'
 interface WSContextValue {
   conn: ConnStatus
   sendEvent: (e: ClientEvent) => void
-  /** Subscribe to events for a specific chat (agent id). Pass '*' for all events. */
-  subscribe: (chatId: string, handler: (e: ServerEvent) => void) => () => void
+  /**
+   * Subscribe to events for a specific conversation. The key is a `convKey`
+   * (`server/channel`, see db/convKey.ts). Pass '*' to receive every event
+   * regardless of conversation (used by the server list and channel list).
+   */
+  subscribe: (key: string, handler: (e: ServerEvent) => void) => () => void
 }
 
 const WSContext = createContext<WSContextValue>({
@@ -66,7 +80,8 @@ export function useWS(): WSContextValue {
 
 type InFlight = {
   kind: 'message' | 'tool'
-  chatId: string
+  serverId: string
+  channel: string
   turnId?: string
   // message-specific
   role?: string
@@ -87,9 +102,19 @@ export function WSProvider({ children }: { children: ReactNode }) {
   const ws = useRef<WebSocket | null>(null)
   const attempt = useRef(0)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const seqFlushTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const mounted = useRef(true)
+  const lastSeqRef = useRef(0)
 
-  // Per-chat subscriber sets. Key '*' = all-events listener.
+  // Seqs already processed on the *current* WS connection. The offline-replay
+  // path (get_missed_events) can redeliver an event that also arrived live;
+  // without this guard a redelivered append-only text_delta would double the
+  // rendered + persisted text. Reset on each (re)connect so a restarted server —
+  // whose seq counter starts back at 0 — isn't wrongly filtered out.
+  const seenSeqs = useRef<Set<number>>(new Set())
+
+  // Per-conversation subscriber sets, keyed by convKey. Key '*' = all-events
+  // listener (server list + channel list).
   const subscribers = useRef<Map<string, Set<(e: ServerEvent) => void>>>(new Map())
 
   // Tracks in-flight messages/tools so we can accumulate text and write the
@@ -100,8 +125,8 @@ export function WSProvider({ children }: { children: ReactNode }) {
   // Fan-out helpers
   // ---------------------------------------------------------------------------
 
-  function notify(chatId: string, event: ServerEvent) {
-    subscribers.current.get(chatId)?.forEach((h) => h(event))
+  function notify(key: string, event: ServerEvent) {
+    subscribers.current.get(key)?.forEach((h) => h(event))
     subscribers.current.get('*')?.forEach((h) => h(event))
   }
 
@@ -110,23 +135,36 @@ export function WSProvider({ children }: { children: ReactNode }) {
   // ---------------------------------------------------------------------------
 
   async function handleEvent(event: ServerEvent): Promise<void> {
-    const chatId: string = event.agent ?? 'unknown'
+    const serverId: string = ('serverId' in event ? event.serverId : undefined) ?? 'unknown'
+    // The channel scopes the conversation within a server. Absent ⇒ 'general',
+    // which preserves the original single-conversation-per-server behavior.
+    const channel: string = 'channel' in event && event.channel ? event.channel : DEFAULT_CHANNEL
+    const key = convKey(serverId, channel)
     const turnId: string | undefined =
       'turn_id' in event ? (event.turn_id as string | undefined) : undefined
+
+    // Touch both the server and channel rows. Server first — the channels table
+    // has a FK to servers(id). This is also the auto-discovery path: a channel
+    // appears in the list the moment any event references it.
+    async function touchConversation(): Promise<void> {
+      await upsertServer(db, serverId)
+      await upsertChannel(db, serverId, channel)
+    }
 
     try {
       switch (event.type) {
         case 'message_start': {
           inFlight.current.set(event.id, {
             kind: 'message',
-            chatId,
+            serverId,
+            channel,
             turnId,
             role: event.role,
             text: '',
           })
 
-          upsertAgent(db, chatId).catch((err) =>
-            console.warn('[WSContext] upsertAgent error', err),
+          touchConversation().catch((err) =>
+            console.warn('[WSContext] touchConversation error', err),
           )
           break
         }
@@ -141,24 +179,14 @@ export function WSProvider({ children }: { children: ReactNode }) {
           const inf = inFlight.current.get(event.id)
           if (inf) {
             inFlight.current.delete(event.id)
-            const finalData = {
-              kind: 'message' as const,
+            await persistItem(db, {
               id: event.id,
-              role: inf.role ?? 'assistant',
-              text: inf.text ?? '',
-              done: true,
-              turnId: inf.turnId,
-            }
-            // Upsert agent first (FK dependency), then insert the complete row.
-            await upsertAgent(db, inf.chatId)
-            await insertItem(db, {
-              id: event.id,
-              chatId: inf.chatId,
+              serverId: inf.serverId,
+              channel: inf.channel,
               kind: 'message',
-              data: finalData,
+              data: { kind: 'message' as const, id: event.id, role: inf.role ?? 'assistant', text: inf.text ?? '', done: true, turnId: inf.turnId },
               turnId: inf.turnId,
-            })
-            await updateAgentPreview(db, inf.chatId, inf.text ?? '')
+            }, inf.text ?? '')
           }
           break
         }
@@ -168,13 +196,14 @@ export function WSProvider({ children }: { children: ReactNode }) {
           // no DB write until tool_end delivers the complete result.
           inFlight.current.set(event.id, {
             kind: 'tool',
-            chatId,
+            serverId,
+            channel,
             turnId,
             name: event.name,
             args: event.args,
           })
-          upsertAgent(db, chatId).catch((err) =>
-            console.warn('[WSContext] upsertAgent error', err),
+          touchConversation().catch((err) =>
+            console.warn('[WSContext] touchConversation error', err),
           )
           break
         }
@@ -183,20 +212,12 @@ export function WSProvider({ children }: { children: ReactNode }) {
           const inf = inFlight.current.get(event.id)
           if (inf) {
             inFlight.current.delete(event.id)
-            await upsertAgent(db, inf.chatId)
-            await insertItem(db, {
+            await persistItem(db, {
               id: event.id,
-              chatId: inf.chatId,
+              serverId: inf.serverId,
+              channel: inf.channel,
               kind: 'tool',
-              data: {
-                kind: 'tool',
-                id: event.id,
-                name: inf.name ?? 'unknown',
-                args: inf.args ?? {},
-                result: event.result,
-                done: true,
-                turnId: inf.turnId,
-              },
+              data: { kind: 'tool', id: event.id, name: inf.name ?? 'unknown', args: inf.args ?? {}, result: event.result, done: true, turnId: inf.turnId },
               turnId: inf.turnId,
             })
           }
@@ -204,51 +225,85 @@ export function WSProvider({ children }: { children: ReactNode }) {
           break
         }
 
-        case 'permission_request': {
-          await upsertAgent(db, chatId)
-          await insertItem(db, {
+        case 'file': {
+          // Single self-contained event — persist immediately (no inFlight).
+          await persistItem(db, {
             id: event.id,
-            chatId,
-            kind: 'prompt',
-            data: {
-              kind: 'prompt',
-              id: event.id,
-              title: event.title,
-              message: event.message,
-              options: event.options,
-              turnId,
-            },
+            serverId,
+            channel,
+            kind: 'file',
+            data: { kind: 'file', id: event.id, role: event.role, mime: event.mime, data: event.data, name: event.name, duration: event.duration, text: event.text, done: true, turnId },
             turnId,
+          }, filePreviewLabel(event))
+          break
+        }
+
+        case 'permission_request': {
+          await persistItem(db, {
+            id: event.id, serverId, channel, kind: 'prompt', turnId,
+            data: { kind: 'prompt', id: event.id, title: event.title, message: event.message, options: event.options, turnId },
           })
           break
         }
 
         case 'clarify': {
-          await upsertAgent(db, chatId)
-          await insertItem(db, {
-            id: event.id,
-            chatId,
-            kind: 'prompt',
-            data: {
-              kind: 'prompt',
-              id: event.id,
-              title: 'Clarification',
-              message: event.question,
-              options: event.choices,
-              turnId,
-            },
-            turnId,
+          await persistItem(db, {
+            id: event.id, serverId, channel, kind: 'prompt', turnId,
+            data: { kind: 'prompt', id: event.id, title: 'Clarification', message: event.question, options: event.choices, turnId },
           })
           break
         }
 
         case 'prompt_dismiss': {
-          await deleteItem(db, event.id)
+          // Mirror the reducer (useChatSessionReducer): keep prompts this client
+          // already resolved — respond() stamps resolved:true — and delete only
+          // prompts dismissed elsewhere. Otherwise an answered approval card
+          // would vanish from history on reload.
+          const existing = await getItemById(db, event.id)
+          let resolved = false
+          if (existing?.kind === 'prompt') {
+            try {
+              resolved = (JSON.parse(existing.data) as { resolved?: boolean }).resolved === true
+            } catch {
+              /* malformed row — treat as unresolved */
+            }
+          }
+          if (!resolved) await deleteItem(db, event.id)
           break
         }
 
         case 'status': {
-          await updateAgentStatus(db, chatId, event.value)
+          await touchConversation()
+          await updateServerStatus(db, serverId, event.value)
+          await updateChannelStatus(db, serverId, channel, event.value)
+          break
+        }
+
+        case 'commands': {
+          // Commands are server-level, not channel-scoped.
+          await upsertServer(db, serverId)
+          await saveCachedCommands(db, serverId, event.commands)
+          break
+        }
+
+        case 'channels': {
+          // Server-owned channel registry (the source of truth). Upsert each
+          // entry into the local channels table as a thin cache. Server row
+          // first (channels FK → servers). Channels removed server-side aren't
+          // pruned here — the registry only grows via create_channel today.
+          await upsertServer(db, event.serverId)
+          for (const ch of event.channels) {
+            await upsertChannel(db, event.serverId, ch.id)
+          }
+          break
+        }
+
+        case 'server_info': {
+          // Adapter-advertised server metadata (mono-channel default, name).
+          await applyServerInfo(db, event.serverId, {
+            monoChannel: event.monoChannel,
+            displayName: event.displayName,
+          })
           break
         }
 
@@ -260,7 +315,7 @@ export function WSProvider({ children }: { children: ReactNode }) {
     }
 
     // Fan out to subscribers regardless of DB success
-    notify(chatId, event)
+    notify(key, event)
   }
 
   // ---------------------------------------------------------------------------
@@ -271,13 +326,17 @@ export function WSProvider({ children }: { children: ReactNode }) {
     function connect() {
       if (!mounted.current) return
       setConn('connecting')
+
       const socket = new WebSocket(SERVER_WS)
       ws.current = socket
 
       socket.onopen = () => {
         attempt.current = 0
         setConn('connected')
+        // Fresh connection: clear the per-connection dedup set (see seenSeqs).
+        seenSeqs.current = new Set()
         socket.send(JSON.stringify({ type: 'get_commands' }))
+        socket.send(JSON.stringify({ type: 'get_missed_events', after_seq: lastSeqRef.current }))
       }
       socket.onerror = () => socket.close()
       socket.onclose = () => {
@@ -289,7 +348,23 @@ export function WSProvider({ children }: { children: ReactNode }) {
       }
       socket.onmessage = (e) => {
         try {
-          const event = JSON.parse(e.data as string) as ServerEvent
+          const parsed = JSON.parse(e.data as string) as { seq?: number; event?: ServerEvent }
+          const event: ServerEvent = parsed.event ?? (parsed as unknown as ServerEvent)
+          if (parsed.seq !== undefined) {
+            // Drop a redelivered event (live broadcast + offline replay can
+            // overlap on reconnect) so append-only deltas aren't applied twice.
+            if (seenSeqs.current.has(parsed.seq)) return
+            seenSeqs.current.add(parsed.seq)
+            if (parsed.seq > lastSeqRef.current) {
+              lastSeqRef.current = parsed.seq
+              // Debounce the SQLite write — text_delta arrives 10-20x/sec during
+              // streaming; we only need the seq persisted before the next reconnect.
+              if (seqFlushTimer.current) clearTimeout(seqFlushTimer.current)
+              seqFlushTimer.current = setTimeout(() => {
+                setSetting(db, 'ws_last_seq', String(lastSeqRef.current)).catch(() => {})
+              }, 500)
+            }
+          }
           handleEvent(event).catch((err) =>
             console.warn('[WSContext] handleEvent error', err),
           )
@@ -299,7 +374,12 @@ export function WSProvider({ children }: { children: ReactNode }) {
       }
     }
 
-    connect()
+    // Load the last seen seq from SQLite before first connect so we can
+    // request only genuinely missed events (not replay already-stored ones).
+    getSetting(db, 'ws_last_seq').then((val) => {
+      if (val) lastSeqRef.current = parseInt(val, 10)
+      connect()
+    })
 
     const appState = AppState.addEventListener('change', (next) => {
       if (next === 'active') {
@@ -316,6 +396,10 @@ export function WSProvider({ children }: { children: ReactNode }) {
       mounted.current = false
       appState.remove()
       if (timer.current) clearTimeout(timer.current)
+      if (seqFlushTimer.current) {
+        clearTimeout(seqFlushTimer.current)
+        setSetting(db, 'ws_last_seq', String(lastSeqRef.current)).catch(() => {})
+      }
       ws.current?.close()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -330,13 +414,13 @@ export function WSProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const subscribe = useCallback(
-    (chatId: string, handler: (e: ServerEvent) => void): (() => void) => {
-      const set = subscribers.current.get(chatId) ?? new Set()
+    (key: string, handler: (e: ServerEvent) => void): (() => void) => {
+      const set = subscribers.current.get(key) ?? new Set()
       set.add(handler)
-      subscribers.current.set(chatId, set)
+      subscribers.current.set(key, set)
       return () => {
         set.delete(handler)
-        if (set.size === 0) subscribers.current.delete(chatId)
+        if (set.size === 0) subscribers.current.delete(key)
       }
     },
     [],

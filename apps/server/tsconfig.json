@@ -1,8 +1,11 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
+    // The server runs through tsx (esbuild) and is tested via jest+swc — both use
+    // bundler-style resolution, so extensionless relative imports are the norm.
+    // Match that here (NodeNext would force `.js` suffixes that jest can't resolve).
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
     "strict": true,
     "outDir": "dist",
     "rootDir": "src"

@@ -16,6 +16,7 @@ export default function RootLayout() {
         <WSProvider>
           <Stack screenOptions={{ headerShown: false }}>
             <Stack.Screen name="index" />
+            <Stack.Screen name="server" />
             <Stack.Screen name="chat" />
             <Stack.Screen name="settings" />
           </Stack>

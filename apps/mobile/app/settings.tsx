@@ -1,12 +1,12 @@
-import { Alert, Pressable, StyleSheet, Text, View } from 'react-native'
+import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { router } from 'expo-router'
-import Constants from 'expo-constants'
-import { useMemo } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useDB } from '../db/DBProvider'
 import { wipeAllHistory } from '../db/database'
 import { useTheme, type ThemePreference } from '../context/ThemeContext'
 import { spacing, typography, radius } from '../constants/theme'
+import { SERVER_CONFIG } from '../constants/server'
 import type { ThemeColors } from '../constants/theme'
 
 const THEME_OPTIONS: { value: ThemePreference; label: string }[] = [
@@ -15,15 +15,24 @@ const THEME_OPTIONS: { value: ThemePreference; label: string }[] = [
   { value: 'dark',  label: 'Dark'  },
 ]
 
+const BACK_ICON_SIZE = 28
+const BACK_ICON_LINE_HEIGHT = 32
+const SEGMENT_WRAPPER_PADDING = 3
+const SEGMENT_GAP = 2
+const SEGMENT_VERTICAL_PADDING = 5
+const APP_CONFIG = require('../app.json') as { expo?: { version?: string } }
+const EXPO_PACKAGE = require('expo/package.json') as { version?: string }
+
 export default function SettingsScreen() {
   const db = useDB()
   const { colors, themePreference, setThemePreference } = useTheme()
   const { top: safeTop, bottom: safeBottom } = useSafeAreaInsets()
   const styles = useMemo(() => makeStyles(colors), [colors])
+  const [isClearing, setIsClearing] = useState(false)
 
-  const serverHost = process.env.EXPO_PUBLIC_SERVER_HOST ?? 'not set'
-  const serverWs = `ws://${serverHost}:4000`
-  const appVersion = Constants.expoConfig?.version ?? '1.0.0'
+  const serverWs = SERVER_CONFIG.hostLabel
+  const appVersion = APP_CONFIG.expo?.version ?? '1.0.0'
+  const sdkVersion = EXPO_PACKAGE.version ?? 'Unknown'
 
   function handleClearAll() {
     Alert.alert(
@@ -35,8 +44,16 @@ export default function SettingsScreen() {
           text: 'Clear Everything',
           style: 'destructive',
           onPress: async () => {
-            await wipeAllHistory(db)
-            router.replace('/')
+            if (isClearing) return
+            setIsClearing(true)
+            try {
+              await wipeAllHistory(db)
+              router.replace('/')
+            } catch {
+              Alert.alert('Failed to Clear History', 'Please try again in a moment.')
+            } finally {
+              setIsClearing(false)
+            }
           },
         },
       ],
@@ -44,70 +61,105 @@ export default function SettingsScreen() {
   }
 
   return (
-    <View style={[styles.screen, { paddingTop: safeTop, paddingBottom: safeBottom }]}>
+    <View style={[styles.screen, { paddingTop: safeTop }]}>
       <View style={styles.header}>
-        <Pressable onPress={() => router.back()} style={styles.backBtn} hitSlop={8}>
+        <Pressable
+          onPress={() => router.back()}
+          style={styles.backBtn}
+          hitSlop={8}
+          accessibilityRole='button'
+          accessibilityLabel='Go back'
+        >
           <Text style={styles.backText}>‹</Text>
         </Pressable>
         <Text style={styles.title}>Settings</Text>
       </View>
 
-      {/* ── Appearance ── */}
-      <Text style={styles.sectionLabel}>Appearance</Text>
-      <View style={styles.card}>
-        <View style={styles.row}>
-          <Text style={styles.rowLabel}>Theme</Text>
-          <View style={styles.segmented}>
-            {THEME_OPTIONS.map((opt) => (
-              <Pressable
-                key={opt.value}
-                style={[styles.segment, themePreference === opt.value && styles.segmentActive]}
-                onPress={() => setThemePreference(opt.value)}
-              >
-                <Text
-                  style={[
-                    styles.segmentText,
-                    themePreference === opt.value && styles.segmentTextActive,
-                  ]}
+      <ScrollView
+        style={styles.content}
+        contentContainerStyle={[styles.contentContainer, { paddingBottom: safeBottom + spacing.lg }]}
+      >
+        <SettingsSection label='Appearance' styles={styles}>
+          <View style={styles.row}>
+            <Text style={styles.rowLabel}>Theme</Text>
+            <View style={styles.segmented} accessibilityRole='radiogroup' accessibilityLabel='Theme preference'>
+              {THEME_OPTIONS.map((opt) => (
+                <Pressable
+                  key={opt.value}
+                  style={[styles.segment, themePreference === opt.value && styles.segmentActive]}
+                  onPress={() => {
+                    void setThemePreference(opt.value).catch(() => {
+                      Alert.alert('Theme Update Failed', 'Could not save your theme preference.')
+                    })
+                  }}
+                  accessibilityRole='radio'
+                  accessibilityLabel={`Use ${opt.label} theme`}
+                  accessibilityState={{ selected: themePreference === opt.value }}
                 >
-                  {opt.label}
-                </Text>
-              </Pressable>
-            ))}
+                  <Text
+                    style={[
+                      styles.segmentText,
+                      themePreference === opt.value && styles.segmentTextActive,
+                    ]}
+                  >
+                    {opt.label}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
           </View>
-        </View>
-      </View>
+        </SettingsSection>
 
-      {/* ── Connection ── */}
-      <Text style={styles.sectionLabel}>Connection</Text>
-      <View style={styles.card}>
-        <View style={styles.row}>
-          <Text style={styles.rowLabel}>Server</Text>
-          <Text style={styles.rowValue} numberOfLines={1}>{serverWs}</Text>
-        </View>
-      </View>
+        <SettingsSection label='Connection' styles={styles}>
+          <View style={styles.row}>
+            <Text style={styles.rowLabel}>Server</Text>
+            <Text style={styles.rowValue} numberOfLines={1}>{serverWs}</Text>
+          </View>
+        </SettingsSection>
 
-      {/* ── Data ── */}
-      <Text style={styles.sectionLabel}>Data</Text>
-      <View style={styles.card}>
-        <Pressable style={styles.destructiveRow} onPress={handleClearAll}>
-          <Text style={styles.destructiveLabel}>Clear All History</Text>
-        </Pressable>
-      </View>
+        <SettingsSection label='Data' styles={styles}>
+          <Pressable
+            style={[styles.destructiveRow, isClearing && styles.rowDisabled]}
+            onPress={handleClearAll}
+            disabled={isClearing}
+            accessibilityRole='button'
+            accessibilityLabel='Clear all history'
+            accessibilityHint='Deletes all messages and agent history permanently'
+            accessibilityState={{ disabled: isClearing }}
+          >
+            <Text style={styles.destructiveLabel}>{isClearing ? 'Clearing...' : 'Clear All History'}</Text>
+          </Pressable>
+        </SettingsSection>
 
-      {/* ── About ── */}
-      <Text style={styles.sectionLabel}>About</Text>
-      <View style={styles.card}>
-        <View style={styles.row}>
-          <Text style={styles.rowLabel}>Version</Text>
-          <Text style={styles.rowValue}>{appVersion}</Text>
-        </View>
-        <View style={[styles.row, styles.rowBorder]}>
-          <Text style={styles.rowLabel}>SDK</Text>
-          <Text style={styles.rowValue}>Expo 54</Text>
-        </View>
-      </View>
+        <SettingsSection label='About' styles={styles}>
+          <View style={styles.row}>
+            <Text style={styles.rowLabel}>Version</Text>
+            <Text style={styles.rowValue}>{appVersion}</Text>
+          </View>
+          <View style={[styles.row, styles.rowBorder]}>
+            <Text style={styles.rowLabel}>SDK</Text>
+            <Text style={styles.rowValue}>{sdkVersion}</Text>
+          </View>
+        </SettingsSection>
+      </ScrollView>
     </View>
+  )
+}
+
+function SettingsSection({
+  label,
+  styles,
+  children,
+}: {
+  label: string
+  styles: ReturnType<typeof makeStyles>
+  children: ReactNode
+}) {
+  return (
+    <>
+      <Text style={styles.sectionLabel}>{label}</Text>
+      <View style={styles.card}>{children}</View>
+    </>
   )
 }
 
@@ -116,6 +168,12 @@ function makeStyles(colors: ThemeColors) {
     screen: {
       flex: 1,
       backgroundColor: colors.bg,
+    },
+    content: {
+      flex: 1,
+    },
+    contentContainer: {
+      paddingTop: spacing.sm,
     },
     header: {
       flexDirection: 'row',
@@ -131,8 +189,8 @@ function makeStyles(colors: ThemeColors) {
     },
     backText: {
       color: colors.accent,
-      fontSize: 28,
-      lineHeight: 32,
+      fontSize: BACK_ICON_SIZE,
+      lineHeight: BACK_ICON_LINE_HEIGHT,
     },
     title: {
       color: colors.text,
@@ -184,12 +242,12 @@ function makeStyles(colors: ThemeColors) {
       flexDirection: 'row',
       backgroundColor: colors.surface2,
       borderRadius: radius.md,
-      padding: 3,
-      gap: 2,
+      padding: SEGMENT_WRAPPER_PADDING,
+      gap: SEGMENT_GAP,
     },
     segment: {
       paddingHorizontal: spacing.md,
-      paddingVertical: 5,
+      paddingVertical: SEGMENT_VERTICAL_PADDING,
       borderRadius: radius.sm,
     },
     segmentActive: {
@@ -207,6 +265,9 @@ function makeStyles(colors: ThemeColors) {
     destructiveRow: {
       paddingHorizontal: spacing.lg,
       paddingVertical: spacing.md,
+    },
+    rowDisabled: {
+      opacity: 0.65,
     },
     destructiveLabel: {
       color: colors.danger,

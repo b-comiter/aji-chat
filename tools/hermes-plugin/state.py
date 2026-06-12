@@ -20,6 +20,7 @@ can share a single source of truth without circular imports:
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -35,12 +36,25 @@ class SessionState:
     # prompt_id -> Future awaiting the user's choice
     pending_prompts: dict[str, asyncio.Future[str]] = field(default_factory=dict)
 
-    # task_id -> our generated tool_start id.
+    # task_id -> (our generated tool_start id, chat_id at time of call).
     # Hermes's pre_tool_call hook fires with tool_call_id="" (the real UUID
     # isn't assigned yet at that point), so we generate our own and stash it
     # here.  post_tool_call looks it up so tool_start and tool_end carry the
     # same id and mobile can pair them.
-    pending_tool_ids: dict[str, str] = field(default_factory=dict)
+    # chat_id is stashed alongside so tool_end can emit to the right channel.
+    pending_tool_ids: dict[str, tuple[str, Optional[str]]] = field(default_factory=dict)
+
+    # correlation_key -> prompt_id for observer-only approval cards.
+    # Keyed by "<session_key>:<pattern_key>" so on_post_approval can look
+    # up the prompt_id it needs to emit a prompt_dismiss.
+    pending_approval_ids: dict[str, str] = field(default_factory=dict)
+
+    # monotonic timestamp of the last approval card the pre_approval hook emitted.
+    # Hermes ALSO sends its native approval prompt as ordinary text via send();
+    # the adapter checks this to suppress that redundant text (avoiding a second
+    # card) only when the hook actually fired. Global rather than per-chat — the
+    # plugin already assumes a single active session (see active_chat_id()).
+    last_approval_card_at: float = 0.0
 
     # --- turn tracking ---
 
@@ -69,8 +83,18 @@ class SessionState:
 
     # --- pending prompts ---
 
+    def active_chat_id(self) -> Optional[str]:
+        """Return the single active chat_id, or None if zero or multiple are active.
+
+        Hook callbacks don't receive chat_id directly. In the normal single-user
+        case exactly one session is processing at a time, so this gives hooks the
+        chat_id they need to stamp the correct channel on tool events.
+        """
+        active = list(self.turns.keys())
+        return active[0] if len(active) == 1 else None
+
     def register_prompt(self, prompt_id: str) -> asyncio.Future[str]:
-        fut: asyncio.Future[str] = asyncio.get_event_loop().create_future()
+        fut: asyncio.Future[str] = asyncio.get_running_loop().create_future()
         self.pending_prompts[prompt_id] = fut
         return fut
 
@@ -89,10 +113,34 @@ class SessionState:
 
     # --- tool call ID tracking ---
 
-    def store_tool_id(self, task_id: str, tool_id: str) -> None:
-        """Remember a generated tool_id for task_id so post_tool_call can pair it."""
-        self.pending_tool_ids[task_id] = tool_id
+    def store_tool_id(self, task_id: str, tool_id: str, chat_id: Optional[str] = None) -> None:
+        """Remember a generated tool_id + chat_id for task_id so post_tool_call can pair it."""
+        self.pending_tool_ids[task_id] = (tool_id, chat_id)
 
-    def pop_tool_id(self, task_id: str) -> Optional[str]:
-        """Return and remove the stored tool_id for task_id, or None if absent."""
-        return self.pending_tool_ids.pop(task_id, None)
+    def pop_tool_id(self, task_id: str) -> tuple[Optional[str], Optional[str]]:
+        """Return and remove (tool_id, chat_id) for task_id, or (None, None) if absent."""
+        result = self.pending_tool_ids.pop(task_id, None)
+        return result if result is not None else (None, None)
+
+    # --- approval card tracking ---
+
+    def store_approval_id(self, correlation_key: str, prompt_id: str) -> None:
+        """Remember the prompt_id for an observer-only approval card."""
+        self.pending_approval_ids[correlation_key] = prompt_id
+
+    def pop_approval_id(self, correlation_key: str) -> Optional[str]:
+        """Return and remove the prompt_id for correlation_key, or None if absent."""
+        return self.pending_approval_ids.pop(correlation_key, None)
+
+    def note_approval_card(self) -> None:
+        """Mark that the pre_approval hook just emitted a structured approval card."""
+        self.last_approval_card_at = time.monotonic()
+
+    def consume_recent_approval_card(self, window: float = 10.0) -> bool:
+        """True if a card was emitted within `window` seconds — and clears the
+        mark so each card suppresses at most one redundant text prompt. Lets
+        send() drop Hermes's native approval text when the hook already covered it."""
+        if time.monotonic() - self.last_approval_card_at <= window:
+            self.last_approval_card_at = 0.0
+            return True
+        return False

@@ -31,6 +31,11 @@ logger = logging.getLogger(__name__)
 # Callback the adapter passes in: receives a fully-constructed event dict
 # (we don't import MessageEvent here to keep this module focused on transport).
 UserMessageHandler = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
+# Same shape, used for user_file events (audio recordings from voice mode etc.)
+UserFileHandler = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
+# Same shape, used for clear_channel events (the mobile /clear command — reset
+# the agent's session for that channel).
+ClearChannelHandler = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
 # No-arg async callback; the adapter knows how to build and push the list.
 GetCommandsHandler = Callable[[], Coroutine[Any, Any, None]]
 
@@ -42,13 +47,22 @@ class WebhookServer:
         port: int,
         state: SessionState,
         on_user_message: UserMessageHandler,
+        on_user_file: "UserFileHandler | None" = None,
         on_get_commands: "GetCommandsHandler | None" = None,
+        on_clear_channel: "ClearChannelHandler | None" = None,
+        server_id: str = "hermes",
     ) -> None:
         self.host = host
         self.port = port
         self.state = state
         self.on_user_message = on_user_message
+        self.on_user_file = on_user_file
         self.on_get_commands = on_get_commands
+        self.on_clear_channel = on_clear_channel
+        # The server id we represent. The aji-chat server already routes events to
+        # us by serverId, but we double-check here so a stale server (or a manual
+        # POST) can't make us act on a message meant for another agent.
+        self.server_id = server_id
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
 
@@ -89,13 +103,59 @@ class WebhookServer:
         event_type = payload.get("type")
         flog("_handle_inbound() type=%s payload=%.200r", event_type, payload)
 
+        # Defense-in-depth routing: if the event explicitly names a different
+        # server, it isn't for us — ignore it. Events with no serverId (control
+        # events, or older mobile builds) are accepted, matching the server's
+        # forwarding rule.
+        target = payload.get("serverId")
+        if target is not None and target != self.server_id:
+            flog("_handle_inbound() ignored event for serverId=%s (we are %s)", target, self.server_id)
+            return web.json_response({"ok": True, "ignored": True})
+
         if event_type == "user_message":
             text = str(payload.get("text", ""))
-            flog_info("_handle_inbound() user_message text=%.120r", text)
+            channel = payload.get("channel")
+            flog_info("_handle_inbound() user_message channel=%s text=%.120r", channel, text)
             await self.on_user_message({
                 "text": text,
+                "channel": channel,
                 "received_at": datetime.utcnow().isoformat(),
             })
+            return web.json_response({"ok": True})
+
+        if event_type == "user_file":
+            mime = str(payload.get("mime", ""))
+            name = payload.get("name")
+            duration = payload.get("duration")
+            data_len = len(str(payload.get("data", "")))
+            flog_info(
+                "_handle_inbound() user_file mime=%s name=%s duration=%s b64_len=%d",
+                mime, name, duration, data_len,
+            )
+            if self.on_user_file is None:
+                flog_warn("_handle_inbound() user_file but no handler registered")
+                return web.json_response({"ok": True, "ignored": True})
+            await self.on_user_file({
+                "mime": mime,
+                "data": str(payload.get("data", "")),
+                "name": name,
+                "duration": duration,
+                "text": payload.get("text"),
+                "channel": payload.get("channel"),
+                "received_at": datetime.utcnow().isoformat(),
+            })
+            return web.json_response({"ok": True})
+
+        if event_type == "clear_channel":
+            channel = payload.get("channel")
+            flog_info("_handle_inbound() clear_channel channel=%s", channel)
+            if self.on_clear_channel is not None:
+                await self.on_clear_channel({
+                    "channel": channel,
+                    "received_at": datetime.utcnow().isoformat(),
+                })
+            else:
+                flog_warn("_handle_inbound() clear_channel but no handler registered")
             return web.json_response({"ok": True})
 
         if event_type == "prompt_response":
