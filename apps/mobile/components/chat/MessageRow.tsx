@@ -48,14 +48,17 @@ function FileChip({
       accessibilityLabel={item.name ? `Open file ${item.name}` : 'Open file'}
       accessibilityHint="Opens the file full screen"
     >
-      <View style={styles.fileIconBox}>
-        <Feather name={fileIconName(item) as any} size={20} color={colors.accent} />
+      <View style={styles.fileChipRow}>
+        <View style={styles.fileIconBox}>
+          <Feather name={fileIconName(item) as any} size={20} color={colors.accent} />
+        </View>
+        <View style={styles.fileChipMeta}>
+          <Text style={styles.fileChipName} numberOfLines={1}>{item.name ?? item.mime}</Text>
+          <Text style={styles.fileChipSub} numberOfLines={1}>{item.mime} · {formatBytes(bytes)}</Text>
+        </View>
+        <Feather name="chevron-right" size={18} color={colors.textDim} />
       </View>
-      <View style={styles.fileChipMeta}>
-        <Text style={styles.fileChipName} numberOfLines={1}>{item.name ?? item.mime}</Text>
-        <Text style={styles.fileChipSub} numberOfLines={1}>{item.mime} · {formatBytes(bytes)}</Text>
-      </View>
-      <Feather name="chevron-right" size={18} color={colors.textDim} />
+      {item.text ? <Text style={styles.fileChipCaption}>{item.text}</Text> : null}
     </Pressable>
   )
 }
@@ -207,17 +210,20 @@ export const Row = memo(function Row({ item, onChoose, isGroupStart, dividerKind
 function makeStyles(colors: ThemeColors) {
   return StyleSheet.create({
     msgWrapper: { flexDirection: 'column', paddingVertical: spacing.sm },
+    // Subtle hairline between messages from the same sender (within a group).
     msgBorderLight: {
       borderBottomWidth: StyleSheet.hairlineWidth,
       borderBottomColor: colors.border,
-      paddingBottom: spacing.md,
-      marginBottom: spacing.xs,
-    },
-    msgBorderHeavy: {
-      borderBottomWidth: 1,
-      borderBottomColor: colors.borderAlt,
-      paddingBottom: spacing.md,
+      paddingBottom: spacing.sm,
       marginBottom: spacing.sm,
+    },
+    // Bold bar at a sender change (user↔agent) — a clear section break: thicker
+    // line + more vertical room so the turn boundary reads at a glance.
+    msgBorderHeavy: {
+      borderBottomWidth: 2,
+      borderBottomColor: colors.borderAlt,
+      paddingBottom: spacing.lg,
+      marginBottom: spacing.lg,
     },
     msgMeta: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.sm },
     msgMetaUserRight: {},
@@ -236,16 +242,24 @@ function makeStyles(colors: ThemeColors) {
     },
     fileBubble: { maxWidth: '85%' },
     fileChip: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: spacing.md,
       maxWidth: 280,
+      gap: spacing.sm,
       backgroundColor: colors.surface,
       borderWidth: 1,
       borderColor: colors.border,
       borderRadius: radius.xl,
       paddingHorizontal: spacing.md,
       paddingVertical: spacing.md,
+    },
+    fileChipRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+    },
+    fileChipCaption: {
+      color: colors.text,
+      fontSize: typography.sizeLg,
+      lineHeight: typography.lineHeightNormal,
     },
     fileIconBox: {
       width: 40,
