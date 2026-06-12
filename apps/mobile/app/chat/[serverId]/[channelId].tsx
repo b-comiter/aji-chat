@@ -142,9 +142,9 @@ export default function ChatScreen() {
         map.set(cur.id, 'none')
         continue
       }
-      const curRole = cur.kind === 'message' || cur.kind === 'file' ? cur.role : 'other'
-      const nextRole = next.kind === 'message' || next.kind === 'file' ? next.role : 'other'
-      map.set(cur.id, curRole !== nextRole ? 'heavy' : 'light')
+      // 'heavy' exactly where the avatar group breaks (sender changes), 'light'
+      // within a same-sender run. Mirrors computeIsGroupStart's boundary.
+      map.set(cur.id, senderRole(cur) !== senderRole(next) ? 'heavy' : 'light')
     }
     return map
   }, [displayItems])
@@ -339,13 +339,23 @@ function getAvatarLabel(displayName: string): string {
 }
 
 /**
- * A message is the start of a new group when the sender, kind, or turn changes.
+ * The sender of an item for grouping/divider purposes. Messages and files carry
+ * a role; tool/prompt items have no sender and always break a run (null).
+ */
+function senderRole(item: Item): 'assistant' | 'user' | 'system' | null {
+  return item.kind === 'message' || item.kind === 'file' ? item.role : null
+}
+
+/**
+ * A message/file starts a new group (avatar + name header shown) when the sender
+ * changes. Consecutive items from the same sender — regardless of turn — share
+ * one group, so the agent avatar shows ONCE per run instead of repeating on every
+ * message (including separate turns and turn-less cron pushes). Tool/prompt items
+ * (null sender) always start a new group.
  */
 function computeIsGroupStart(item: Item, prev: Item | undefined): boolean {
+  const role = senderRole(item)
+  if (role === null) return true
   if (!prev) return true
-  if (item.kind !== 'message') return true
-  if (prev.kind !== 'message') return true
-  if (item.role !== prev.role) return true
-  if (item.turnId && prev.turnId && item.turnId === prev.turnId) return false
-  return true
+  return senderRole(prev) !== role
 }
