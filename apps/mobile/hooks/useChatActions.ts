@@ -23,6 +23,7 @@ import {
 } from '../db/database'
 import { SERVER_CONFIG } from '../constants/server'
 import type { Item } from './chatTypes'
+import { useMessageSound } from './useMessageSound'
 
 const SERVER_HTTP = SERVER_CONFIG.httpBase
 const SERVER_TOKEN = SERVER_CONFIG.token
@@ -51,6 +52,7 @@ export const LOCAL_COMMANDS: CommandItem[] = [
   { name: 'view-chat-history', description: "Log this agent's chat messages to server console",   category: 'Dev', args_hint: '[with-tools]' },
   { name: 'view-last-n-msgs',  description: 'Log the last N messages to server console',          category: 'Dev', args_hint: '<count>' },
   { name: 'wipe-db',           description: 'Wipe ALL history for ALL agents',                    category: 'Dev' },
+  { name: 'test-alert',        description: 'Play the new-message alert sound',                   category: 'Dev' },
 ]
 
 type SetItems = (updater: (prev: Item[]) => Item[]) => void
@@ -64,6 +66,8 @@ interface CommandContext {
   addSystemMessage: (text: string) => void
   sendEvent: (event: ClientEvent) => void
   router: typeof router
+  /** Plays the new-message chime — same sound used for incoming messages. */
+  playMessageSound: () => void
 }
 
 type CommandHandler = (args: string[]) => Promise<void>
@@ -143,6 +147,11 @@ const LOCAL_COMMAND_HANDLERS: Record<string, CommandFactory> = {
     ctx.setItems(() => [])
     ctx.router.replace('/')
   },
+
+  'test-alert': (ctx) => async () => {
+    ctx.playMessageSound()
+    ctx.addSystemMessage('Played the new-message alert sound.')
+  },
 }
 
 // ---------------------------------------------------------------------------
@@ -173,6 +182,10 @@ export function useChatActions({
   const itemsRef = useRef(items)
   itemsRef.current = items
 
+  // New-message chime — exposed to /test-alert so the sound can be triggered on
+  // demand (same player/sound the incoming-message path uses).
+  const playMessageSound = useMessageSound()
+
   // Two-step guard for /wipe-db
   const wipePendingRef = useRef(false)
   const wipePendingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -180,7 +193,7 @@ export function useChatActions({
   const addSystemMessage = useCallback((text: string) => {
     setItems((prev) => [
       ...prev,
-      { kind: 'message', id: newId('sys'), role: 'system', text, done: true },
+      { kind: 'message', id: newId('sys'), role: 'system', text, done: true, createdAt: Date.now() },
     ])
   }, [setItems])
 
@@ -244,7 +257,7 @@ export function useChatActions({
       }
     }
 
-    const ctx: CommandContext = { chatId, channel, db, items: itemsRef.current, setItems, addSystemMessage, sendEvent, router }
+    const ctx: CommandContext = { chatId, channel, db, items: itemsRef.current, setItems, addSystemMessage, sendEvent, router, playMessageSound }
     try {
       await factory(ctx)(args)
       return true
@@ -253,7 +266,7 @@ export function useChatActions({
       addSystemMessage(`Error running /${cmd}: ${err instanceof Error ? err.message : 'unknown error'}`)
       return true
     }
-  }, [chatId, channel, db, addSystemMessage, setItems, sendEvent])
+  }, [chatId, channel, db, addSystemMessage, setItems, sendEvent, playMessageSound])
 
   // Accepts the trimmed text so the screen owns draft state and clearing.
   const sendMessage = useCallback((text: string) => {
@@ -269,10 +282,13 @@ export function useChatActions({
       }
     }
 
-    if (conn !== 'connected') return
+    if (conn !== 'connected') {
+      addSystemMessage('Not connected — reconnect to send.')
+      return
+    }
 
     const msgId = newId('msg')
-    const msgData: Item = { kind: 'message', id: msgId, role: 'user', text, done: true }
+    const msgData: Item = { kind: 'message', id: msgId, role: 'user', text, done: true, createdAt: Date.now() }
 
     setItems((prev) => [...prev, msgData])
     // Stamp the target server (chatId) + channel so server-side adapters — e.g.
@@ -283,74 +299,33 @@ export function useChatActions({
       persistItem(db, { id: msgId, serverId: chatId, channel, kind: 'message', data: msgData }, text)
         .catch(console.warn)
     }
-  }, [conn, chatId, channel, db, sendEvent, setItems, handleLocalCommand])
+  }, [conn, chatId, channel, db, sendEvent, setItems, addSystemMessage, handleLocalCommand])
 
-  // Voice mode: ship a recorded audio clip to the agent. Mirrors `sendMessage`
-  // but the local Item is a `file` (so the existing AudioMessage row renders
-  // it), and the wire event is `user_file` rather than `user_message`.
-  const sendAudio = useCallback(async (uri: string, durationMs: number) => {
-    if (conn !== 'connected') return
-    let base64: string
-    try {
-      base64 = await new File(uri).base64()
-    } catch (err) {
-      console.warn('[useChatActions] failed to read recording', err)
-      addSystemMessage('Could not read the recording.')
-      return
-    }
-
-    const mime = 'audio/mp4'
-    const name = 'voice-message.m4a'
-    const durationSec = Math.max(0, durationMs / 1000)
-    const fileId = newId('file')
-    const localItem: Item = {
-      kind: 'file',
-      id: fileId,
-      role: 'user',
-      mime,
-      data: base64,
-      name,
-      duration: durationSec,
-      done: true,
-    }
-
-    setItems((prev) => [...prev, localItem])
-    sendEvent(userFileMessage(mime, base64, {
-      name,
-      duration: durationSec,
-      ...(chatId ? { serverId: chatId } : {}),
-      channel,
-    }))
-
-    if (chatId) {
-      persistItem(db, { id: fileId, serverId: chatId, channel, kind: 'file', data: localItem }, '🎤 Voice message')
-        .catch(console.warn)
-    }
-
-    // Drop the temp recording file — the local Item's base64 (and AudioMessage's
-    // own cache file keyed by item id) handle replay independently.
-    try { new File(uri).delete() } catch {}
-  }, [conn, chatId, channel, db, sendEvent, setItems, addSystemMessage])
-
-  // General-purpose attachment sender. Shared by camera, photo library, and
-  // file picker — all of them resolve to a local URI + mime + optional name.
-  // Reads the file as base64, appends a local `file` Item so the AudioMessage
-  // / generic file chip renders immediately, and dispatches `user_file` over
-  // the websocket the same way sendAudio does.
-  const sendAttachment = useCallback(async (opts: {
+  // Shared file-send path behind sendAudio + sendAttachment. Reads the local URI
+  // as base64, optimistically appends a `file` Item (so the AudioMessage row /
+  // generic chip renders immediately), dispatches `user_file` over the websocket,
+  // and persists. The wire event is `user_file` rather than `user_message`.
+  // Returns true once the message has been dispatched, false on any early-out.
+  const sendFile = useCallback(async (opts: {
     uri: string
     mime: string
     name?: string
-  }) => {
-    if (conn !== 'connected') return
-    const { uri, mime, name } = opts
+    duration?: number
+    previewLabel: string
+    readErrorLabel: string
+  }): Promise<boolean> => {
+    if (conn !== 'connected') {
+      addSystemMessage('Not connected — reconnect to send.')
+      return false
+    }
+    const { uri, mime, name, duration } = opts
     let base64: string
     try {
       base64 = await new File(uri).base64()
     } catch (err) {
-      console.warn('[useChatActions] failed to read attachment', err)
-      addSystemMessage('Could not read the attachment.')
-      return
+      console.warn('[useChatActions] failed to read file', err)
+      addSystemMessage(opts.readErrorLabel)
+      return false
     }
 
     const fileId = newId('file')
@@ -361,22 +336,55 @@ export function useChatActions({
       mime,
       data: base64,
       ...(name !== undefined ? { name } : {}),
+      ...(duration !== undefined ? { duration } : {}),
       done: true,
+      createdAt: Date.now(),
     }
 
     setItems((prev) => [...prev, localItem])
     sendEvent(userFileMessage(mime, base64, {
       ...(name !== undefined ? { name } : {}),
+      ...(duration !== undefined ? { duration } : {}),
       ...(chatId ? { serverId: chatId } : {}),
       channel,
     }))
 
     if (chatId) {
-      const preview = name ? `📎 ${name}` : `📎 Attachment`
-      persistItem(db, { id: fileId, serverId: chatId, channel, kind: 'file', data: localItem }, preview)
+      persistItem(db, { id: fileId, serverId: chatId, channel, kind: 'file', data: localItem }, opts.previewLabel)
         .catch(console.warn)
     }
+    return true
   }, [conn, chatId, channel, db, sendEvent, setItems, addSystemMessage])
+
+  // Voice mode: ship a recorded audio clip to the agent.
+  const sendAudio = useCallback(async (uri: string, durationMs: number) => {
+    const sent = await sendFile({
+      uri,
+      mime: 'audio/mp4',
+      name: 'voice-message.m4a',
+      duration: Math.max(0, durationMs / 1000),
+      previewLabel: '🎤 Voice message',
+      readErrorLabel: 'Could not read the recording.',
+    })
+    // Drop the temp recording file once it's been handed off — the local Item's
+    // base64 (and AudioMessage's own cache file keyed by item id) handle replay
+    // independently. On an early-out we leave it for a possible retry.
+    if (sent) { try { new File(uri).delete() } catch {} }
+  }, [sendFile])
+
+  // General-purpose attachment sender. Shared by camera, photo library, and
+  // file picker — all of them resolve to a local URI + mime + optional name.
+  const sendAttachment = useCallback((opts: {
+    uri: string
+    mime: string
+    name?: string
+  }) => sendFile({
+    uri: opts.uri,
+    mime: opts.mime,
+    name: opts.name,
+    previewLabel: opts.name ? `📎 ${opts.name}` : '📎 Attachment',
+    readErrorLabel: 'Could not read the attachment.',
+  }).then(() => {}), [sendFile])
 
   return { sendMessage, sendAudio, sendAttachment, addSystemMessage, respond }
 }

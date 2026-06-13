@@ -38,11 +38,14 @@ import {
   applyServerInfo,
   updateChannelStatus,
   upsertChannel,
+  getServer,
+  isServerMuted,
   DEFAULT_CHANNEL,
 } from '../db/database'
 import { convKey } from '../db/convKey'
 import { filePreviewLabel } from '../components/chat/fileHelpers'
 import { SERVER_CONFIG } from '../constants/server'
+import { useMessageSound } from '../hooks/useMessageSound'
 
 const SERVER_WS = SERVER_CONFIG.wsEndpoint
 const BACKOFF = [1000, 2000, 4000, 8000, 16000, 30000]
@@ -99,6 +102,15 @@ export function WSProvider({ children }: { children: ReactNode }) {
   const db = useDB()
   const [conn, setConn] = useState<ConnStatus>('connecting')
 
+  // New-message chime. Fired here (the one central event sink) so it plays for
+  // any incoming message regardless of which screen is open — the chat list, a
+  // server's channel list, or the chat itself. Held in a ref because the socket
+  // handlers are wired once in a mount-time effect and would otherwise capture a
+  // stale closure.
+  const playMessageSound = useMessageSound()
+  const playMessageSoundRef = useRef(playMessageSound)
+  playMessageSoundRef.current = playMessageSound
+
   const ws = useRef<WebSocket | null>(null)
   const attempt = useRef(0)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -142,6 +154,17 @@ export function WSProvider({ children }: { children: ReactNode }) {
     const key = convKey(serverId, channel)
     const turnId: string | undefined =
       'turn_id' in event ? (event.turn_id as string | undefined) : undefined
+
+    // New-message chime: a fresh incoming message (text or file). role !== 'user'
+    // excludes the user's own echoes; the throttle inside the hook collapses any
+    // reconnect-replay burst into a single ding. Suppressed for muted servers —
+    // looked up async so we don't block event persistence; on a read error we
+    // fail open and still chime. The hook's throttle absorbs the lookup latency.
+    if ((event.type === 'message_start' || event.type === 'file') && event.role !== 'user') {
+      getServer(db, serverId)
+        .then((srv) => { if (!isServerMuted(srv)) playMessageSoundRef.current() })
+        .catch(() => playMessageSoundRef.current())
+    }
 
     // Touch both the server and channel rows. Server first — the channels table
     // has a FK to servers(id). This is also the auto-discovery path: a channel

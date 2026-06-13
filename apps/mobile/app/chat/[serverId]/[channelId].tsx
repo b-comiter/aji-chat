@@ -13,15 +13,15 @@
  *
  * See docs/chat-scroll-architecture.md for full design rationale.
  */
-import { useCallback, useMemo, useRef, useState } from 'react'
-import { Alert, Animated } from 'react-native'
-import { useLocalSearchParams } from 'expo-router'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Alert, Animated, View } from 'react-native'
+import { useLocalSearchParams, useFocusEffect } from 'expo-router'
 import * as ImagePicker from 'expo-image-picker'
 import * as DocumentPicker from 'expo-document-picker'
 import * as Clipboard from 'expo-clipboard'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useDB } from '../../../db/DBProvider'
-import { serverDisplayName, DEFAULT_CHANNEL, deleteItem } from '../../../db/database'
+import { serverDisplayName, DEFAULT_CHANNEL, deleteItem, getChannelLastRead, markChannelRead } from '../../../db/database'
 import { useWS } from '../../../context/WebSocketContext'
 import { useTheme } from '../../../context/ThemeContext'
 import type { Item } from '../../../hooks/chatTypes'
@@ -34,6 +34,10 @@ import { MessageList } from '../../../components/chat/MessageList'
 import type { MessageListHandle } from '../../../components/chat/MessageList'
 import { CommandPicker } from '../../../components/chat/CommandPicker'
 import { Row } from '../../../components/chat/MessageRow'
+import { avatarInitials } from '../../../components/chat/Avatar'
+import { DaySeparator } from '../../../components/chat/DaySeparator'
+import { NewMessagesDivider } from '../../../components/chat/NewMessagesDivider'
+import { sameCalendarDay, formatDaySeparator } from '../../../components/chat/timeHelpers'
 import { MessageActionMenu, messageCopyText } from '../../../components/chat/MessageActionMenu'
 import type { MessageMenuTarget, Rect } from '../../../components/chat/MessageActionMenu'
 import { ToolSheet } from '../../../components/chat/ToolSheet'
@@ -73,10 +77,39 @@ export default function ChatScreen() {
     commands,
     hasMoreOlder,
     loadOlder,
-  } = useChatSession(resolvedServerId, resolvedChannel, db, conn, subscribe, sendEvent)
+  } = useChatSession(resolvedServerId, resolvedChannel, db, subscribe)
 
   const { sendMessage, sendAudio, sendAttachment, respond } = useChatActions({ chatId: resolvedServerId, channel: resolvedChannel, db, conn, sendEvent, items, setItems })
   const kbOffset = useKeyboardOffset(safeBottom)
+
+  // Capture the channel's unread baseline (last_read_at) BEFORE clearing it, so
+  // the "new messages" divider can sit above the first message the user hadn't
+  // seen. `openedAt` bounds the divider to messages that were already waiting at
+  // open — anything created after (a live reply, or the user's own send) is seen
+  // in real time and must not trigger a divider. Re-runs when the target changes.
+  const [unreadBaseline, setUnreadBaseline] = useState<number | null>(null)
+  const [openedAt, setOpenedAt] = useState<number | null>(null)
+  useEffect(() => {
+    if (!resolvedServerId) { setUnreadBaseline(null); setOpenedAt(null); return }
+    let cancelled = false
+    getChannelLastRead(db, resolvedServerId, resolvedChannel)
+      .then((ts) => {
+        if (cancelled) return
+        setUnreadBaseline(ts)
+        setOpenedAt(Date.now())
+        markChannelRead(db, resolvedServerId, resolvedChannel).catch(() => {})
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [db, resolvedServerId, resolvedChannel])
+
+  // Re-mark read on blur so messages that streamed in while viewing are cleared
+  // from the home + channel-list badges when the user leaves.
+  useFocusEffect(
+    useCallback(() => () => {
+      if (resolvedServerId) markChannelRead(db, resolvedServerId, resolvedChannel).catch(() => {})
+    }, [db, resolvedServerId, resolvedChannel]),
+  )
 
   const toolsByAgentMsgId = useMemo(() => {
     const map = new Map<string, Item[]>()
@@ -149,6 +182,44 @@ export default function ChatScreen() {
     return map
   }, [displayItems])
 
+  // Label for the day-separator above an item that opens a new calendar day.
+  // Computed over chronological items; items without a createdAt are skipped.
+  const daySeparators = useMemo(() => {
+    const map = new Map<string, string>()
+    let prevTs: number | undefined
+    for (const item of displayItems) {
+      const ts = item.createdAt
+      if (ts == null) continue
+      if (prevTs == null || !sameCalendarDay(prevTs, ts)) {
+        map.set(item.id, formatDaySeparator(ts))
+      }
+      prevTs = ts
+    }
+    return map
+  }, [displayItems])
+
+  // Id of the first item the user hadn't seen when they opened the chat — gets a
+  // "New messages" divider above it. Constraints:
+  //  - there must be an already-read item before it (a never-opened channel and
+  //    a brand-new first message show no divider);
+  //  - it must predate `openedAt` — i.e. it was already waiting at open. Messages
+  //    created after open (the user's own sends, or a live streaming reply) are
+  //    seen in real time, so the first item past the baseline that is newer than
+  //    `openedAt` means nothing was actually unread → no divider.
+  const newMessagesDividerId = useMemo(() => {
+    if (unreadBaseline == null || openedAt == null) return null
+    let hasReadBefore = false
+    for (const it of displayItems) {
+      const ts = it.createdAt
+      if (ts == null) continue
+      if (ts > unreadBaseline) {
+        return ts <= openedAt && hasReadBefore ? it.id : null
+      }
+      hasReadBefore = true
+    }
+    return null
+  }, [displayItems, unreadBaseline, openedAt])
+
   const allCommands = useMemo(() => [...LOCAL_COMMANDS, ...commands], [commands])
 
   const trimmedDraft = useMemo(() => draft.trim(), [draft])
@@ -166,7 +237,7 @@ export default function ChatScreen() {
   }, [pickerQuery, allCommands])
 
   const serverName = resolvedServerId ? serverDisplayName(resolvedServerId) : 'Chat'
-  const avatarLabel = useMemo(() => getAvatarLabel(serverName), [serverName])
+  const avatarLabel = useMemo(() => avatarInitials(serverName), [serverName])
   const canSend = trimmedDraft.length > 0 && conn === 'connected' && (!hasPendingPrompt || trimmedDraft.startsWith('/'))
 
   const handleSend = useCallback(() => {
@@ -270,21 +341,33 @@ export default function ChatScreen() {
         item.kind === 'message' && item.role === 'assistant'
           ? toolsByAgentMsgId.get(item.id) ?? []
           : []
+      const daySeparator = daySeparators.get(item.id)
+      // Wrap in a plain View (not a Fragment): the inverted FlatList cell wrapper
+      // is `flexDirection: column-reverse`, which would otherwise render these
+      // siblings bottom-to-top (divider/day-separator below the Row). A single
+      // child View isolates our intended top-to-bottom order from that reversal.
       return (
-        <Row
-          item={item}
-          onChoose={respond}
-          isGroupStart={isGroupStart}
-          dividerKind={dividerKind}
-          tools={tools}
-          avatarLabel={avatarLabel}
-          onOpenTools={setIsToolSheetOpen}
-          onOpenFile={setSelectedFile}
-          onLongPressItem={handleLongPressItem}
-        />
+        <View>
+          {daySeparator ? <DaySeparator label={daySeparator} /> : null}
+          {item.id === newMessagesDividerId ? <NewMessagesDivider /> : null}
+          <Row
+            item={item}
+            onChoose={respond}
+            isGroupStart={isGroupStart}
+            dividerKind={dividerKind}
+            tools={tools}
+            avatarLabel={avatarLabel}
+            onOpenTools={setIsToolSheetOpen}
+            onOpenFile={setSelectedFile}
+            onLongPressItem={handleLongPressItem}
+            serverId={resolvedServerId}
+            channelId={resolvedChannel}
+            serverName={serverName}
+          />
+        </View>
       )
     },
-    [groupStartIds, dividerMap, toolsByAgentMsgId, respond, avatarLabel, handleLongPressItem],
+    [groupStartIds, dividerMap, daySeparators, newMessagesDividerId, toolsByAgentMsgId, respond, avatarLabel, handleLongPressItem, resolvedServerId, resolvedChannel, serverName],
   )
 
   return (
@@ -328,14 +411,6 @@ export default function ChatScreen() {
       />
     </Animated.View>
   )
-}
-
-function getAvatarLabel(displayName: string): string {
-  const trimmed = displayName.trim()
-  if (!trimmed) return 'AI'
-  const words = trimmed.split(/\s+/)
-  if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase()
-  return trimmed.slice(0, 2).toUpperCase()
 }
 
 /**

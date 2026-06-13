@@ -1,7 +1,10 @@
 import type { SQLiteDatabase } from 'expo-sqlite'
 import type { ChannelRow } from './schema'
 
-/** Upsert a channel row. Creates it if new; touches last_event_at otherwise.
+/** Ensure a channel row exists, without disturbing an existing one. Like
+ *  upsertServer, deliberately does NOT touch last_event_at on conflict — that
+ *  reconnect churn made channels show "just now" with no new message. Genuine
+ *  activity advances last_event_at only via updateChannelPreview.
  *  Caller MUST upsert the parent server row first (channels FK → servers). */
 export async function upsertChannel(
   db: SQLiteDatabase,
@@ -11,7 +14,7 @@ export async function upsertChannel(
   await db.runAsync(
     `INSERT INTO channels (server_id, channel_id, display_name, last_event_at)
      VALUES (?, ?, ?, ?)
-     ON CONFLICT(server_id, channel_id) DO UPDATE SET last_event_at = excluded.last_event_at`,
+     ON CONFLICT(server_id, channel_id) DO NOTHING`,
     serverId,
     channelId,
     channelId,
@@ -100,4 +103,58 @@ export async function deleteChannel(
 ): Promise<void> {
   await db.runAsync(`DELETE FROM items WHERE server_id = ? AND channel = ?`, serverId, channelId)
   await db.runAsync(`DELETE FROM channels WHERE server_id = ? AND channel_id = ?`, serverId, channelId)
+}
+
+/** The channel's last_read_at (unix ms) or null if never opened. Read BEFORE
+ *  markChannelRead to capture the baseline for the "new messages" divider. */
+export async function getChannelLastRead(
+  db: SQLiteDatabase,
+  serverId: string,
+  channelId: string,
+): Promise<number | null> {
+  const row = await db.getFirstAsync<{ last_read_at: number | null }>(
+    `SELECT last_read_at FROM channels WHERE server_id = ? AND channel_id = ?`,
+    serverId,
+    channelId,
+  )
+  return row?.last_read_at ?? null
+}
+
+/** Mark a channel read up to now — clears its unread count. No-op for an unknown
+ *  channel (does not bump last_event_at; opening shouldn't reorder the list). */
+export async function markChannelRead(
+  db: SQLiteDatabase,
+  serverId: string,
+  channelId: string,
+): Promise<void> {
+  await db.runAsync(
+    `UPDATE channels SET last_read_at = ? WHERE server_id = ? AND channel_id = ?`,
+    Date.now(),
+    serverId,
+    channelId,
+  )
+}
+
+/**
+ * Unread message count per channel for a server: message/file items created
+ * after each channel's last_read_at. Mirrors getUnreadCounts at the channel
+ * grain. A never-read channel counts all its messages.
+ */
+export async function getUnreadChannelCounts(
+  db: SQLiteDatabase,
+  serverId: string,
+): Promise<Record<string, number>> {
+  const rows = await db.getAllAsync<{ channel: string; n: number }>(
+    `SELECT items.channel AS channel, COUNT(*) AS n
+       FROM items
+       JOIN channels ON channels.server_id = items.server_id AND channels.channel_id = items.channel
+      WHERE items.server_id = ?
+        AND items.kind IN ('message', 'file')
+        AND items.created_at > COALESCE(channels.last_read_at, 0)
+      GROUP BY items.channel`,
+    serverId,
+  )
+  const out: Record<string, number> = {}
+  for (const r of rows) out[r.channel] = r.n
+  return out
 }

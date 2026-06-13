@@ -7,7 +7,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { spacing, typography } from '../../constants/theme'
 import type { ThemeColors } from '../../constants/theme'
 import { useTheme } from '../../context/ThemeContext'
-import { LANG_COLORS, codeBgColor } from './colorUtils'
+import { LANG_COLORS, codeBgColor } from '../colorUtils'
 import { highlightCodeLines, inferLanguage } from './highlight'
 
 // Whether code blocks render selectable text. Selectable is nice in the
@@ -168,15 +168,25 @@ function CodeViewer({
           </Pressable>
         </View>
         <ScrollView style={styles.vScroll} contentContainerStyle={styles.vContent}>
-          <ScrollView horizontal showsHorizontalScrollIndicator contentContainerStyle={styles.hContent}>
-            <View>
-              {lines.map((line, i) => (
-                <Text key={i} style={styles.codeLine} selectable>
-                  {line.length ? line : ' '}
-                </Text>
+          <View style={styles.codeRow}>
+            {/* Line-number gutter — outside the horizontal ScrollView so it stays
+                pinned while the code scrolls sideways, but inside the vertical
+                ScrollView so it scrolls up/down with the code. */}
+            <View style={styles.gutter}>
+              {lines.map((_, i) => (
+                <Text key={i} style={styles.gutterText} selectable={false}>{i + 1}</Text>
               ))}
             </View>
-          </ScrollView>
+            <ScrollView horizontal showsHorizontalScrollIndicator style={styles.hScroll}>
+              <View style={styles.codeLines}>
+                {lines.map((line, i) => (
+                  <Text key={i} style={styles.codeLine} selectable>
+                    {line.length ? line : ' '}
+                  </Text>
+                ))}
+              </View>
+            </ScrollView>
+          </View>
         </ScrollView>
       </View>
     </Modal>
@@ -252,8 +262,25 @@ function makeViewerStyles(colors: ThemeColors) {
     },
     closeBtn: { padding: spacing.xs },
     vScroll: { flex: 1 },
-    vContent: { padding: spacing.lg },
-    hContent: { minWidth: '100%' },
+    vContent: { paddingVertical: spacing.lg },
+    codeRow: { flexDirection: 'row' },
+    gutter: {
+      paddingLeft: spacing.lg,
+      paddingRight: 12,
+      alignItems: 'flex-end',
+      borderRightWidth: StyleSheet.hairlineWidth,
+      borderRightColor: colors.border,
+    },
+    // Same lineHeight as codeLine so each number aligns with its code row even
+    // though the digits are smaller and muted.
+    gutterText: {
+      fontFamily: typography.fontMono,
+      fontSize: typography.sizeSm,
+      lineHeight: typography.lineHeightCode,
+      color: colors.textDim,
+    },
+    hScroll: { flex: 1 },
+    codeLines: { paddingLeft: 12, paddingRight: spacing.lg },
     codeLine: {
       fontFamily: typography.fontMono,
       fontSize: typography.sizeMd,

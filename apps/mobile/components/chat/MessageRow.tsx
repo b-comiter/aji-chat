@@ -14,9 +14,46 @@ import { PromptRow } from './PromptRow'
 import { AudioMessage } from './AudioMessage'
 import { ImageMessage } from './ImageMessage'
 import { fileViewerKind, fileIconName, approxBytesFromBase64, formatBytes } from './fileHelpers'
+import type { FileViewerKind } from './fileHelpers'
+import { HtmlThumbnail } from './HtmlThumbnail'
+import { MarkdownThumbnail } from './MarkdownThumbnail'
+import { formatMessageTime } from './timeHelpers'
 import type { Rect } from './MessageActionMenu'
 
 type FileItem = Extract<Item, { kind: 'file' }>
+
+// Chat-bubble corner radius. Larger than radius.xl for a softer, more modern
+// bubble; the corner nearest the sender's avatar is squared off (radius.sm) as
+// a subtle "tail" so each bubble reads as anchored to its sender.
+const BUBBLE_RADIUS = 18
+
+// Tool-call affordance shown beneath an assistant message — opens the tool sheet.
+function ToolBadge({
+  count,
+  styles,
+  colors,
+  onPress,
+}: {
+  count: number
+  styles: ReturnType<typeof makeStyles>
+  colors: ThemeColors
+  onPress: () => void
+}) {
+  const plural = count === 1 ? '' : 's'
+  return (
+    <Pressable
+      onPress={onPress}
+      style={styles.toolBadge}
+      accessibilityRole="button"
+      accessibilityLabel={`Open ${count} tool call${plural}`}
+      accessibilityHint="Shows tool calls used for this response"
+    >
+      <Feather name="tool" size={12} color={colors.tool} />
+      <Text style={styles.toolBadgeText}>{count} tool call{plural}</Text>
+      <Feather name="chevron-right" size={13} color={colors.tool} />
+    </Pressable>
+  )
+}
 
 // Haptics no-op on web / on dev clients built before expo-haptics was linked
 // (the native call throws/rejects there) — mirrors the guard in DraggableList.
@@ -30,27 +67,31 @@ function safeHaptic() {
 
 function FileChip({
   item,
+  kind,
   styles,
   colors,
   onPress,
 }: {
   item: FileItem
+  kind: FileViewerKind
   styles: ReturnType<typeof makeStyles>
   colors: ThemeColors
   onPress: (item: FileItem) => void
 }) {
   const bytes = approxBytesFromBase64(item.data)
-  return (
-    <Pressable
-      onPress={() => onPress(item)}
-      style={styles.fileChip}
-      accessibilityRole="button"
-      accessibilityLabel={item.name ? `Open file ${item.name}` : 'Open file'}
-      accessibilityHint="Opens the file full screen"
-    >
+  // HTML + Markdown files get a rendered thumbnail above the meta row; everything
+  // else keeps the icon-only chip. Each thumbnail self-removes on failure (missing
+  // WebView, unreadable bytes), so this layout degrades to the plain chip with no
+  // extra handling here.
+  const thumbnail =
+    kind === 'html' ? <HtmlThumbnail item={item} />
+    : kind === 'markdown' ? <MarkdownThumbnail item={item} />
+    : null
+  const meta = (
+    <>
       <View style={styles.fileChipRow}>
         <View style={styles.fileIconBox}>
-          <Feather name={fileIconName(item) as any} size={20} color={colors.accent} />
+          <Feather name={fileIconName(item)} size={20} color={colors.accent} />
         </View>
         <View style={styles.fileChipMeta}>
           <Text style={styles.fileChipName} numberOfLines={1}>{item.name ?? item.mime}</Text>
@@ -59,6 +100,24 @@ function FileChip({
         <Feather name="chevron-right" size={18} color={colors.textDim} />
       </View>
       {item.text ? <Text style={styles.fileChipCaption}>{item.text}</Text> : null}
+    </>
+  )
+  return (
+    <Pressable
+      onPress={() => onPress(item)}
+      style={[styles.fileChip, thumbnail && styles.fileChipPreview]}
+      accessibilityRole="button"
+      accessibilityLabel={item.name ? `Open file ${item.name}` : 'Open file'}
+      accessibilityHint="Opens the file full screen"
+    >
+      {thumbnail ? (
+        <>
+          {thumbnail}
+          <View style={styles.fileChipBody}>{meta}</View>
+        </>
+      ) : (
+        meta
+      )}
     </Pressable>
   )
 }
@@ -73,9 +132,14 @@ type Props = {
   onOpenTools: (tools: Item[]) => void
   onOpenFile: (item: FileItem) => void
   onLongPressItem?: (item: Item, rect: Rect) => void
+  /** Source chat identity — forwarded to AudioMessage for the global mini-player. */
+  serverId?: string
+  channelId?: string
+  /** Display name of the source chat, used as the mini-player title fallback. */
+  serverName?: string
 }
 
-export const Row = memo(function Row({ item, onChoose, isGroupStart, dividerKind, tools, avatarLabel, onOpenTools, onOpenFile, onLongPressItem }: Props) {
+export const Row = memo(function Row({ item, onChoose, isGroupStart, dividerKind, tools, avatarLabel, onOpenTools, onOpenFile, onLongPressItem, serverId, channelId, serverName }: Props) {
   const { colors } = useTheme()
   const styles = useMemo(() => makeStyles(colors), [colors])
   // Ref on the bubble/content so the long-press can measure its on-screen rect
@@ -102,8 +166,8 @@ export const Row = memo(function Row({ item, onChoose, isGroupStart, dividerKind
       <View style={[styles.msgWrapper, dividerKind === 'light' && styles.msgBorderLight,
       dividerKind === 'heavy' && styles.msgBorderHeavy]}>
         {isGroupStart && (
-          <View style={[styles.msgMeta, isUser && styles.msgMetaUserRight]}>
-            {!isUser && <Avatar label={avatarLabel} variant="agent" />}
+          <View style={styles.msgMeta}>
+            {!isUser && <Avatar label={avatarLabel} variant="agent" seed={serverName} />}
           </View>
         )}
         <View testID="message-container" style={isUser ? styles.msgAlignRight : styles.msgAlignLeft}>
@@ -121,17 +185,7 @@ export const Row = memo(function Row({ item, onChoose, isGroupStart, dividerKind
                   {displayText}{!item.done && <Text style={styles.cursor}> ▍</Text>}
                 </Text>
                 {!isUser && hasTools && (
-                  <Pressable
-                    onPress={() => onOpenTools(tools)}
-                    style={styles.toolBadge}
-                    accessibilityRole="button"
-                    accessibilityLabel={`Open ${tools.length} tool call${tools.length === 1 ? '' : 's'}`}
-                    accessibilityHint="Shows tool calls used for this response"
-                  >
-                    <Text style={styles.toolBadgeText}>
-                      🔧 {tools.length} tool call{tools.length === 1 ? '' : 's'} ›
-                    </Text>
-                  </Pressable>
+                  <ToolBadge count={tools.length} styles={styles} colors={colors} onPress={() => onOpenTools(tools)} />
                 )}
               </View>
             </Pressable>
@@ -150,19 +204,12 @@ export const Row = memo(function Row({ item, onChoose, isGroupStart, dividerKind
                 </View>
               </Pressable>
               {hasTools && (
-                <Pressable
-                  onPress={() => onOpenTools(tools)}
-                  style={styles.toolBadge}
-                  accessibilityRole="button"
-                  accessibilityLabel={`Open ${tools.length} tool call${tools.length === 1 ? '' : 's'}`}
-                  accessibilityHint="Shows tool calls used for this response"
-                >
-                  <Text style={styles.toolBadgeText}>
-                    🔧 {tools.length} tool call{tools.length === 1 ? '' : 's'} ›
-                  </Text>
-                </Pressable>
+                <ToolBadge count={tools.length} styles={styles} colors={colors} onPress={() => onOpenTools(tools)} />
               )}
             </>
+          )}
+          {item.createdAt != null && (
+            <Text style={styles.time}>{formatMessageTime(item.createdAt)}</Text>
           )}
         </View>
 
@@ -177,8 +224,8 @@ export const Row = memo(function Row({ item, onChoose, isGroupStart, dividerKind
       <View style={[styles.msgWrapper, dividerKind === 'light' && styles.msgBorderLight,
       dividerKind === 'heavy' && styles.msgBorderHeavy]}>
         {isGroupStart && (
-          <View style={[styles.msgMeta, isUser && styles.msgMetaUserRight]}>
-            {!isUser && <Avatar label={avatarLabel} variant="agent" />}
+          <View style={styles.msgMeta}>
+            {!isUser && <Avatar label={avatarLabel} variant="agent" seed={serverName} />}
           </View>
         )}
         <View style={isUser ? styles.msgAlignRight : styles.msgAlignLeft}>
@@ -187,12 +234,15 @@ export const Row = memo(function Row({ item, onChoose, isGroupStart, dividerKind
               <ImageMessage item={item} tint={isUser} onPress={onOpenFile} />
             ) : kind === 'audio' ? (
               <View style={[styles.bubble, styles.fileBubble, isUser ? styles.bubbleUser : styles.bubbleAgent]}>
-                <AudioMessage item={item} tint={isUser} />
+                <AudioMessage item={item} tint={isUser} serverId={serverId} channelId={channelId} fallbackTitle={serverName} />
               </View>
             ) : (
-              <FileChip item={item} styles={styles} colors={colors} onPress={onOpenFile} />
+              <FileChip item={item} kind={kind} styles={styles} colors={colors} onPress={onOpenFile} />
             )}
           </Pressable>
+          {item.createdAt != null && (
+            <Text style={styles.time}>{formatMessageTime(item.createdAt)}</Text>
+          )}
         </View>
       </View>
     )
@@ -226,15 +276,16 @@ function makeStyles(colors: ThemeColors) {
       marginBottom: spacing.lg,
     },
     msgMeta: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.sm },
-    msgMetaUserRight: {},
     msgAlignLeft: { alignItems: 'flex-start' },
     msgAlignRight: { alignItems: 'flex-end' },
-    bubble: { borderRadius: radius.xl, paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
+    bubble: { borderRadius: BUBBLE_RADIUS, paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
     markdownContainer: {
-      backgroundColor: colors.surface,
+      backgroundColor: colors.assistantBubbleBg,
       borderWidth: 1,
-      borderColor: colors.border,
-      borderRadius: radius.xl,
+      borderColor: colors.assistantBubbleBorder,
+      borderRadius: BUBBLE_RADIUS,
+      // Tail corner nearest the avatar — anchors the bubble to its sender.
+      borderTopLeftRadius: radius.sm,
       paddingHorizontal: spacing.lg,
       paddingVertical: spacing.md,
       alignSelf: 'stretch',
@@ -248,6 +299,20 @@ function makeStyles(colors: ThemeColors) {
       borderWidth: 1,
       borderColor: colors.border,
       borderRadius: radius.xl,
+      paddingHorizontal: spacing.md,
+      paddingVertical: spacing.md,
+      overflow: 'hidden',
+    },
+    // Preview chip (HTML/Markdown): the thumbnail bleeds to the chip edges
+    // (clipped by overflow), so the outer padding moves onto the meta body.
+    fileChipPreview: {
+      maxWidth: 300,
+      gap: 0,
+      paddingHorizontal: 0,
+      paddingVertical: 0,
+    },
+    fileChipBody: {
+      gap: spacing.sm,
       paddingHorizontal: spacing.md,
       paddingVertical: spacing.md,
     },
@@ -272,16 +337,26 @@ function makeStyles(colors: ThemeColors) {
     fileChipMeta: { flex: 1, gap: 2 },
     fileChipName: { color: colors.text, fontSize: typography.sizeMd, fontWeight: typography.weightSemibold },
     fileChipSub: { color: colors.textDim, fontSize: typography.sizeSm },
-    bubbleAgent: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
-    bubbleUser: { backgroundColor: colors.accent, maxWidth: '85%' },
-    bubbleText: { color: colors.text, fontSize: typography.sizeLg, lineHeight: typography.lineHeightNormal },
-    bubbleTextUser: { color: '#fff' },
+    bubbleAgent: {
+      backgroundColor: colors.assistantBubbleBg,
+      borderWidth: 1,
+      borderColor: colors.assistantBubbleBorder,
+      borderTopLeftRadius: radius.sm,
+    },
+    bubbleUser: { backgroundColor: colors.userBubbleBg, maxWidth: '85%', borderTopRightRadius: radius.sm },
+    bubbleText: { color: colors.assistantBubbleText, fontSize: typography.sizeLg, lineHeight: typography.lineHeightNormal },
+    bubbleTextUser: { color: colors.userBubbleText },
+    // Per-message clock; aligns to the message side via the container's alignItems.
+    time: { color: colors.textDim, fontSize: typography.sizeXs, marginTop: 3 },
     cursor: { color: colors.accent },
     toolBadge: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 5,
       backgroundColor: colors.toolDim,
       borderRadius: 999,
-      paddingHorizontal: 9,
-      paddingVertical: 4,
+      paddingHorizontal: 10,
+      paddingVertical: 5,
       marginTop: spacing.sm,
       alignSelf: 'flex-start',
     },

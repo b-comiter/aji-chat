@@ -68,7 +68,7 @@ export const ajiLightColors = {
   textOnAccent: '#0F172A',
 
   // Accent
-  accent:     '#D6B67A',
+  accent:     '#C9A24E',
   accentDim:  '#F7E8C6',
 
   // Semantic
@@ -81,9 +81,12 @@ export const ajiLightColors = {
   toolDim:    '#E8EEF9',
 
   // Chat bubbles
-  assistantBubbleBg:    '#1B3563',
-  assistantBubbleBorder:'#223F73',
-  assistantBubbleText:  '#F8FAFC',
+  // Assistant content renders markdown (code blocks, links) tuned for a light
+  // surface, so the assistant bubble stays on `surface` rather than the brand
+  // navy — the gold user bubble + accents carry the identity instead.
+  assistantBubbleBg:    '#FFFFFF',
+  assistantBubbleBorder:'#D9DFEA',
+  assistantBubbleText:  '#111827',
   userBubbleBg:         '#F7E8C6',
   userBubbleText:       '#0F172A',
 } as const
@@ -155,6 +158,7 @@ export const darkColors = {
   textMuted:  '#8b949e',   // --text-muted
   textDim:    '#6e7681',   // --text-dim
   textFaint:  '#3d444d',   // chevrons / empty glyphs (native-only, no CSS var)
+  textOnAccent: '#ffffff', // text/glyphs on accent-filled buttons
 
   // Accent
   accent:     '#5e8eff',   // --accent
@@ -168,6 +172,13 @@ export const darkColors = {
   // Tool / AI
   tool:       '#b392f0',   // --tool
   toolDim:    '#4c3b73',   // --tool-dim
+
+  // Chat bubbles
+  assistantBubbleBg:    '#161b22',
+  assistantBubbleBorder:'#21262d',
+  assistantBubbleText:  '#e6edf3',
+  userBubbleBg:         '#5e8eff',
+  userBubbleText:       '#ffffff',
 } as const
 
 // ---------------------------------------------------------------------------
@@ -192,6 +203,7 @@ export const lightColors = {
   textMuted:  '#636c76',
   textDim:    '#818b98',
   textFaint:  '#c9d1d9',
+  textOnAccent: '#ffffff',
 
   // Accent
   accent:     '#0969da',
@@ -205,6 +217,13 @@ export const lightColors = {
   // Tool / AI
   tool:       '#8250df',
   toolDim:    '#f1e8ff',
+
+  // Chat bubbles
+  assistantBubbleBg:    '#f6f8fa',
+  assistantBubbleBorder:'#d0d7de',
+  assistantBubbleText:  '#1f2328',
+  userBubbleBg:         '#0969da',
+  userBubbleText:       '#ffffff',
 } as const
 
 /** Shared shape for both themes — use as the parameter type in makeStyles().

@@ -59,8 +59,15 @@ export function fileViewerKind(file: { mime: string; name?: string }): FileViewe
   return 'none'
 }
 
-/** Feather icon name for a file chip, chosen by viewer kind. */
-export function fileIconName(file: { mime: string; name?: string }): string {
+/**
+ * Feather icon name for a file chip, chosen by viewer kind. The return type is
+ * the exact set of glyphs we use (a subset of Feather's names) so call sites can
+ * pass it to <Feather name=…> without an `as any` cast. Kept as a string-literal
+ * union rather than importing Feather's type, so this stays Expo-import-free.
+ */
+export type FileIconName = 'image' | 'file-text' | 'code' | 'music' | 'file'
+
+export function fileIconName(file: { mime: string; name?: string }): FileIconName {
   switch (fileViewerKind(file)) {
     case 'image': return 'image'
     case 'pdf': return 'file-text'

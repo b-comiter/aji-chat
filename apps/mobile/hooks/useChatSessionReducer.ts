@@ -76,7 +76,7 @@ export function reduceItemsForServerEvent(
       }
       return deps.capWindow([
         ...prev,
-        { kind: 'message', id: event.id, role: 'assistant', text: '', done: true, turnId },
+        { kind: 'message', id: event.id, role: 'assistant', text: '', done: true, turnId, createdAt: Date.now() },
       ])
     }
 
@@ -91,6 +91,7 @@ export function reduceItemsForServerEvent(
           args: event.args,
           done: false,
           turnId,
+          createdAt: Date.now(),
         },
       ])
 
@@ -115,6 +116,7 @@ export function reduceItemsForServerEvent(
           text: event.text,
           done: true,
           turnId,
+          createdAt: Date.now(),
         },
       ])
 
@@ -129,6 +131,7 @@ export function reduceItemsForServerEvent(
           message: event.message,
           options: event.options,
           turnId,
+          createdAt: Date.now(),
         },
       ])
 
@@ -143,6 +146,7 @@ export function reduceItemsForServerEvent(
           message: event.question,
           options: event.choices,
           turnId,
+          createdAt: Date.now(),
         },
       ])
 

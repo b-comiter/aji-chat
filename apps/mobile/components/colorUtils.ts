@@ -1,4 +1,6 @@
-// Color helpers shared by the markdown code-block and table renderers.
+// Shared color helpers. hexToRgba is used app-wide (markdown renderers, the
+// audio bubble); LANG_COLORS / codeBgColor are markdown code-block specifics
+// that live here to share the hexToRgba primitive.
 
 // Brand colors for popular languages — used as the dot indicator in a code
 // block header.

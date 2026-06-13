@@ -13,6 +13,8 @@ import { getSetting, setSetting } from '../db/database'
 import {
   darkColors,
   lightColors,
+  ajiDarkColors,
+  ajiLightColors,
   darkTokenColors,
   lightTokenColors,
   type ThemeColors,
@@ -20,18 +22,32 @@ import {
 
 export type ThemePreference = 'auto' | 'light' | 'dark'
 
+/** Color family (palette), independent of the light/dark mode preference.
+ *  'aji' = premium navy + gold; 'classic' = the original GitHub-inspired set. */
+export type PaletteFamily = 'aji' | 'classic'
+
+/** Maps a palette family + resolved light/dark scheme to a concrete palette. */
+const PALETTES: Record<PaletteFamily, { light: ThemeColors; dark: ThemeColors }> = {
+  aji:     { light: ajiLightColors, dark: ajiDarkColors },
+  classic: { light: lightColors,    dark: darkColors },
+}
+
 interface ThemeContextValue {
   colors: ThemeColors
   tokenColors: Record<string, string>
   themePreference: ThemePreference
   setThemePreference: (pref: ThemePreference) => Promise<void>
+  paletteFamily: PaletteFamily
+  setPaletteFamily: (family: PaletteFamily) => Promise<void>
 }
 
 const ThemeContext = createContext<ThemeContextValue>({
-  colors: darkColors,
+  colors: ajiDarkColors,
   tokenColors: darkTokenColors,
   themePreference: 'auto',
   setThemePreference: async () => {},
+  paletteFamily: 'aji',
+  setPaletteFamily: async () => {},
 })
 
 export function useTheme(): ThemeContextValue {
@@ -42,14 +58,20 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const db = useDB()
   const systemScheme = useColorScheme() // 'light' | 'dark' | null
   const [preference, setPreferenceState] = useState<ThemePreference>('auto')
+  const [palette, setPaletteState] = useState<PaletteFamily>('aji')
 
-  // Load saved preference from the settings table on mount.
-  // Falls back to 'auto' (system) while the async read is in flight — no flash
-  // for the common case where the saved preference matches the system theme.
+  // Load saved preferences from the settings table on mount.
+  // Falls back to defaults ('auto' mode, 'aji' palette) while the async read is
+  // in flight — no flash for the common case where saved values match defaults.
   useEffect(() => {
     getSetting(db, 'theme').then((saved) => {
       if (saved === 'light' || saved === 'dark' || saved === 'auto') {
         setPreferenceState(saved)
+      }
+    })
+    getSetting(db, 'palette').then((saved) => {
+      if (saved === 'aji' || saved === 'classic') {
+        setPaletteState(saved)
       }
     })
   }, [db])
@@ -57,6 +79,11 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const setThemePreference = useCallback(async (pref: ThemePreference) => {
     setPreferenceState(pref)
     await setSetting(db, 'theme', pref)
+  }, [db])
+
+  const setPaletteFamily = useCallback(async (family: PaletteFamily) => {
+    setPaletteState(family)
+    await setSetting(db, 'palette', family)
   }, [db])
 
   // Resolve actual scheme: an explicit 'light'/'dark' choice wins outright;
@@ -68,11 +95,13 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       : preference
 
   const value = useMemo<ThemeContextValue>(() => ({
-    colors:           resolvedScheme === 'light' ? lightColors : darkColors,
+    colors:           PALETTES[palette][resolvedScheme],
     tokenColors:      resolvedScheme === 'light' ? lightTokenColors : darkTokenColors,
     themePreference:  preference,
     setThemePreference,
-  }), [resolvedScheme, preference, setThemePreference])
+    paletteFamily:    palette,
+    setPaletteFamily,
+  }), [resolvedScheme, palette, preference, setThemePreference, setPaletteFamily])
 
   return (
     <ThemeContext.Provider value={value}>

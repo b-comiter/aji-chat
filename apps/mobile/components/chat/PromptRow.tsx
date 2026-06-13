@@ -423,6 +423,6 @@ function makeStyles(colors: ThemeColors) {
       justifyContent: 'center',
     },
     textOptBtnOff: { backgroundColor: colors.border },
-    textOptBtnText: { color: '#fff', fontSize: 18, fontWeight: typography.weightBold },
+    textOptBtnText: { color: colors.textOnAccent, fontSize: 18, fontWeight: typography.weightBold },
   })
 }

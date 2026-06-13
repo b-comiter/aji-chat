@@ -1,99 +1,156 @@
 /**
- * Circular server avatar with a status ring.
+ * Circular server avatar.
  *
  * `avatar` encodes the source: `data:<base64>` (a picked image), `emoji:<glyph>`
- * (a preset), or null/undefined (fall back to initials of `label`). The ring
- * color carries the server's live status, so this can replace the standalone
- * status dot on the home screen without losing that signal.
+ * (a preset), or null/undefined (fall back to initials of `label`). The initials
+ * fallback is filled with a per-server seed color (hashed from `label`) so
+ * different agents are visually distinct — matching the chat message `Avatar`.
+ *
+ * An optional presence dot sits at the bottom-right, color-coded to the agent's
+ * live status (gold = working/thinking, green = idle, slate = never active). The
+ * dot wears a ring in the row's background color so it reads as floating on top.
  */
-import { useMemo } from 'react'
-import { Image, StyleSheet, Text, View } from 'react-native'
+import { useEffect, useMemo, useRef } from 'react'
+import { Animated, Easing, Image, StyleSheet, Text, View } from 'react-native'
 import { useTheme } from '../context/ThemeContext'
 import { radius, typography } from '../constants/theme'
 import type { ThemeColors } from '../constants/theme'
+import { avatarInitials, avatarSeedColor } from './chat/Avatar'
 
 export const AVATAR_PRESETS = ['🤖', '🧠', '⚡', '🛰️', '📡', '🦊', '🐙', '🌙', '🔧', '📨'] as const
 
-function statusColor(status: string, colors: ThemeColors): string {
-  switch (status) {
-    case 'thinking':
-    case 'working':
-      return colors.warn
-    case 'idle':
-      return colors.success
-    default:
-      return colors.textDim
-  }
-}
-
-function initials(label: string): string {
-  const t = label.trim()
-  if (!t) return '?'
-  const words = t.split(/\s+/)
-  if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase()
-  return t.slice(0, 2).toUpperCase()
-}
+const PULSE_DURATION_MS = 1600
+const PULSE_MAX_SCALE = 2.6
 
 export function ServerAvatar({
   avatar,
-  status = 'idle',
   label,
   size = 44,
-  showStatus = true,
+  presenceColor = null,
+  ringColor,
+  pulse = false,
 }: {
   avatar?: string | null
-  status?: string
   label: string
   size?: number
-  showStatus?: boolean
+  /** Status presence dot color (bottom-right); null hides the dot. */
+  presenceColor?: string | null
+  /** Ring drawn around the presence dot — should match the row background so the
+   *  dot reads as lifted. Defaults to the screen background. */
+  ringColor?: string
+  /** Animate an expanding halo from the presence dot (use while the agent is
+   *  actively working/thinking, so liveness reads as motion not just color). */
+  pulse?: boolean
 }) {
   const { colors } = useTheme()
   const styles = useMemo(() => makeStyles(colors), [colors])
 
-  const ring = showStatus ? statusColor(status, colors) : colors.border
-  const inner = size - 6
+  const isImage = avatar?.startsWith('data:')
+  const isEmoji = avatar?.startsWith('emoji:')
 
-  const content = (() => {
-    if (avatar?.startsWith('data:')) {
-      return <Image source={{ uri: avatar }} style={{ width: inner, height: inner, borderRadius: inner / 2 }} />
+  // Seed color backs the initials fallback. Image covers its own background;
+  // emoji keeps a neutral surface so the glyph reads.
+  const bg = isImage ? 'transparent' : isEmoji ? colors.surface2 : avatarSeedColor(label)
+
+  // Presence dot scales with the avatar so it stays proportional at any size.
+  const dotSize = Math.round(size * 0.28)
+  const ring = Math.max(2, Math.round(size * 0.055))
+
+  // Expanding-halo loop for the active state. Mirrors StatusIcon's pulse so the
+  // two liveness cues animate identically. Native-driver scale+opacity only.
+  const pulseValue = useRef(new Animated.Value(0)).current
+  useEffect(() => {
+    if (!pulse || !presenceColor) {
+      pulseValue.stopAnimation()
+      pulseValue.setValue(0)
+      return
     }
-    if (avatar?.startsWith('emoji:')) {
-      return <Text style={{ fontSize: inner * 0.55 }}>{avatar.slice('emoji:'.length)}</Text>
-    }
-    return <Text style={[styles.initials, { fontSize: inner * 0.36 }]}>{initials(label)}</Text>
-  })()
+    const animation = Animated.loop(
+      Animated.timing(pulseValue, {
+        toValue: 1,
+        duration: PULSE_DURATION_MS,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }),
+    )
+    animation.start()
+    return () => animation.stop()
+  }, [pulse, presenceColor, pulseValue])
+
+  const haloStyle = useMemo(
+    () => ({
+      transform: [{ scale: pulseValue.interpolate({ inputRange: [0, 1], outputRange: [1, PULSE_MAX_SCALE] }) }],
+      opacity: pulseValue.interpolate({ inputRange: [0, 1], outputRange: [0.5, 0] }),
+    }),
+    [pulseValue],
+  )
+
+  const content = isImage ? (
+    <Image source={{ uri: avatar! }} style={{ width: size, height: size, borderRadius: size / 2 }} />
+  ) : isEmoji ? (
+    <Text style={{ fontSize: size * 0.5 }}>{avatar!.slice('emoji:'.length)}</Text>
+  ) : (
+    <Text style={[styles.initials, { fontSize: size * 0.38 }]}>{avatarInitials(label)}</Text>
+  )
 
   return (
-    <View
-      style={[
-        styles.ring,
-        { width: size, height: size, borderRadius: size / 2, borderColor: ring },
-      ]}
-    >
-      <View style={[styles.inner, { width: inner, height: inner, borderRadius: inner / 2 }]}>
+    <View style={{ width: size, height: size }}>
+      <View
+        style={[
+          styles.circle,
+          { width: size, height: size, borderRadius: size / 2, backgroundColor: bg },
+        ]}
+      >
         {content}
       </View>
+      {presenceColor ? (
+        <View style={[styles.presenceWrap, { width: dotSize, height: dotSize }]} pointerEvents="none">
+          {pulse ? (
+            <Animated.View
+              style={[
+                styles.halo,
+                { width: dotSize, height: dotSize, borderRadius: dotSize / 2, backgroundColor: presenceColor },
+                haloStyle,
+              ]}
+            />
+          ) : null}
+          <View
+            style={{
+              width: dotSize,
+              height: dotSize,
+              borderRadius: dotSize / 2,
+              backgroundColor: presenceColor,
+              borderWidth: ring,
+              borderColor: ringColor ?? colors.bg,
+            }}
+          />
+        </View>
+      ) : null}
     </View>
   )
 }
 
 function makeStyles(colors: ThemeColors) {
   return StyleSheet.create({
-    ring: {
-      borderWidth: 2,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    inner: {
-      backgroundColor: colors.surface2 ?? colors.surface,
+    circle: {
       alignItems: 'center',
       justifyContent: 'center',
       overflow: 'hidden',
       borderRadius: radius.full,
     },
     initials: {
-      color: colors.textMuted,
+      color: '#ffffff',
       fontWeight: typography.weightSemibold,
+    },
+    presenceWrap: {
+      position: 'absolute',
+      bottom: -1,
+      right: -1,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    halo: {
+      position: 'absolute',
     },
   })
 }

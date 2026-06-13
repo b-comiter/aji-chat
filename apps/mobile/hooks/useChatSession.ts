@@ -22,7 +22,7 @@
  * See docs/chat-scroll-architecture.md for full design rationale.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { AgentStatus, ClientEvent, CommandItem, ServerEvent } from '@aji/protocol'
+import type { AgentStatus, CommandItem, ServerEvent } from '@aji/protocol'
 import type { SQLiteDatabase } from 'expo-sqlite'
 import { loadCachedCommands, loadOlderThan, loadRecentItems } from '../db/database'
 import type { ItemRow } from '../db/database'
@@ -43,15 +43,11 @@ type SubscribeFn = (
   handler: (event: ServerEvent) => void,
 ) => () => void
 
-type SendEventFn = (event: ClientEvent) => void
-
 export function useChatSession(
   chatId: string | undefined,
   channel: string,
   db: SQLiteDatabase,
-  conn: 'connected' | 'connecting' | 'disconnected',
   subscribe: SubscribeFn,
-  _sendEvent: SendEventFn,
 ) {
   const [items, setItems] = useState<Item[]>([])
   const [agentStatus, setAgentStatus] = useState<AgentStatus>('idle')

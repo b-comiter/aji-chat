@@ -14,6 +14,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import * as ImagePicker from 'expo-image-picker'
 import { useDB } from '../../../db/DBProvider'
 import { useTheme } from '../../../context/ThemeContext'
+import { useAudioPlayerContext } from '../../../context/AudioPlayerContext'
+import { MINI_PLAYER_BAR_HEIGHT } from '../../../components/audio/MiniPlayer'
 import { ServerAvatar, AVATAR_PRESETS } from '../../../components/ServerAvatar'
 import {
   getServer,
@@ -43,7 +45,10 @@ export default function ServerSettingsScreen() {
   const db = useDB()
   const { colors } = useTheme()
   const { top: safeTop, bottom: safeBottom } = useSafeAreaInsets()
+  const { activeTrack } = useAudioPlayerContext()
   const styles = useMemo(() => makeStyles(colors), [colors])
+  // Push content below the floating mini-player when it's active (see AppHeader).
+  const topPad = safeTop + (activeTrack ? MINI_PLAYER_BAR_HEIGHT : 0)
 
   const [row, setRow] = useState<ServerRow | null>(null)
   const [name, setName] = useState('')
@@ -114,7 +119,7 @@ export default function ServerSettingsScreen() {
   }, [db, id, name, row, reload])
 
   return (
-    <View style={[styles.screen, { paddingTop: safeTop }]}>
+    <View style={[styles.screen, { paddingTop: topPad }]}>
       <View style={styles.header}>
         <Pressable onPress={() => router.back()} style={styles.backBtn} hitSlop={8} accessibilityLabel="Go back">
           <Text style={styles.backText}>‹</Text>
@@ -127,7 +132,7 @@ export default function ServerSettingsScreen() {
         <Text style={styles.sectionLabel}>Avatar</Text>
         <View style={styles.card}>
           <View style={styles.avatarRow}>
-            <ServerAvatar avatar={row?.avatar} status={row?.last_status ?? 'idle'} label={name || 'AI'} size={64} showStatus={false} />
+            <ServerAvatar avatar={row?.avatar} label={name || 'AI'} size={64} />
             <View style={styles.avatarActions}>
               <Pressable style={styles.btn} onPress={() => pickImage().catch(console.warn)}>
                 <Text style={styles.btnText}>Choose photo</Text>

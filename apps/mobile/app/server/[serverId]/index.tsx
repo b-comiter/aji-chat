@@ -16,6 +16,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Alert,
+  FlatList,
   Modal,
   Pressable,
   StyleSheet,
@@ -24,22 +25,22 @@ import {
   View,
 } from 'react-native'
 import { Feather } from '@expo/vector-icons'
-import { router, useLocalSearchParams } from 'expo-router'
+import { router, useLocalSearchParams, useFocusEffect } from 'expo-router'
 import { useDB } from '../../../db/DBProvider'
 import { useWS } from '../../../context/WebSocketContext'
 import { useTheme } from '../../../context/ThemeContext'
 import { AppHeader } from '../../../components/headers/AppHeader'
 import { StatusIcon } from '../../../components/headers/StatusIcon'
 import { ServerAvatar } from '../../../components/ServerAvatar'
-import { DraggableList } from '../../../components/chat/DraggableList'
+import { SwipeableRow, type SwipeAction, type OpenSide } from '../../../components/SwipeableRow'
 import {
   serverDisplayName,
   getChannelsForServer,
+  getUnreadChannelCounts,
   getServer,
   isMonoChannel,
   upsertChannel,
   deleteChannel,
-  setChannelOrder,
   DEFAULT_CHANNEL,
   type ChannelRow,
   type ServerRow,
@@ -48,9 +49,8 @@ import type { ServerEvent } from '@aji/protocol'
 import { spacing, typography, radius } from '../../../constants/theme'
 import type { ThemeColors } from '../../../constants/theme'
 
-// Fixed channel-row height — DraggableList absolutely positions rows by index,
-// so this must match the rendered row's total height.
-const ROW_H = 68
+// Slab tint for the delete action — same convention as the server list.
+const ACTION_TINTS = { delete: '#C0453E' } as const
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -60,25 +60,13 @@ function relativeTime(ts: number | null): string {
   if (!ts) return ''
   const diff = Date.now() - ts
   const mins = Math.floor(diff / 60000)
-  if (mins < 1) return 'just now'
-  if (mins < 60) return `${mins}m ago`
+  if (mins < 1) return 'now'
+  if (mins < 60) return `${mins}m`
   const hours = Math.floor(mins / 60)
-  if (hours < 24) return `${hours}h ago`
+  if (hours < 24) return `${hours}h`
   const days = Math.floor(hours / 24)
-  if (days === 1) return 'Yesterday'
-  return `${days}d ago`
-}
-
-function statusColor(status: string, colors: ThemeColors): string {
-  switch (status) {
-    case 'thinking':
-    case 'working':
-      return colors.warn
-    case 'idle':
-      return colors.success
-    default:
-      return colors.textDim
-  }
+  if (days === 1) return '1d'
+  return `${days}d`
 }
 
 /** Normalize a user-typed channel name into a safe channel id. */
@@ -107,10 +95,12 @@ export default function ServerChannelsScreen() {
   const { colors } = useTheme()
   const styles = useMemo(() => makeStyles(colors), [colors])
   const [channels, setChannels] = useState<ChannelRow[]>([])
+  const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({})
   const [server, setServer] = useState<ServerRow | null>(null)
   const [creating, setCreating] = useState(false)
   const [newName, setNewName] = useState('')
-  const [editing, setEditing] = useState(false)
+  // Which row + side has its swipe drawer open (one at a time).
+  const [open, setOpen] = useState<{ id: string; side: OpenSide } | null>(null)
 
   const serverName = resolvedServerId ? serverDisplayName(resolvedServerId) : 'Server'
 
@@ -130,6 +120,8 @@ export default function ServerChannelsScreen() {
       await upsertChannel(db, resolvedServerId!, DEFAULT_CHANNEL)
       const rows = await getChannelsForServer(db, resolvedServerId!)
       if (!cancelled) setChannels(rows)
+      const counts = await getUnreadChannelCounts(db, resolvedServerId!)
+      if (!cancelled) setUnreadCounts(counts)
     }
     load().catch((err) => console.warn('[ServerChannels] load failed', err))
 
@@ -137,6 +129,19 @@ export default function ServerChannelsScreen() {
       cancelled = true
     }
   }, [db, resolvedServerId])
+
+  // Refresh unread counts whenever the screen regains focus — covers returning
+  // from a channel chat, which marks that channel read with no WS event to catch.
+  useFocusEffect(
+    useCallback(() => {
+      if (!resolvedServerId) return
+      let cancelled = false
+      getUnreadChannelCounts(db, resolvedServerId)
+        .then((counts) => { if (!cancelled) setUnreadCounts(counts) })
+        .catch((err) => console.warn('[ServerChannels] unread refresh failed', err))
+      return () => { cancelled = true }
+    }, [db, resolvedServerId]),
+  )
 
   // Live refresh: re-read whenever an event for this server arrives (the WS
   // handler has already persisted + upserted the channel by the time we run).
@@ -149,6 +154,9 @@ export default function ServerChannelsScreen() {
       getChannelsForServer(db, resolvedServerId)
         .then(setChannels)
         .catch((err) => console.warn('[ServerChannels] live refresh failed', err))
+      getUnreadChannelCounts(db, resolvedServerId)
+        .then(setUnreadCounts)
+        .catch((err) => console.warn('[ServerChannels] unread refresh failed', err))
       getServer(db, resolvedServerId)
         .then(setServer)
         .catch((err) => console.warn('[ServerChannels] server refresh failed', err))
@@ -159,24 +167,6 @@ export default function ServerChannelsScreen() {
     if (!resolvedServerId) return
     router.push(`/chat/${resolvedServerId}/${channelId}`)
   }
-
-  // Persist a drag-reordered channel list. Reorder local state first so the row
-  // order matches the drop immediately, then write positions to SQLite.
-  const handleReorder = useCallback(
-    (orderedIds: string[]) => {
-      if (!resolvedServerId) return
-      setChannels((prev) => {
-        const byId = new Map(prev.map((c) => [c.channel_id, c]))
-        return orderedIds
-          .map((id) => byId.get(id))
-          .filter((c): c is ChannelRow => Boolean(c))
-      })
-      setChannelOrder(db, resolvedServerId, orderedIds).catch((err) =>
-        console.warn('[ServerChannels] reorder persist failed', err),
-      )
-    },
-    [db, resolvedServerId],
-  )
 
   // Delete a channel: drop it locally (row + message history) and tell the server
   // to remove it from the registry so a reconnect/replay won't resurrect it. The
@@ -214,6 +204,34 @@ export default function ServerChannelsScreen() {
     [deleteChannelFlow],
   )
 
+  const showDefaultDeleteBlocked = useCallback(() => {
+    Alert.alert(
+      'Default channel',
+      'The default #general channel cannot be deleted.',
+      [{ text: 'OK' }],
+    )
+  }, [])
+
+  // Swipe actions for a channel row. The default channel still shows Delete so
+  // users discover the affordance, but tapping explains why it is blocked.
+  const actionsFor = useCallback((channel: ChannelRow): SwipeAction[] => {
+    return [
+      {
+        key: 'delete',
+        icon: <Feather name="trash-2" size={20} color="#fff" />,
+        label: 'Delete',
+        color: ACTION_TINTS.delete,
+        onPress: () => {
+          if (channel.channel_id === DEFAULT_CHANNEL) {
+            showDefaultDeleteBlocked()
+            return
+          }
+          confirmDelete(channel)
+        },
+      },
+    ]
+  }, [confirmDelete, showDefaultDeleteBlocked])
+
   const createChannel = async () => {
     const id = normalizeChannelId(newName)
     setCreating(false)
@@ -240,7 +258,6 @@ export default function ServerChannelsScreen() {
           <View style={styles.titleRow}>
             <ServerAvatar
               avatar={server?.avatar}
-              status={server?.last_status}
               label={serverName}
               size={30}
             />
@@ -261,18 +278,6 @@ export default function ServerChannelsScreen() {
               accessibilityLabel="Server settings"
             >
               <Feather name="settings" size={20} color={colors.textMuted} />
-            </Pressable>
-            <Pressable
-              onPress={() => setEditing((e) => !e)}
-              hitSlop={8}
-              accessibilityRole="button"
-              accessibilityLabel={editing ? 'Done editing channels' : 'Edit channels'}
-            >
-              <Feather
-                name={editing ? 'check' : 'edit-2'}
-                size={20}
-                color={editing ? colors.accent : colors.textMuted}
-              />
             </Pressable>
             <Pressable
               style={styles.addBtn}
@@ -314,34 +319,26 @@ export default function ServerChannelsScreen() {
         </Pressable>
       </Modal>
 
-      <DraggableList
+      <FlatList
         data={channels}
         keyExtractor={(c) => c.channel_id}
-        rowHeight={ROW_H}
-        onPressItem={(item) => (editing ? confirmDelete(item) : openChannel(item.channel_id))}
-        onReorder={handleReorder}
-        liftBackground={colors.surface2}
-        contentStyle={styles.list}
-        renderItem={(item, { isActive }) => (
-          <View style={[styles.rowInner, isActive && styles.rowInnerActive]}>
-            <ChannelBadge status={item.last_status} colors={colors} styles={styles} />
-            <View style={styles.rowBody}>
-              <View style={styles.rowTop}>
-                <Text style={styles.channelName}>{item.display_name}</Text>
-                <Text style={styles.timestamp}>{relativeTime(item.last_event_at)}</Text>
-              </View>
-              {item.last_message_preview ? (
-                <Text style={styles.preview} numberOfLines={1}>{item.last_message_preview}</Text>
-              ) : (
-                <Text style={styles.previewEmpty}>No messages yet</Text>
-              )}
-            </View>
-            {editing && item.channel_id !== DEFAULT_CHANNEL ? (
-              <Feather name="minus-circle" size={20} color={colors.danger} />
-            ) : (
-              <Text style={styles.chevron}>›</Text>
-            )}
-          </View>
+        contentContainerStyle={styles.list}
+        onScrollBeginDrag={() => setOpen(null)}
+        renderItem={({ item }) => (
+          <SwipeableRow
+            actions={actionsFor(item)}
+            openSide={open?.id === item.channel_id ? open.side : null}
+            onOpenSide={(side) => setOpen(side ? { id: item.channel_id, side } : null)}
+            onPress={() => openChannel(item.channel_id)}
+          >
+            <ChannelListRow
+              item={item}
+              isDefault={item.channel_id === DEFAULT_CHANNEL}
+              unreadCount={unreadCounts[item.channel_id] ?? 0}
+              styles={styles}
+              colors={colors}
+            />
+          </SwipeableRow>
         )}
       />
     </View>
@@ -349,30 +346,85 @@ export default function ServerChannelsScreen() {
 }
 
 // ---------------------------------------------------------------------------
-// ChannelBadge — circular '#' avatar with a live status presence dot. Mirrors
-// the home-screen ServerAvatar language so a channel row reads as a sibling of
-// a server row rather than a bare text line.
+// ChannelListRow — presentational. Tap/swipe handling lives in SwipeableRow.
+// ---------------------------------------------------------------------------
+
+function ChannelListRow({
+  item,
+  isDefault,
+  unreadCount,
+  styles,
+  colors,
+}: {
+  item: ChannelRow
+  isDefault: boolean
+  unreadCount: number
+  styles: ReturnType<typeof makeStyles>
+  colors: ThemeColors
+}) {
+  const unread = unreadCount > 0
+  const active = item.last_status === 'thinking' || item.last_status === 'working'
+  const time = relativeTime(item.last_event_at)
+  return (
+    <View style={styles.rowInner}>
+      <ChannelBadge unread={unread} colors={colors} styles={styles} />
+      <View style={styles.rowBody}>
+        <View style={styles.rowTop}>
+          <Text style={[styles.channelName, unread && styles.channelNameUnread]} numberOfLines={1}>
+            {item.display_name}
+          </Text>
+          {isDefault ? (
+            <View style={styles.defaultPill}>
+              <Text style={styles.defaultPillText}>Default</Text>
+            </View>
+          ) : null}
+        </View>
+        {active ? (
+          <View style={styles.statusRow}>
+            <View style={styles.statusDot} />
+            <Text style={styles.statusText} numberOfLines={1}>
+              {item.last_status === 'thinking' ? 'thinking…' : 'working…'}
+            </Text>
+          </View>
+        ) : item.last_message_preview ? (
+          <Text style={[styles.preview, unread && styles.previewUnread]} numberOfLines={1}>
+            {item.last_message_preview}
+          </Text>
+        ) : (
+          <Text style={styles.previewEmpty}>No messages yet</Text>
+        )}
+      </View>
+      <View style={styles.trailing}>
+        {unread && (
+          <View style={styles.unreadPill}>
+            <Text style={styles.unreadPillText} numberOfLines={1}>{unreadCount > 99 ? '99+' : unreadCount}</Text>
+          </View>
+        )}
+        {time ? <Text style={styles.timestamp}>{time}</Text> : null}
+      </View>
+    </View>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// ChannelBadge — rounded-square '#' tile. The square shape (vs. the round
+// ServerAvatar) signals "channel, not server" at a glance. An unread channel
+// tints the tile + glyph gold; a read one stays muted. Live status moved to the
+// row's status text line, mirroring the home-screen treatment.
 // ---------------------------------------------------------------------------
 
 function ChannelBadge({
-  status,
+  unread,
   colors,
   styles,
 }: {
-  status: string
+  unread: boolean
   colors: ThemeColors
   styles: ReturnType<typeof makeStyles>
 }) {
   return (
-    <View style={styles.badge} accessibilityLabel={`Channel status ${status}`}>
-      <Text style={styles.badgeHash}>#</Text>
-      <View style={styles.badgeDot}>
-        <StatusIcon
-          color={statusColor(status, colors)}
-          size={9}
-          pulse={status !== 'idle'}
-        />
-      </View>
+    <View style={[styles.badge, unread && styles.badgeUnread]}>
+      <Text style={[styles.badgeHash, unread && styles.badgeHashUnread]}>#</Text>
     </View>
   )
 }
@@ -437,48 +489,73 @@ function makeStyles(colors: ThemeColors) {
 
     list: { marginTop: spacing.sm },
     rowInner: {
-      flex: 1,
       flexDirection: 'row',
       alignItems: 'center',
       paddingHorizontal: spacing.xl,
+      paddingVertical: 14,
       borderBottomWidth: StyleSheet.hairlineWidth,
       borderBottomColor: colors.border,
       gap: spacing.md,
     },
-    rowInnerActive: {
-      borderBottomColor: 'transparent',
-      borderRadius: radius.lg,
-    },
     badge: {
       width: 40,
       height: 40,
-      borderRadius: radius.full,
+      borderRadius: radius.lg,
       backgroundColor: colors.surface2 ?? colors.surface,
-      borderWidth: 1,
-      borderColor: colors.border,
       alignItems: 'center',
       justifyContent: 'center',
     },
+    badgeUnread: { backgroundColor: colors.surface3 ?? colors.surface2 },
     badgeHash: {
       color: colors.textMuted,
       fontSize: typography.size2xl,
       fontWeight: typography.weightSemibold,
       lineHeight: typography.size2xl + 2,
     },
-    badgeDot: {
-      position: 'absolute',
-      bottom: -1,
-      right: -1,
-      backgroundColor: colors.bg,
-      borderRadius: radius.full,
-      padding: 2,
-    },
+    badgeHashUnread: { color: colors.accent, fontWeight: typography.weightBold },
     rowBody: { flex: 1 },
-    rowTop: { flexDirection: 'row', alignItems: 'center', marginBottom: 3 },
-    channelName: { color: colors.text, fontSize: typography.sizeLg, fontWeight: typography.weightSemibold, flex: 1 },
+    rowTop: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 3 },
+    channelName: { color: colors.text, fontSize: typography.sizeLg, fontWeight: typography.weightSemibold, flexShrink: 1 },
+    channelNameUnread: { fontWeight: typography.weightBold },
+    defaultPill: {
+      borderRadius: radius.full,
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: colors.surface2 ?? colors.surface,
+      paddingHorizontal: 8,
+      height: 18,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    defaultPillText: {
+      color: colors.textDim,
+      fontSize: typography.sizeXs,
+      fontWeight: typography.weightSemibold,
+      lineHeight: 14,
+      textTransform: 'uppercase',
+    },
+    statusRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+    statusDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: colors.warn },
+    statusText: { color: colors.warn, fontSize: typography.sizeMd, fontWeight: typography.weightMedium },
     timestamp: { color: colors.textDim, fontSize: typography.sizeSm },
     preview: { color: colors.textMuted, fontSize: typography.sizeMd },
+    previewUnread: { color: colors.text },
     previewEmpty: { color: colors.textFaint, fontSize: typography.sizeMd, fontStyle: 'italic' },
-    chevron: { color: colors.textFaint, fontSize: typography.size2xl },
+    // Stacked trailing column: unread pill over time, centered on the axis.
+    trailing: { alignItems: 'center', justifyContent: 'center', minWidth: 32, gap: 5 },
+    unreadPill: {
+      minWidth: 20,
+      height: 20,
+      borderRadius: 10,
+      paddingHorizontal: 6,
+      backgroundColor: colors.accent,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    unreadPillText: {
+      color: colors.textOnAccent,
+      fontSize: typography.sizeXs,
+      fontWeight: typography.weightSemibold,
+    },
   })
 }

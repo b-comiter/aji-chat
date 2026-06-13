@@ -28,6 +28,46 @@ export function pushSample(history: number[], sample: number, max = MAX_BARS): n
   return next
 }
 
+/** Format seconds as m:ss for a playback clock, e.g. 4 → "0:04". */
+export function formatClock(seconds: number): string {
+  const t = Math.max(0, Math.floor(seconds))
+  return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`
+}
+
+// FNV-1a string hash → 32-bit unsigned, for seeding the pseudo-waveform PRNG.
+function hashString(s: string): number {
+  let h = 2166136261
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 16777619)
+  }
+  return h >>> 0
+}
+
+function mulberry32(seed: number): () => number {
+  let a = seed
+  return () => {
+    a = (a + 0x6d2b79f5) | 0
+    let t = Math.imul(a ^ (a >>> 15), 1 | a)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+/**
+ * Deterministic pseudo-waveform (amplitudes 0..1) derived from a seed string.
+ * Received audio clips carry no amplitude data and decoding them on-device is
+ * impractical, so each clip gets a stable, distinct-looking waveform from its
+ * id instead. Lightly smoothed so it reads like speech rather than noise.
+ */
+export function pseudoWaveform(seed: string, count: number): number[] {
+  const rnd = mulberry32(hashString(seed))
+  const raw: number[] = []
+  for (let i = 0; i < count; i++) raw.push(0.2 + rnd() * 0.8)
+  // One smoothing pass (weighted average with neighbors) for a natural envelope.
+  return raw.map((v, i) => Math.min(1, ((raw[i - 1] ?? v) + v * 2 + (raw[i + 1] ?? v)) / 4))
+}
+
 /**
  * Reduce `bars` to at most `maxBars` by averaging adjacent groups.
  * When bars.length <= maxBars the original array is returned unchanged.

@@ -27,6 +27,7 @@ import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio'
 import { useTheme } from '../../context/ThemeContext'
 import { spacing, typography } from '../../constants/theme'
 import type { ThemeColors } from '../../constants/theme'
+import { impactHaptic } from '../../utils/haptics'
 import { useVoiceRecorder } from '../../hooks/useVoiceRecorder'
 import type { RecordedClip } from '../../hooks/useVoiceRecorder'
 import { RecordingWaveform } from './RecordingWaveform'
@@ -343,7 +344,7 @@ export const Composer = memo(
             {mode === 'voice-review' && (
               <Pressable
                 style={({ pressed }) => [styles.sendBtn, pressed && styles.iconBtnPressed]}
-                onPress={sendRecording}
+                onPress={() => { impactHaptic(); sendRecording() }}
                 accessibilityRole="button"
                 accessibilityLabel="Send voice message"
                 hitSlop={8}
@@ -421,7 +422,7 @@ export const Composer = memo(
                 !canSend && styles.sendBtnOff,
                 pressed && canSend && styles.iconBtnPressed,
               ]}
-              onPress={onSend}
+              onPress={() => { impactHaptic(); onSend() }}
               disabled={!canSend}
               accessibilityRole="button"
               accessibilityLabel="Send message"
@@ -440,7 +441,7 @@ export const Composer = memo(
                 accessibilityLabel="Start voice recording"
                 hitSlop={8}
               >
-                <VoiceModeIcon size={18} color="#fff" />
+                <VoiceModeIcon size={18} color={colors.textOnAccent} />
               </Pressable>
             ) : null
           )}
@@ -473,7 +474,7 @@ function makeStyles(colors: ThemeColors) {
     input: {
       flex: 1,
       minHeight: MIN_INPUT_HEIGHT,
-      backgroundColor: colors.surface,
+      backgroundColor: colors.surface2,
       borderRadius: 20,
       paddingHorizontal: spacing.lg,
       paddingVertical: 10,
@@ -495,7 +496,7 @@ function makeStyles(colors: ThemeColors) {
     },
     sendBtnOff: { backgroundColor: colors.border },
     sendBtnText: {
-      color: '#fff',
+      color: colors.textOnAccent,
       fontSize: 18,
       fontWeight: typography.weightBold,
       lineHeight: 22,
@@ -516,7 +517,7 @@ function makeStyles(colors: ThemeColors) {
     voiceSurface: {
       flex: 1,
       minHeight: 40,
-      backgroundColor: colors.surface,
+      backgroundColor: colors.surface2,
       borderRadius: 20,
       borderWidth: 1,
       borderColor: colors.border,

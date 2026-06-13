@@ -26,7 +26,7 @@
  *
  * See docs/chat-scroll-architecture.md for design rationale and alternatives.
  */
-import { Component, forwardRef, useCallback, useImperativeHandle, useMemo, useRef, useState } from 'react'
+import { Component, forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native'
 import type {
   ListRenderItem,
@@ -66,6 +66,26 @@ export const MessageList = forwardRef<MessageListHandle, Props>(function Message
   const listRef = useRef<FlatList<Item> | null>(null)
   const [scrolledUp, setScrolledUp] = useState(false)
   const scrolledUpRef = useRef(false)
+  // Count of new messages that arrived while the user was scrolled up; shown on
+  // the scroll-to-bottom FAB and cleared once they return to the bottom.
+  const [newCount, setNewCount] = useState(0)
+  const newestIdRef = useRef<string | null>(null)
+
+  // Bump the count when a genuinely new item appends at the bottom (newest id
+  // changes) while scrolled up. Streaming deltas reuse the same id (no bump);
+  // pagination prepends older items (newest id unchanged, no bump).
+  useEffect(() => {
+    const newest = items.length ? items[items.length - 1].id : null
+    if (newestIdRef.current !== null && newest !== newestIdRef.current && scrolledUpRef.current) {
+      setNewCount((c) => c + 1)
+    }
+    newestIdRef.current = newest
+  }, [items])
+
+  const jumpToBottom = useCallback(() => {
+    listRef.current?.scrollToOffset({ offset: 0, animated: true })
+    setNewCount(0)
+  }, [])
 
   // FlatList wants newest at data[0] for inverted rendering. Upstream (useChatSession)
   // keeps items in chronological order for easier DB queries and state management.
@@ -104,6 +124,7 @@ export const MessageList = forwardRef<MessageListHandle, Props>(function Message
       if (isUp !== scrolledUpRef.current) {
         scrolledUpRef.current = isUp
         setScrolledUp(isUp)
+        if (!isUp) setNewCount(0) // back at the bottom — caught up
       }
 
       // Pagination: load older messages when user scrolls near the visual top.
@@ -139,9 +160,16 @@ export const MessageList = forwardRef<MessageListHandle, Props>(function Message
         {scrolledUp && (
           <Pressable
             style={({ pressed }) => [styles.fab, pressed && styles.fabPressed]}
-            onPress={() => listRef.current?.scrollToOffset({ offset: 0, animated: true })}
+            onPress={jumpToBottom}
+            accessibilityRole="button"
+            accessibilityLabel={newCount > 0 ? `${newCount} new message${newCount === 1 ? '' : 's'}, scroll to bottom` : 'Scroll to bottom'}
           >
             <Text style={styles.fabText}>↓</Text>
+            {newCount > 0 && (
+              <View style={styles.fabBadge}>
+                <Text style={styles.fabBadgeText} numberOfLines={1}>{newCount > 99 ? '99+' : newCount}</Text>
+              </View>
+            )}
           </Pressable>
         )}
       </View>
@@ -195,5 +223,24 @@ function makeStyles(colors: ThemeColors) {
     },
     fabPressed: { opacity: 0.65 },
     fabText: { color: colors.text, fontSize: 18, lineHeight: 22 },
+    fabBadge: {
+      position: 'absolute',
+      top: -4,
+      right: -4,
+      minWidth: 18,
+      height: 18,
+      borderRadius: 9,
+      paddingHorizontal: 4,
+      backgroundColor: colors.accent,
+      borderWidth: 2,
+      borderColor: colors.bg,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    fabBadgeText: {
+      color: colors.textOnAccent,
+      fontSize: typography.sizeXs,
+      fontWeight: typography.weightSemibold,
+    },
   })
 }

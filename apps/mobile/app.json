@@ -30,7 +30,12 @@
     },
     "plugins": [
       "expo-router",
-      "expo-audio",
+      [
+        "expo-audio",
+        {
+          "enableBackgroundPlayback": true
+        }
+      ],
       "expo-font",
       "expo-sqlite",
       [

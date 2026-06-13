@@ -7,11 +7,12 @@ import type { Item } from '../../hooks/chatTypes'
 jest.mock('../MarkdownMessage', () => ({ MarkdownMessage: () => null }))
 
 import { Row } from './MessageRow'
+import { AudioPlayerProvider } from '../../context/AudioPlayerContext'
 
 // Native modules expo-audio + expo-file-system aren't available under jest;
-// mock just enough for AudioMessage to render its controls.
+// mock just enough for AudioMessage + AudioPlayerProvider to render.
 jest.mock('expo-audio', () => ({
-  useAudioPlayer: () => ({ play: jest.fn(), pause: jest.fn(), seekTo: jest.fn() }),
+  useAudioPlayer: () => ({ play: jest.fn(), pause: jest.fn(), seekTo: jest.fn(), replace: jest.fn() }),
   useAudioPlayerStatus: () => ({ playing: false, currentTime: 0, duration: 1 }),
   setAudioModeAsync: jest.fn().mockResolvedValue(undefined),
 }))
@@ -26,17 +27,21 @@ jest.mock('expo-file-system/legacy', () => ({
 const noop = () => {}
 
 function renderRow(item: Item) {
+  // AudioMessage reads the global player via context, so the Row must render
+  // inside the provider (it throws otherwise).
   return render(
-    <Row
-      item={item}
-      onChoose={noop}
-      isGroupStart
-      dividerKind="none"
-      tools={[]}
-      avatarLabel="SI"
-      onOpenTools={noop}
-      onOpenFile={noop}
-    />,
+    <AudioPlayerProvider>
+      <Row
+        item={item}
+        onChoose={noop}
+        isGroupStart
+        dividerKind="none"
+        tools={[]}
+        avatarLabel="SI"
+        onOpenTools={noop}
+        onOpenFile={noop}
+      />
+    </AudioPlayerProvider>,
   )
 }
 
@@ -55,7 +60,9 @@ describe('Row — file items', () => {
     }
     const screen = renderRow(item)
     expect(screen.getByText('Here is a voice clip.')).toBeTruthy()
-    expect(screen.getByText('0:00 / 0:01')).toBeTruthy()
+    // Current position and clip length render as separate labels under the waveform.
+    expect(screen.getByText('0:00')).toBeTruthy()
+    expect(screen.getByText('0:01')).toBeTruthy()
     // Let the cache-write effect settle so we don't leak an act() warning.
     await waitFor(() => {})
   })
@@ -74,7 +81,7 @@ describe('Row — file items', () => {
     expect(screen.getByLabelText('Image photo.png')).toBeTruthy()
   })
 
-  test('renders a document file as a tappable chip with name + type', () => {
+  test('renders a document file as a tappable chip with name + type', async () => {
     const item: Item = {
       kind: 'file',
       id: 'file_3',
@@ -85,7 +92,8 @@ describe('Row — file items', () => {
       done: true,
     }
     const screen = renderRow(item)
-    expect(screen.getByText('report.html')).toBeTruthy()
+    // findBy* flushes the HTML thumbnail's async cache-write effect inside act.
+    expect(await screen.findByText('report.html')).toBeTruthy()
     expect(screen.getByLabelText('Open file report.html')).toBeTruthy()
   })
 })

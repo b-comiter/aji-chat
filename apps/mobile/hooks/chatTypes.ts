@@ -1,14 +1,19 @@
 import type { PromptOption } from '@aji/protocol'
 import type { ItemRow } from '../db/database'
 
-export type Item =
+export type ItemBody =
   | { kind: 'message'; id: string; role: 'assistant' | 'user' | 'system'; text: string; done: boolean; turnId?: string }
   | { kind: 'tool'; id: string; name: string; args: Record<string, unknown>; result?: unknown; done: boolean; turnId?: string }
   | { kind: 'prompt'; id: string; title: string; message: string; options: PromptOption[]; turnId?: string; resolved?: boolean; resolvedChoice?: string; choiceLabel?: string }
   | { kind: 'file'; id: string; role: 'assistant' | 'user' | 'system'; mime: string; data: string; name?: string; duration?: number; text?: string; done: boolean; turnId?: string }
 
+/** `createdAt` (unix ms) is the item's authoritative timestamp — set from the
+ *  SQLite `created_at` column on load and Date.now() for live arrivals. Optional
+ *  so older code paths degrade gracefully (no clock / no day separator). */
+export type Item = ItemBody & { createdAt?: number }
+
 export function rowToItem(row: ItemRow): Item {
-  return JSON.parse(row.data) as Item
+  return { ...(JSON.parse(row.data) as ItemBody), createdAt: row.created_at }
 }
 
 // Common streaming-cursor glyphs + simple ANSI show/hide sequences an agent may
@@ -45,5 +50,5 @@ export function ensureMessageExists(
   role: 'assistant' | 'user' | 'system' = 'assistant',
 ): Item[] {
   if (items.some((it) => it.kind === 'message' && it.id === messageId)) return items
-  return [...items, { kind: 'message', id: messageId, role, text: '', done: false, turnId }]
+  return [...items, { kind: 'message', id: messageId, role, text: '', done: false, turnId, createdAt: Date.now() }]
 }

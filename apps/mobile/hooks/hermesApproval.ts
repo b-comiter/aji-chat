@@ -31,5 +31,6 @@ export function tryApprovalPrompt(
       { id: '/deny', label: 'Deny' },
     ],
     turnId: msg.turnId,
+    createdAt: msg.createdAt,
   }
 }

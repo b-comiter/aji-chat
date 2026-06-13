@@ -1,4 +1,31 @@
-import { MAX_BARS, normalizeDb, pushSample } from './waveformHelpers'
+import { MAX_BARS, normalizeDb, pushSample, formatClock, pseudoWaveform } from './waveformHelpers'
+
+describe('formatClock', () => {
+  test('formats seconds as m:ss with zero padding', () => {
+    expect(formatClock(0)).toBe('0:00')
+    expect(formatClock(4)).toBe('0:04')
+    expect(formatClock(65)).toBe('1:05')
+    expect(formatClock(600)).toBe('10:00')
+  })
+  test('floors fractional seconds and clamps negatives', () => {
+    expect(formatClock(4.9)).toBe('0:04')
+    expect(formatClock(-3)).toBe('0:00')
+  })
+})
+
+describe('pseudoWaveform', () => {
+  test('is deterministic for a given seed', () => {
+    expect(pseudoWaveform('clip-1', 40)).toEqual(pseudoWaveform('clip-1', 40))
+  })
+  test('differs across seeds and respects count + 0..1 range', () => {
+    const a = pseudoWaveform('clip-1', 40)
+    const b = pseudoWaveform('clip-2', 40)
+    expect(a).toHaveLength(40)
+    expect(a).not.toEqual(b)
+    expect(Math.min(...a)).toBeGreaterThanOrEqual(0)
+    expect(Math.max(...a)).toBeLessThanOrEqual(1)
+  })
+})
 
 describe('normalizeDb', () => {
   test('null input returns a tiny non-zero baseline', () => {

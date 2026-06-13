@@ -6,7 +6,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { spacing, typography } from '../../constants/theme'
 import type { ThemeColors } from '../../constants/theme'
 import { useTheme } from '../../context/ThemeContext'
-import { hexToRgba } from './colorUtils'
+import { hexToRgba } from '../colorUtils'
 
 // Table layout constants. Columns are a fixed, readable width so cells never
 // crush to one-word-per-line regardless of column count; the inline preview just

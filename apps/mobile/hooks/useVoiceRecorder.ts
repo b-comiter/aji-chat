@@ -20,7 +20,7 @@ import {
   useAudioRecorderState,
 } from 'expo-audio'
 import { File } from 'expo-file-system'
-import { ensureAudioMode } from '../utils/audioSession'
+import { ensureRecordingMode } from '../utils/audioSession'
 
 export type VoicePermissionState = 'unknown' | 'granted' | 'denied'
 
@@ -58,7 +58,7 @@ export function useVoiceRecorder() {
         return false
       }
       setPermission('granted')
-      ensureAudioMode()
+      ensureRecordingMode()
       await recorder.prepareToRecordAsync()
       recorder.record()
       recordingStartedAtRef.current = Date.now()

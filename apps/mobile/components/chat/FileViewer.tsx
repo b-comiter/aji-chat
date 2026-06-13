@@ -211,7 +211,7 @@ function FileBody({
   const bytes = approxBytesFromBase64(item.data)
   return (
     <View style={styles.unsupported}>
-      <Feather name={fileIconName(item) as any} size={48} color={colors.textDim} />
+      <Feather name={fileIconName(item)} size={48} color={colors.textDim} />
       <Text style={styles.unsupportedName}>{item.name ?? item.mime}</Text>
       <Text style={styles.unsupportedMeta}>{item.mime} · {formatBytes(bytes)}</Text>
       <Text style={styles.unsupportedHint}>Preview isn't available for this file type.</Text>
@@ -301,7 +301,7 @@ function WebViewUnavailable({
 }) {
   return (
     <View style={styles.unsupported}>
-      <Feather name={fileIconName(item) as any} size={48} color={colors.textDim} />
+      <Feather name={fileIconName(item)} size={48} color={colors.textDim} />
       <Text style={styles.unsupportedName}>{item.name ?? item.mime}</Text>
       <Text style={styles.unsupportedHint}>
         In-app preview isn’t available in this build. Open it in another app instead.

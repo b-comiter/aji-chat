@@ -25,6 +25,20 @@ export type ServerRow = {
   mono_channel_advertised: number | null
   /** User's local mono-channel override (0/1) or null if unset. */
   mono_channel_override: number | null
+  /** User muted this server's new-message sound (0/1). */
+  muted: number
+  /** Pin slot — lower sorts higher; null = unpinned. */
+  pin_position: number | null
+}
+
+/** Whether the server's new-message chime is muted. */
+export function isServerMuted(row: Pick<ServerRow, 'muted'> | null | undefined): boolean {
+  return row?.muted === 1
+}
+
+/** Whether the server is pinned to the top of the list. */
+export function isServerPinned(row: Pick<ServerRow, 'pin_position'> | null | undefined): boolean {
+  return row?.pin_position != null
 }
 
 /** Effective mono-channel: local override wins, else advertised, else false. */
@@ -54,6 +68,9 @@ export type ChannelRow = {
   last_status: string
   /** User-defined sort slot (0-based). Ties break by recency. Default 0. */
   position: number
+  /** When the user last opened this channel (unix ms); null = never. Drives
+   *  the per-channel unread count and the "new messages" divider. */
+  last_read_at: number | null
 }
 
 // ---------------------------------------------------------------------------
@@ -65,11 +82,33 @@ export type ChannelRow = {
  *
  * v8 renamed the physical tables/columns to match the protocol vocabulary
  * (`agents`→`servers`, `chat_id`→`server_id`). v9 adds `channels.position` for
- * user-defined channel ordering (drag-to-reorder). This is a dev project with
- * disposable local data, so rather than carry the incremental column patches
- * forward we drop everything and recreate the final shape in one block.
+ * user-defined channel ordering (drag-to-reorder). v10 adds `servers.muted` for
+ * per-server new-message-sound muting. v11 adds `servers.pin_position` (pin to
+ * top). v12 moves unread tracking down to the channel: `channels.last_read_at`
+ * (the server-level marker is gone; server unread is the sum of its channels').
+ * This is a dev project with disposable local data, so rather than carry the
+ * incremental column patches forward we drop everything and recreate the final
+ * shape in one block.
  */
-const SCHEMA_VERSION = 9
+const SCHEMA_VERSION = 12
+
+/**
+ * Add a column if the table lacks it. Idempotent self-heal for DBs whose
+ * user_version already matches (so the drop/recreate path is skipped) but which
+ * predate a recently-added column — e.g. a version got bumped in a build before
+ * the column was added. Unlike the version-bump drop, this preserves data.
+ */
+async function ensureColumn(
+  db: SQLiteDatabase,
+  table: string,
+  column: string,
+  decl: string,
+): Promise<void> {
+  const cols = await db.getAllAsync<{ name: string }>(`PRAGMA table_info(${table})`)
+  if (!cols.some((c) => c.name === column)) {
+    await db.execAsync(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`)
+  }
+}
 
 export async function migrateDb(db: SQLiteDatabase): Promise<void> {
   await db.execAsync('PRAGMA journal_mode = WAL;')
@@ -97,7 +136,9 @@ export async function migrateDb(db: SQLiteDatabase): Promise<void> {
       last_status             TEXT NOT NULL DEFAULT 'idle',
       avatar                  TEXT,
       mono_channel_advertised INTEGER,
-      mono_channel_override   INTEGER
+      mono_channel_override   INTEGER,
+      muted                   INTEGER NOT NULL DEFAULT 0,
+      pin_position            INTEGER
     );
 
     CREATE TABLE IF NOT EXISTS channels (
@@ -108,6 +149,7 @@ export async function migrateDb(db: SQLiteDatabase): Promise<void> {
       last_event_at        INTEGER,
       last_status          TEXT NOT NULL DEFAULT 'idle',
       position             INTEGER NOT NULL DEFAULT 0,
+      last_read_at         INTEGER,
       PRIMARY KEY (server_id, channel_id)
     );
 
@@ -137,6 +179,14 @@ export async function migrateDb(db: SQLiteDatabase): Promise<void> {
       value TEXT NOT NULL
     );
   `)
+
+  // Self-heal columns added in recent versions, in case a DB is stuck at a
+  // version whose tables predate them (the drop path above is version-gated, so
+  // it won't fire when user_version already matches). Runs every launch; cheap.
+  await ensureColumn(db, 'servers', 'muted', 'INTEGER NOT NULL DEFAULT 0')
+  await ensureColumn(db, 'servers', 'pin_position', 'INTEGER')
+  await ensureColumn(db, 'channels', 'position', 'INTEGER NOT NULL DEFAULT 0')
+  await ensureColumn(db, 'channels', 'last_read_at', 'INTEGER')
 
   if (version < SCHEMA_VERSION) {
     await db.execAsync(`PRAGMA user_version = ${SCHEMA_VERSION}`)
