@@ -98,7 +98,7 @@ const onScroll = useCallback(
 **Group start detection** (which avatar/header to show):
 
 ```typescript
-// In [chatId].tsx, computed ONCE over chronological items
+// In [channelId].tsx, computed ONCE over chronological items
 const groupStartIds = useMemo(() => {
   const set = new Set<string>()
   let prev: Item | undefined
@@ -143,7 +143,7 @@ The inverted anchor (visual bottom = data[0]) handles the rest. No `maintainVisi
 | File | Responsibility |
 |---|---|
 | `MessageList.tsx` | Minimal inverted FlatList shell (~115 lines); exposes `scrollToBottom()` ref |
-| `[chatId].tsx` | Computes `groupStartIds` Set + `newestId`; calls `scrollToBottom()` on Send; passes metadata to renderItem |
+| `[channelId].tsx` | Computes `groupStartIds` Set + `newestId`; calls `scrollToBottom()` on Send; passes metadata to renderItem |
 | `useChatSession.ts` | Manages items in chronological order; pagination via `loadOlder`; persists to SQLite |
 | `chatTypes.ts` | Item type definitions; `ensureMessageExists()` helper for out-of-order events |
 | `MessageRow.tsx` | Renders individual items; reads `isGroupStart`/`isLast` from props; no scroll logic |
@@ -183,7 +183,7 @@ All tests use Jest 29 + jest-expo preset. Run with `pnpm test`.
 
 ## Debugging
 
-Enable detailed trace logs in `[chatId].tsx`:
+Enable detailed trace logs in `[channelId].tsx`:
 
 ```typescript
 const TRACE = true  // Set to false for production
@@ -207,7 +207,7 @@ pnpm mobile  # Expo starts
 
 ## References
 
-- **Code**: `apps/mobile/app/chat/[chatId].tsx`, `apps/mobile/components/chat/MessageList.tsx`
+- **Code**: `apps/mobile/app/chat/[serverId]/[channelId].tsx`, `apps/mobile/components/chat/MessageList.tsx`
 - **Protocol**: `packages/protocol/src/index.ts` (`ServerEvent`, `ClientEvent`)
 - **Database**: `apps/mobile/db/database.ts` (`ItemRow`, `loadRecentItems`, `loadOlderThan`)
 - **Styling**: `apps/mobile/docs/styling.md` — message bubble design patterns

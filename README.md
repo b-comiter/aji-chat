@@ -9,10 +9,11 @@ A purpose-built messaging client for chatting with AI agents (Hermes, Claude Cod
 - Chat history loads instantly on app open; new events stream in and append live
 - Conversations survive app restart — each agent has its own persistent history
 
-### Multi-Agent Navigation
-- **Home screen** lists all connected agents (Telegram-style rows with preview text and timestamps)
-- Tap an agent to open its full chat history
-- Connect to an agent before it starts sending events with the "＋" button (shows known agents: Claude Code, Hermes, Simulator)
+### Server & Channel Navigation
+- **Home screen** lists all known servers (Telegram-style rows with preview text and timestamps)
+- Tap a server to see its channels; tap a channel to open the chat
+- Single-channel servers (e.g. Claude Code) open their chat directly — no channel drill-down
+- Add a new server with the "＋" button; channels are created from the channel list inside a server
 
 ### Local Slash Commands
 - `/clear` — Delete chat history for current agent
@@ -51,7 +52,7 @@ A purpose-built messaging client for chatting with AI agents (Hermes, Claude Cod
 - **Monorepo**: `apps/mobile` (Expo), `apps/server` (Hono + WebSocket), `packages/protocol` (wire types), `tools/` (hooks, simulators, plugins)
 - **Dumb server** — broadcasts `ServerEvent`s to all clients, forwards `ClientEvent`s to webhooks. No parsing or transformation.
 - **Single protocol** — all semantic meaning lives in discriminated-union `ServerEvent` and `ClientEvent` types
-- **Agent identity** — optional `agent?: AgentId` field on all events so mobile knows who said what
+- **Routing fields** — optional `serverId`, `agentId`, `channel` on all events for multi-server / multi-channel delivery
 
 ## Quick Start
 
@@ -189,17 +190,23 @@ See `packages/protocol/src/index.ts` for the authoritative wire types. Key shape
 - `permission_request / clarify` — interactive prompts
 - `prompt_dismiss` — remove a prompt from mobile UI
 - `commands` — slash command list for the picker
+- `server_info` — server metadata (name, single-channel flag)
+- `channels` — channel registry for a server (broadcast on change, replayed on connect)
 
 **Phone → Server** (`ClientEvent`):
 - `user_message` — text typed on mobile
 - `user_file` — an attachment/voice clip (base64 inline)
 - `prompt_response` — user's choice in a permission/clarify prompt
 - `clear_channel` — reset a channel: `/clear` clears the client AND tells the agent to drop its own session for that channel
+- `create_channel / delete_channel` — manage the server's channel registry
 - `get_commands` — request updated command list
+- `get_missed_events` — replay buffered events after a disconnect
 
-Optional fields:
+Optional routing fields on most events:
 - `turn_id?: string` — groups related events (user message + tools + response)
-- `agent?: AgentId` — identifies which agent sent it (added by adapter, not user)
+- `serverId?: string` — identifies the server container (`'claude-code'`, `'hermes'`, etc.)
+- `agentId?: string` — server-stamped agent identity (derived from bearer token, not set by adapters)
+- `channel?: string` — channel within the server; absent means `"general"`
 
 ## Development
 
@@ -232,7 +239,7 @@ See [`docs/chat-scroll-architecture.md`](docs/chat-scroll-architecture.md) for d
 ## Known Limitations
 
 - **Web**: no persistence (Hermes integration is native-only anyway)
-- **Permissions**: timeout is 15 seconds (configurable via `AJI_PERMISSION_WAIT_MS` env var)
+- **Permissions**: auto-dismiss safety valve fires after 10 minutes (hardcoded in server)
 - **Mobile UI**: no image rendering yet (text fallback only)
 - **Streaming**: depends on Hermes config; off by default — add `streaming: true` to `display.platforms.aji-chat` in config.yaml
 - **Scroll restore**: no scroll position save across sessions; users always start at the bottom of chats

@@ -126,22 +126,24 @@ vocabulary.
 ### Server → Phone events
 
 Most of the event types carry an optional `turn_id` that groups everything
-belonging to one agent turn. The Hermes adapter mints a UUID in
-`on_processing_start` and stamps it on every outbound event until
-`on_processing_complete`. The Claude Code hook mints a UUID on `UserPromptSubmit`,
-persists it per-session, and attaches it to all subsequent tool and message events
-in that turn. If unset (e.g. from the simulator), mobile falls back to chronological ordering.
+belonging to one agent turn. Both adapters mint a UUID at turn start and stamp it
+on every outbound event until the turn ends: the Hermes adapter mints one in
+`on_processing_start`; the Claude Code hook mints one on `UserPromptSubmit`,
+writes it to a temp file keyed by session ID, and reads it back on subsequent
+`PreToolUse`, `PostToolUse`, and `Stop` events so all events in a turn share the
+same value. If unset (e.g. from the simulator), mobile falls back to chronological
+ordering.
 
 ```ts
 // Message lifecycle
-{ type: "message_start", id: "msg_1", role: "assistant", turn_id?: "turn_abc" }
-{ type: "text_delta",    id: "msg_1", text: "Hello ",    turn_id?: "turn_abc" }
-{ type: "text_delta",    id: "msg_1", text: "world",     turn_id?: "turn_abc" }
-{ type: "message_end",   id: "msg_1",                    turn_id?: "turn_abc" }
+{ type: "message_start", id: "msg_1", role: "assistant", serverId?: "hermes", channel?: "daily-brief", turn_id?: "turn_abc" }
+{ type: "text_delta",    id: "msg_1", text: "Hello ",    serverId?: "hermes", channel?: "daily-brief", turn_id?: "turn_abc" }
+{ type: "text_delta",    id: "msg_1", text: "world",     serverId?: "hermes", channel?: "daily-brief", turn_id?: "turn_abc" }
+{ type: "message_end",   id: "msg_1",                    serverId?: "hermes", channel?: "daily-brief", turn_id?: "turn_abc" }
 
 // Tool calls
-{ type: "tool_start", id: "tool_1", name: "write_file", args: {...}, turn_id?: "turn_abc" }
-{ type: "tool_end",   id: "tool_1", result: {...},                    turn_id?: "turn_abc" }
+{ type: "tool_start", id: "tool_1", name: "write_file", args: {...}, serverId?: "hermes", turn_id?: "turn_abc" }
+{ type: "tool_end",   id: "tool_1", result: {...},                    serverId?: "hermes", turn_id?: "turn_abc" }
 
 // Files / media — a single self-contained event (no start/delta/end). The bytes
 // ride inline as base64 in `data`, so the server stays a dumb router and the
@@ -150,19 +152,27 @@ in that turn. If unset (e.g. from the simulator), mobile falls back to chronolog
 // This one event subsumes Hermes's typed send_voice / send_image / send_document;
 // the planned Hermes verb is a single `send_file`.
 { type: "file", id: "file_1", role: "assistant", mime: "audio/mpeg",
-  data: "<base64>", name?: "clip.mp3", duration?: 1, text?: "caption", turn_id?: "turn_abc" }
+  data: "<base64>", name?: "clip.mp3", duration?: 1, text?: "caption",
+  serverId?: "hermes", channel?: "daily-brief", turn_id?: "turn_abc" }
 
 // Agent status (no turn_id — it's terminal UI state, not turn-scoped)
-{ type: "status", value: "thinking" | "working" | "idle" }
+{ type: "status", value: "thinking" | "working" | "idle", serverId?: "hermes" }
+
+// Server metadata — advertised by the adapter on first contact so the mobile
+// home screen knows the server name and whether to skip the channel list.
+{ type: "server_info", serverId: "claude-code", monoChannel: true, displayName: "Claude Code" }
+
+// Channel registry — broadcast after create/delete and replayed to new clients.
+{ type: "channels", serverId: "hermes", channels: [{ id: "general" }, { id: "daily-brief" }] }
 
 // Interactive prompts
-{ type: "permission_request", id: "p1", title, message, options: [...], turn_id?: "turn_abc" }
-{ type: "clarify",            id: "c1", question, choices: [...],        turn_id?: "turn_abc" }
+{ type: "permission_request", id: "p1", title, message, options: [...], serverId?: "hermes", turn_id?: "turn_abc" }
+{ type: "clarify",            id: "c1", question, choices: [...],        serverId?: "hermes", turn_id?: "turn_abc" }
 { type: "prompt_dismiss",     id: "p1" }
 
 // Slash command list — pushed by the agent adapter after connecting and
 // on demand in response to get_commands. Mobile renders a "/" picker from it.
-{ type: "commands", commands: [
+{ type: "commands", serverId?: "hermes", commands: [
     { name: "model",  description: "Switch model",  args_hint: "[model]", category: "Configuration" },
     { name: "help",   description: "Show commands",                        category: "Info" },
     ...
@@ -173,9 +183,14 @@ in that turn. If unset (e.g. from the simulator), mobile falls back to chronolog
 ### Phone → Server events
 
 ```ts
-{ type: "user_message",    text: "..." }          // "/" prefix routes as slash command
+{ type: "user_message",    text: "...", serverId?: "hermes", channel?: "daily-brief" }  // "/" routes as slash command
+{ type: "user_file",       mime: "audio/mp4", data: "<base64>", serverId?: "hermes" }   // voice clip / attachment
 { type: "prompt_response", id: "p1", choice: "once" }
+{ type: "clear_channel",   serverId?: "hermes", channel?: "daily-brief" }               // reset conversation + agent session
+{ type: "create_channel",  serverId: "hermes", channel: "new-topic", displayName?: "New Topic" }
+{ type: "delete_channel",  serverId: "hermes", channel: "old-topic" }
 { type: "get_commands" }                           // request the slash command list
+{ type: "get_missed_events", after_seq: 42 }       // replay buffered events after disconnect
 ```
 
 ---
@@ -187,13 +202,15 @@ Every event and DB row uses identifiers with specific, distinct meanings:
 | Identifier | Type | Layer | Meaning |
 |---|---|---|---|
 | `id` | `string` | Protocol — most events | Opaque string minted by `newId()` (format: `"msg_lk3p9q_4"`). Shared across a message triplet (`message_start` / `text_delta` / `message_end`) and a tool pair (`tool_start` / `tool_end`). Echoed back in `PromptResponse.id`. |
-| `turn_id` (`TurnId`) | `string` | Protocol — optional | Groups all events from one agent turn (user prompt → tool calls → assistant reply). Hermes mints a UUID in `on_processing_start`. The Claude Code hook mints one on `UserPromptSubmit` and writes it to a temp file so subsequent `PreToolUse`, `PostToolUse`, and `Stop` events carry the same value. If unset, mobile falls back to chronological ordering. |
-| `agent` (`AgentId`) | `string` | Protocol — optional | Identifies the *sending system* (`'claude-code'`, `'hermes'`, `'simulate'`). If absent, attributed to `'unknown'`. This is distinct from `chat_id` — it names who sent the event, not which conversation it belongs to. |
-| `chat_id` | `string` | DB — `items.chat_id` | Foreign key into `agents.id`. Groups all messages, tool calls, and prompts under one conversation thread. Equivalent to `chat_id` in Hermes (`adapter.py`, `client.py`, `state.py`). In the current one-agent-one-chat model, `chat_id` equals the agent identity (`'claude-code'`, `'hermes'`). |
+| `turn_id` (`TurnId`) | `string` | Protocol — optional | Groups all events from one agent turn (user prompt → tool calls → assistant reply). Hermes mints a UUID in `on_processing_start`. The Claude Code hook mints one on `UserPromptSubmit` and writes it to a temp file so subsequent `PreToolUse`, `PostToolUse`, and `Stop` events carry the same value. If unset (e.g. simulator), mobile falls back to chronological ordering. |
+| `serverId` (`ServerId`) | `string` | Protocol — optional | Identifies which *server* (conversation container) an event belongs to — `'claude-code'`, `'hermes'`, `'simulate'`, etc. The mobile home screen lists one row per server. Events without it are attributed to `'unknown'`. This was formerly called `agent` on the wire; the rename distinguishes the server container from the connected agent identity. |
+| `agentId` (`AgentId`) | `string` | Protocol — optional | The persistent identity of the *connected agent* (harness/bot) that posted the event — stamped from the bearer token by the aji-chat server at ingress. Distinct from `serverId`: a server is the container, an agent is *who posted* into it (eventually many agents per server). Not set by adapters; always server-derived. |
+| `channel` (`ChannelId`) | `string` | Protocol — optional | Scopes a conversation within a server, Discord-style. A conversation is the pair `(serverId, channel)`. Absent means `"general"`, which preserves the original single-conversation-per-server behavior. |
+| `chat_id` | `string` | DB — `items.chat_id` | Conversation-grouping key in the mobile SQLite `items` table. Composed as `serverId:channel` (e.g. `"hermes:daily-brief"`, `"claude-code:general"`). Equivalent to `chat_id` in Hermes's `SessionSource` — both serve as the per-conversation key. |
 | `local_id` | `integer` | DB only | SQLite `AUTOINCREMENT` row ID in the `items` table. Never appears in the protocol or any API response — purely internal to the DB layer. |
 | broadcast | _(concept)_ | Server | Every `ServerEvent` posted to `/event` is forwarded to **all** connected WebSocket clients simultaneously. No per-client routing or filtering. |
 
-> **Hermes callers:** aji-chat's `chat_id` maps directly to Hermes's `chat_id` from `SessionSource`. The difference: in Hermes it's a platform chat identifier (e.g. a Telegram chat ID); in aji-chat it's the agent identity string. Both serve as the conversation-grouping key.
+> **Hermes callers:** aji-chat's `chat_id` maps directly to Hermes's `chat_id` from `SessionSource`. The difference: in Hermes it's a platform chat identifier (e.g. a Telegram chat ID); in aji-chat it's `serverId:channel`. Both serve as the conversation-grouping key.
 
 ---
 

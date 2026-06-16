@@ -4,9 +4,7 @@ aji-chat uses a consistent, theme-aware design system inspired by GitHub's inter
 
 ## Mockup → Implementation Roadmap
 
-The web mockup at [mobile-mockup.html](../../../mobile-mockup.html) serves as the visual reference for the app's UI. It demonstrates patterns and behaviors that need to be implemented in the React Native code. This section is a checklist of patterns shown in the mockup that AI agents (or developers) should implement in the app.
-
-Open the mockup in a browser to see each pattern in action, then implement it in the corresponding React Native file listed in the **Implementation notes** column.
+This section is a checklist of UI patterns and their implementation status. Implement each in the React Native file listed in the **Implementation notes** column.
 
 ### Chat Screen Patterns
 
@@ -26,7 +24,7 @@ Open the mockup in a browser to see each pattern in action, then implement it in
 
 | # | Pattern | Description | Implementation notes | Status |
 |---|---------|-------------|---------------------|--------|
-| 10 | **Prompt response persistence + summary stub** | When a permission prompt or multi-step question is responded to, the full prompt card collapses into a compact summary stub showing what was selected (e.g., "✓ Allowed once · read MEMORY.md · 14:18"). The stub persists across app restarts. | **Requires DB schema change**: add `prompt_responses` table in [`db/database.ts`](../db/database.ts) with columns `id`, `prompt_id`, `chat_id`, `choice`, `responded_at`. Update `respond()` in `app/chat/[chatId].tsx` to insert the response and re-render the item as a stub instead of removing it. | **IN PROGRESS** (Phase 4) |
+| 10 | **Prompt response persistence + summary stub** | When a permission prompt or multi-step question is responded to, the full prompt card collapses into a compact summary stub showing what was selected (e.g., "✓ Allowed once · read MEMORY.md · 14:18"). The stub persists across app restarts. | **Requires DB schema change**: add `prompt_responses` table in [`db/database.ts`](../db/database.ts) with columns `id`, `prompt_id`, `chat_id`, `choice`, `responded_at`. Update `respond()` in `app/chat/[serverId]/[channelId].tsx` to insert the response and re-render the item as a stub instead of removing it. | **IN PROGRESS** (Phase 4) |
 | 11 | **Multi-step question prompts** | Question prompts can have a step indicator (e.g., "1/3") and an "Other" option with a text input. The composer is disabled while waiting on a response. | Extend `PromptOption` type in [`packages/protocol/src/index.ts`](../../../packages/protocol/src/index.ts) to support step metadata. Render an "Other" option with an inline `TextInput` that submits as a custom response. | **PLANNED** (Phase 5) |
 | 12 | **Permission request rationale card** | Permission requests show: title, scope badge (e.g., "project (local)"), description, code snippet of what will run, rationale text, and three action buttons (Deny, Always allow, Allow once). | Extend the prompt renderer in `Row()` to handle `kind: 'prompt'` items with a `scope` and `code` payload. Style with `attention` class equivalent (warn-colored border + glow). | **PLANNED** (Phase 5) |
 
@@ -54,7 +52,7 @@ Open the mockup in a browser to see each pattern in action, then implement it in
 
 ### Implementation Notes by File
 
-**Core Chat Screen:** `app/chat/[chatId].tsx`
+**Core Chat Screen:** `app/chat/[serverId]/[channelId].tsx`
 - Uses **inverted FlatList** (newest at visual bottom, oldest at top)
 - Items stored chronologically; reversed only at FlatList boundary
 - Computes `groupStartIds` Set and `newestId` once per items change for id-based lookups
@@ -544,6 +542,5 @@ function makeStyles(colors: ThemeColors) {
 
 ---
 
-**Last updated:** May 2026  
-**Author:** Design System Team  
+**Last updated:** June 2026  
 **Related:** [Theme constants](../constants/theme.ts), [Theme context](../context/ThemeContext.tsx)

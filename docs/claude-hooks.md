@@ -36,11 +36,13 @@ Claude Code Desktop
 
 | Claude Code Event | Aji-Chat Events | Purpose |
 |---|---|---|
-| `UserPromptSubmit` | `message_start` → `text_delta` → `message_end` → `status:thinking` | User's prompt is relayed to mobile |
-| `PreToolUse` | `status:working` → `tool_start` | Tool invocation begins |
+| `UserPromptSubmit` | `message_start` → `text_delta` → `message_end` → `status:thinking` → `server_info` → `commands` | User's prompt is relayed to mobile (skipped when the prompt came from the phone itself); server info + command list refreshed |
+| `PreToolUse` | `status:working` → `tool_start` | Tool invocation begins; `tool_use_id` preserved for pairing with `PostToolUse` |
 | `PostToolUse` | `tool_end` | Tool completes with result |
-| `PermissionRequest` | `permission_request` + wait for response | Permission prompt sent to both desktop and mobile |
-| `Stop` | Last assistant message as `message_start/text_delta/message_end` → `status:idle` | Assistant's final response extracted and sent |
+| `PermissionRequest` | `permission_request` + wait up to 10 minutes for response | Permission prompt sent to both desktop and mobile |
+| `Stop` | Last assistant message as `message_start/text_delta/message_end` → `status:idle` → `server_info` → `commands` | Final response extracted from transcript JSONL and sent; command list refreshed |
+
+All events carry `serverId: 'claude-code'` and a `turn_id` shared across the entire turn. The `turn_id` is minted on `UserPromptSubmit`, written to a temp file (`/tmp/aji-turn-<session_id>`), and read back on subsequent events so the mobile UI can group them visually.
 
 ---
 
@@ -53,7 +55,7 @@ Claude Code Desktop          Hook                 Server              Mobile
         │                     │                     │                   │
         ├─ PermissionRequest──>│                     │                   │
         │                     ├─ POST /prompt/wait──>│                   │
-        │                     │  (waits indefinitely)├─ broadcast ──────>│
+        │                     │  (up to 10 min)      ├─ broadcast ──────>│
         │                     │                     │  permission        │
         │    Shows native     │                     │                    │
         │    permission       │                     │  Shows prompt      │
@@ -70,19 +72,16 @@ Claude Code Desktop          Hook                 Server              Mobile
         ├─ user chooses ─────>│                     │                    │
         │ Allow/Deny/Suggest  │ hook outputs        │                    │
         │ in native dialog    │ decision + aborts   │                    │
-        │                     │ the fetch           │<── still pending ──┤
-        │                     │                     │  (abort cleans up  │
-        │                     │                     │   server waiter,   │
-        │                     │                     │   but mobile not   │
-        │                     │                     │   dismissed ⚠️)   │
+        │                     │ the fetch           │                    │
+        │                     │                     │  abort handler:    │
+        │                     │                     │  dismissPrompt() ─>│
+        │                     │                     │  (dismissed ✓)     │
 ```
 
 ### Observed Behavior
 
 ✅ **Mobile responds first** → `resolvePrompt()` broadcasts `prompt_dismiss`; desktop gets decision  
-⚠️ **Desktop responds first** → Hook aborts the fetch; server cleans up the waiter via the abort handler; mobile prompt is **not** dismissed
-
-**Known gap:** When desktop responds, the hook does not call `POST /prompt/cancel/:id`. The endpoint is implemented on the server — calling it after a desktop decision would make the behavior symmetrical. This is a future hook improvement.
+✅ **Desktop responds first** → Hook aborts the fetch; server abort handler cleans up the waiter and calls `dismissPrompt()`, which broadcasts `prompt_dismiss` to mobile
 
 ---
 
@@ -92,7 +91,7 @@ Claude Code Desktop          Hook                 Server              Mobile
 
 **Key variables:**
 - `SERVER` (env: `AJI_SERVER`, default: `http://localhost:4000/event`) — where to POST events
-- `PROMPT_SERVER` (env: `AJI_PROMPT_SERVER`, default: `http://localhost:4000/prompt/wait`) — where to wait for permission responses (waits indefinitely)
+- `PROMPT_SERVER` (env: `AJI_PROMPT_SERVER`, default: `http://localhost:4000/prompt/wait`) — where to wait for permission responses (server timeout: 10 minutes)
 
 **Main function:**
 ```ts
@@ -115,7 +114,7 @@ async function main() {
 **Permission handling:**
 1. Builds permission options from payload
 2. POSTs permission to `/prompt/wait` endpoint
-3. **Waits indefinitely** for the user to respond on mobile
+3. **Waits up to 10 minutes** for the user to respond on mobile (server auto-dismisses after that as a safety valve)
 4. If response arrives → translates to Claude Code hook format and outputs
 5. If the HTTP connection drops (e.g. desktop native dialog was used) → server abort handler cleans up the waiter
 
@@ -128,7 +127,7 @@ async function main() {
 **HTTP Endpoints (Agent-facing):**
 - `POST /event` — Broadcast a single ServerEvent to all WebSocket clients
 - `POST /send` — Convenience: expand plain string into message events
-- `POST /prompt/wait` — Broadcast permission prompt and wait indefinitely for mobile response
+- `POST /prompt/wait` — Broadcast permission prompt and wait up to 10 minutes for mobile response (auto-dismisses on timeout)
 - `POST /prompt/cancel/:id` — Cancel a pending prompt; dismisses it on mobile and resolves any waiting `/prompt/wait` call
 - `POST /prompt/respond` — Inject a prompt response (used by the simulator UI)
 - `POST /webhook` — Register webhook URL for client events
@@ -146,9 +145,16 @@ async function main() {
 function waitForPrompt(prompt) {
   broadcast(prompt)  // Send to all clients
 
-  // No timeout — waits indefinitely until mobile responds or connection drops
   return new Promise((resolve) => {
     promptWaiters.set(prompt.id, { resolve })
+    // Safety valve: auto-dismiss after 10 minutes so a crashed hook doesn't
+    // leave a stale waiter that permanently blocks the prompt slot.
+    setTimeout(() => {
+      if (promptWaiters.delete(prompt.id)) {
+        dismissPrompt(prompt.id)
+        resolve(null)
+      }
+    }, 10 * 60 * 1000)
   })
 }
 ```
@@ -167,7 +173,7 @@ function resolvePrompt(event) {
 
 ## Known Limitation
 
-**Desktop approval doesn't dismiss mobile.** When the desktop native dialog is used, the hook aborts the `/prompt/wait` fetch. The server's abort handler cleans up the waiter but does not call `dismissPrompt()`. To make this symmetrical, the hook should call `POST /prompt/cancel/:id` after outputting its decision — the endpoint is already implemented on the server.
+**Multiple active sessions:** Each Claude Code session spawns its own hook process. If two sessions are running simultaneously and the same mobile prompt ID collides (unlikely but possible), the second `prompt_response` from mobile won't find a waiter. In practice this is rare — Claude Code sessions are typically run one at a time.
 
 ---
 

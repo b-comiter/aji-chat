@@ -42,7 +42,7 @@ The bridge is an **adapter**, consistent with the project philosophy: it require
 
 | Piece | File | Role |
 |---|---|---|
-| Protocol field | `packages/protocol/src/index.ts` | `UserMessage.agent?: AgentId` — routes a mobile message to a specific agent |
+| Protocol field | `packages/protocol/src/index.ts` | `UserMessage.serverId?: ServerId` — routes a mobile message to a specific server |
 | Mobile send | `apps/mobile/hooks/useChatActions.ts` | stamps `agent: chatId` on each `user_message` |
 | Bridge | `tools/aji-channel-bridge.ts` | stdio MCP server + webhook receiver → channel notification |
 | Smoke test | `tools/aji-channel-bridge.smoke.ts` | verifies routing in isolation (`pnpm channel:smoke`) |
