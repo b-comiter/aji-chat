@@ -7,15 +7,15 @@
     "development": {
       "developmentClient": true,
       "distribution": "internal",
-      "prebuildCommand": "cd apps/mobile && expo prebuild --non-interactive --no-install"
+      "prebuildCommand": "cd apps/mobile && pnpm expo prebuild"
     },
     "preview": {
       "distribution": "internal",
-      "prebuildCommand": "cd apps/mobile && expo prebuild --non-interactive --no-install"
+      "prebuildCommand": "cd apps/mobile && pnpm expo prebuild"
     },
     "production": {
       "autoIncrement": true,
-      "prebuildCommand": "cd apps/mobile && expo prebuild --non-interactive --no-install"
+      "prebuildCommand": "cd apps/mobile && pnpm expo prebuild"
     }
   },
   "submit": {
