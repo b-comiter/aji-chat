@@ -77,7 +77,7 @@ export default function ChatScreen() {
     commands,
     hasMoreOlder,
     loadOlder,
-  } = useChatSession(resolvedServerId, resolvedChannel, db, subscribe)
+  } = useChatSession(resolvedServerId, resolvedChannel, db, subscribe, conn)
 
   const { sendMessage, sendAudio, sendAttachment, respond } = useChatActions({ chatId: resolvedServerId, channel: resolvedChannel, db, conn, sendEvent, items, setItems })
   const kbOffset = useKeyboardOffset(safeBottom)

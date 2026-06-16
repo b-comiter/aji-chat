@@ -31,9 +31,11 @@ import { rowToItem } from './chatTypes'
 import type { Item } from './chatTypes'
 import { tryApprovalPrompt } from './hermesApproval'
 import { reduceItemsForServerEvent } from './useChatSessionReducer'
+import type { ConnStatus } from '../context/WebSocketContext'
 
 const WINDOW_LIMIT = 200
 const BATCH_SIZE = 100
+const INACTIVITY_TIMEOUT_MS = 2 * 60 * 1000
 
 // Hermes approval requests are transmitted as text messages and converted to
 // prompt items by tryApprovalPrompt during DB intake and WS message completion.
@@ -48,6 +50,7 @@ export function useChatSession(
   channel: string,
   db: SQLiteDatabase,
   subscribe: SubscribeFn,
+  conn: ConnStatus,
 ) {
   const [items, setItems] = useState<Item[]>([])
   const [agentStatus, setAgentStatus] = useState<AgentStatus>('idle')
@@ -61,6 +64,21 @@ export function useChatSession(
   const localIdMapRef = useRef<Map<string, number>>(new Map())
 
   const loadingOlderRef = useRef(false)
+  const inactivityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const clearInactivityTimer = useCallback(() => {
+    if (inactivityTimerRef.current) {
+      clearTimeout(inactivityTimerRef.current)
+      inactivityTimerRef.current = null
+    }
+  }, [])
+
+  const resetInactivityTimer = useCallback(() => {
+    clearInactivityTimer()
+    inactivityTimerRef.current = setTimeout(() => {
+      setAgentStatus('idle')
+    }, INACTIVITY_TIMEOUT_MS)
+  }, [clearInactivityTimer])
 
   // For live appends, keep the newest WINDOW_LIMIT items by dropping oldest.
   const capLiveWindow = useCallback((arr: Item[]): Item[] => {
@@ -103,6 +121,15 @@ export function useChatSession(
     if (headId != null) oldestLocalIdRef.current = headId
   }, [])
 
+  // Reset status to idle when the WS connection drops — the agent is unreachable
+  // and any in-progress work can no longer be tracked.
+  useEffect(() => {
+    if (conn === 'disconnected') {
+      setAgentStatus('idle')
+      clearInactivityTimer()
+    }
+  }, [conn, clearInactivityTimer])
+
   // -------------------------------------------------------------------------
   // Initial load
   // -------------------------------------------------------------------------
@@ -112,6 +139,7 @@ export function useChatSession(
     setCommands([])
     setHasMoreOlder(false)
     setAgentStatus('idle')
+    clearInactivityTimer()
 
     oldestLocalIdRef.current = null
     localIdMapRef.current = new Map()
@@ -144,8 +172,9 @@ export function useChatSession(
 
     return () => {
       cancelled = true
+      clearInactivityTimer()
     }
-  }, [db, chatId, channel, intakeRows])
+  }, [db, chatId, channel, intakeRows, clearInactivityTimer])
 
   // Hydrate slash command cache for this chat so reload/offline still shows picker data.
   useEffect(() => {
@@ -210,6 +239,11 @@ export function useChatSession(
 
     if (event.type === 'status') {
       setAgentStatus(event.value)
+      if (event.value === 'idle') {
+        clearInactivityTimer()
+      } else {
+        resetInactivityTimer()
+      }
       return
     }
     if (event.type === 'commands') {
@@ -217,13 +251,17 @@ export function useChatSession(
       return
     }
 
+    // Any non-status, non-commands event from the agent is a sign of life —
+    // reset the inactivity timer so we only auto-idle on true silence.
+    resetInactivityTimer()
+
     setItems((prev) =>
       reduceItemsForServerEvent(prev, event, turnId, {
         capWindow: capLiveWindow,
         tryApprovalPrompt,
       }),
     )
-  }, [capLiveWindow])
+  }, [capLiveWindow, clearInactivityTimer, resetInactivityTimer])
 
   useEffect(() => {
     if (!chatId) return

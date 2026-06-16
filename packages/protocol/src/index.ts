@@ -24,9 +24,11 @@ export type AgentStatus = 'thinking' | 'working' | 'idle'
 /**
  * Optional grouping ID that ties together every event belonging to a single
  * agent turn (user message → tool calls → assistant response). Set by adapters
- * with turn boundaries available (e.g. the Hermes plugin mints one in
- * `on_processing_start`). The Claude Code hook path leaves this unset and the
- * mobile UI falls back to chronological ordering.
+ * with turn boundaries available: the Hermes plugin mints one in
+ * `on_processing_start`; the Claude Code hook mints one on `UserPromptSubmit`
+ * and persists it per-session so all subsequent tool and message events carry
+ * the same value. If unset (e.g. from the simulator), mobile falls back to
+ * chronological ordering.
  */
 export type TurnId = string
 
@@ -454,11 +456,6 @@ export function textMessage(
 }
 
 /**
- * Construct a single `file` event from a base64 payload. `role` defaults to
- * 'assistant'; undefined optional fields are omitted so the wire shape stays
- * minimal. Pass `turn_id` to group the file with a wider agent turn.
- */
-/**
  * Construct a single `user_file` ClientEvent. Mirrors `fileMessage` but for the
  * client→server direction — used by the mobile composer's voice mode to ship a
  * recorded clip to the agent.
@@ -486,6 +483,11 @@ export function userFileMessage(
   }
 }
 
+/**
+ * Construct a single `file` event from a base64 payload. `role` defaults to
+ * 'assistant'; undefined optional fields are omitted so the wire shape stays
+ * minimal. Pass `turn_id` to group the file with a wider agent turn.
+ */
 export function fileMessage(
   mime: string,
   data: string,
