@@ -6,13 +6,16 @@
   "build": {
     "development": {
       "developmentClient": true,
-      "distribution": "internal"
+      "distribution": "internal",
+      "prebuildCommand": "cd apps/mobile && expo prebuild --non-interactive --no-install"
     },
     "preview": {
-      "distribution": "internal"
+      "distribution": "internal",
+      "prebuildCommand": "cd apps/mobile && expo prebuild --non-interactive --no-install"
     },
     "production": {
-      "autoIncrement": true
+      "autoIncrement": true,
+      "prebuildCommand": "cd apps/mobile && expo prebuild --non-interactive --no-install"
     }
   },
   "submit": {
