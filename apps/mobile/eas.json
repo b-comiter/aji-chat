@@ -6,16 +6,13 @@
   "build": {
     "development": {
       "developmentClient": true,
-      "distribution": "internal",
-      "prebuildCommand": "cd apps/mobile && pnpm expo prebuild"
+      "distribution": "internal"
     },
     "preview": {
-      "distribution": "internal",
-      "prebuildCommand": "cd apps/mobile && pnpm expo prebuild"
+      "distribution": "internal"
     },
     "production": {
-      "autoIncrement": true,
-      "prebuildCommand": "cd apps/mobile && pnpm expo prebuild"
+      "autoIncrement": true
     }
   },
   "submit": {
