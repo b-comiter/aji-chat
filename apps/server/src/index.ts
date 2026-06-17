@@ -16,6 +16,7 @@ import {
 } from './agents'
 import { loadJson, saveJson } from './persist'
 import { loadPushState, registerPushToken, setServerMuted, observeForPush } from './push'
+import { selectMissedEvents } from './replay'
 import { registerDebugRoutes } from './debugRoutes'
 
 const PORT = Number(process.env.AJI_PORT) || 4000
@@ -65,6 +66,18 @@ const MAX_BUFFER = 500
 const eventBuffer: Array<{ seq: number; event: ServerEvent }> = []
 let nextSeq = 0
 
+// Per-process boot id, stamped on every envelope. The ring buffer + seq counter
+// are in-memory, so a restart resets `seq` to 0 while clients still hold a high
+// persisted cursor. Clients compare this epoch to detect the restart and reset
+// their cursor (see WebSocketContext); on the first reconnect the server also
+// replays the whole buffer (see selectMissedEvents) so nothing is dropped.
+const EPOCH = Date.now()
+
+/** Wire envelope for a buffered event — carries the seq cursor + boot epoch. */
+function envelope(seq: number, event: ServerEvent): string {
+  return JSON.stringify({ seq, epoch: EPOCH, event })
+}
+
 // Load persisted state at startup.
 loadAgents()
 loadChannels()
@@ -109,7 +122,7 @@ function bufferAndSend(ws: WebSocket, event: ServerEvent): void {
   const seq = nextSeq++
   eventBuffer.push({ seq, event })
   if (eventBuffer.length > MAX_BUFFER) eventBuffer.shift()
-  ws.send(JSON.stringify({ seq, event }))
+  ws.send(envelope(seq, event))
 }
 
 function replayCommandsTo(ws: WebSocket): void {
@@ -129,7 +142,7 @@ function broadcast(event: ServerEvent): void {
   eventBuffer.push({ seq, event })
   if (eventBuffer.length > MAX_BUFFER) eventBuffer.shift()
 
-  const payload = JSON.stringify({ seq, event })
+  const payload = envelope(seq, event)
   for (const client of clients) {
     if (client.readyState === WebSocket.OPEN) client.send(payload)
   }
@@ -377,10 +390,14 @@ wss.on('connection', (ws, request) => {
         broadcast(channelsEvent(event.serverId))
       } else if (event.type === 'get_missed_events') {
         const after = event.after_seq
-        const missed = eventBuffer.filter((e) => e.seq > after)
-        log(' ', `ws:get_missed_events  after=${after} replaying=${missed.length}`)
+        // Restart-aware: a cursor ahead of our seq counter means the client is
+        // from a previous instance, so replay the whole buffer rather than
+        // filtering everything out (see selectMissedEvents).
+        const missed = selectMissedEvents(eventBuffer, after, nextSeq)
+        const restarted = after >= nextSeq
+        log(' ', `ws:get_missed_events  after=${after} replaying=${missed.length}${restarted ? ' (server restart — full replay)' : ''}`)
         for (const entry of missed) {
-          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(entry))
+          if (ws.readyState === WebSocket.OPEN) ws.send(envelope(entry.seq, entry.event))
         }
       } else if (event.type === 'register_push') {
         if (registerPushToken(event.token)) {
