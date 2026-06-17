@@ -31,6 +31,7 @@ interface PromptResponse {
 
 interface PermissionSuggestion {
   type?: string
+  mode?: string
   destination?: string
   behavior?: 'allow' | 'deny' | 'ask'
   rules?: Array<{ toolName?: string; ruleContent?: string }>
@@ -139,11 +140,40 @@ function permissionScopeLabel(destination: string | undefined): string {
   }
 }
 
-function permissionSuggestionLabel(suggestion: PermissionSuggestion, index: number): string {
-  if (suggestion.type === 'addRules' && suggestion.behavior === 'allow') {
-    return `Always allow (${permissionScopeLabel(suggestion.destination)})`
+// "/Users/bcom/Desktop" → "Desktop/" — the short, human form Claude Code's TUI
+// uses when naming a directory scope.
+function shortDir(dir: string): string {
+  const name = dir.replace(/\/+$/, '').split('/').pop() || dir
+  return `${name}/`
+}
+
+/**
+ * Summarize ALL permission suggestions into the single label Claude Code's TUI
+ * shows for its combined "Yes, allow …" option. Claude Code applies the whole
+ * suggestion set together (e.g. acceptEdits mode + an added directory), so we
+ * surface one option, not one per suggestion.
+ */
+function describeSuggestions(suggestions: PermissionSuggestion[]): string {
+  let acceptEdits = false
+  let allowRules = false
+  let denyRules = false
+  const dirs: string[] = []
+  let destination: string | undefined
+  for (const s of suggestions) {
+    if (s.destination) destination = s.destination
+    if (s.type === 'setMode' && s.mode === 'acceptEdits') acceptEdits = true
+    else if (s.type === 'addDirectories' && Array.isArray(s.directories)) dirs.push(...s.directories)
+    else if (s.type === 'addRules') {
+      if (s.behavior === 'deny') denyRules = true
+      else allowRules = true
+    }
   }
-  return `Apply suggestion ${index + 1}`
+  const scope = permissionScopeLabel(destination)
+  const where = dirs.length ? ` in ${dirs.map(shortDir).join(', ')}` : ''
+  if (acceptEdits) return `Allow all edits${where} (${scope})`
+  if (denyRules) return `Always deny (${scope})`
+  if (allowRules || dirs.length) return `Always allow${where} (${scope})`
+  return `Apply suggested permissions (${scope})`
 }
 
 function buildPermissionOptions(payload: Record<string, unknown>): {
@@ -154,10 +184,12 @@ function buildPermissionOptions(payload: Record<string, unknown>): {
     ? payload.permission_suggestions as PermissionSuggestion[]
     : []
 
+  // Claude Code applies the whole suggestion set as one "allow" action, so we
+  // mirror its three-option layout: allow once / allow + apply suggestions / deny.
   const options: PromptOption[] = [{ id: 'allow_once', label: 'Allow once' }]
-  suggestions.forEach((suggestion, index) => {
-    options.push({ id: `suggestion:${index}`, label: permissionSuggestionLabel(suggestion, index) })
-  })
+  if (suggestions.length > 0) {
+    options.push({ id: 'apply_suggestions', label: describeSuggestions(suggestions) })
+  }
   options.push({ id: 'deny', label: 'Deny' })
 
   return { options, suggestions }
@@ -303,16 +335,14 @@ async function main(): Promise<void> {
         break
       }
 
-      if (response.choice.startsWith('suggestion:')) {
-        const index = Number(response.choice.slice('suggestion:'.length))
-        const suggestion = suggestions[index]
-        if (!suggestion) break
+      if (response.choice === 'apply_suggestions') {
+        if (suggestions.length === 0) break
         writeHookJson({
           hookSpecificOutput: {
             hookEventName: 'PermissionRequest',
             decision: {
               behavior: 'allow',
-              updatedPermissions: [suggestion],
+              updatedPermissions: suggestions,
             },
           },
         })
