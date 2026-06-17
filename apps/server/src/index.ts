@@ -15,6 +15,7 @@ import {
   loadAgents, saveAgents, bearerToken, agentIdForToken, getAgentRecord, hasToken, mintAgent,
 } from './agents'
 import { loadJson, saveJson } from './persist'
+import { loadPushState, registerPushToken, setServerMuted, observeForPush } from './push'
 import { registerDebugRoutes } from './debugRoutes'
 
 const PORT = Number(process.env.AJI_PORT) || 4000
@@ -68,6 +69,7 @@ let nextSeq = 0
 loadAgents()
 loadChannels()
 loadServerInfo()
+loadPushState()
 
 // ---------------------------------------------------------------------------
 // Logging
@@ -131,6 +133,15 @@ function broadcast(event: ServerEvent): void {
   for (const client of clients) {
     if (client.readyState === WebSocket.OPEN) client.send(payload)
   }
+
+  // Feed every event to the push module — it accumulates streamed text and
+  // decides what (if anything) to deliver out-of-band. Synchronous + isolated:
+  // it never blocks or breaks the WS broadcast. Only live broadcasts are
+  // observed; reconnect replay goes through bufferAndSend/ws.send directly, so
+  // the user isn't re-alerted on reconnect.
+  const pushServerId = 'serverId' in event ? event.serverId : undefined
+  observeForPush(event, pushServerId ? serverInfoCache.get(pushServerId)?.displayName : undefined)
+
   if (event.type === 'file') {
     log(' ', '(file event data omitted)', { ...event, data: '[base64 data]' })
   } else if (event.type === 'commands') {
@@ -371,8 +382,20 @@ wss.on('connection', (ws, request) => {
         for (const entry of missed) {
           if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(entry))
         }
+      } else if (event.type === 'register_push') {
+        if (registerPushToken(event.token)) {
+          log(' ', `ws:register_push  ${event.platform ?? '-'} token=…${event.token.slice(-12)}`)
+        }
+      } else if (event.type === 'set_mute') {
+        setServerMuted(event.serverId, event.muted)
+        log(' ', `ws:set_mute  serverId=${event.serverId} muted=${event.muted}`)
       }
-      dispatchToWebhooks(event)
+
+      // register_push / set_mute are infra (the phone configuring its own
+      // delivery) — not agent-facing messages, so they're never forwarded.
+      if (event.type !== 'register_push' && event.type !== 'set_mute') {
+        dispatchToWebhooks(event)
+      }
     } catch {
       log(' ', 'ws:unparseable', raw.toString().slice(0, 200))
     }

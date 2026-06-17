@@ -158,7 +158,7 @@ function applyLiveServerEvent(prev: ServerRow[], event: ServerEvent): ServerRow[
 
 export default function HomeScreen() {
   const db = useDB()
-  const { conn, subscribe } = useWS()
+  const { conn, subscribe, sendEvent } = useWS()
   const { colors } = useTheme()
   const styles = useMemo(() => makeStyles(colors), [colors])
   const [servers, setServers] = useState<ServerRow[]>([])
@@ -178,7 +178,9 @@ export default function HomeScreen() {
     const next = !isServerMuted(server)
     setServers((prev) => prev.map((s) => (s.id === server.id ? { ...s, muted: next ? 1 : 0 } : s)))
     setServerMuted(db, server.id, next).catch(console.warn)
-  }, [db])
+    // Mirror to the server so it also suppresses push notifications for it.
+    sendEvent({ type: 'set_mute', serverId: server.id, muted: next })
+  }, [db, sendEvent])
 
   const togglePin = useCallback((server: ServerRow) => {
     const next = !isServerPinned(server)

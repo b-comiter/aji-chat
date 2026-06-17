@@ -215,6 +215,53 @@ pnpm dlx eas-cli build:inspect --platform ios --stage archive --output /tmp/eas-
 ls /tmp/eas-archive/apps/mobile/assets/images/   # should list aji-logo.png et al.
 ```
 
+## Push Notifications
+
+The app receives a remote push when a new message arrives while it's backgrounded or killed — so you're alerted even when aji-chat isn't open.
+
+### How it works
+
+```
+Agent → POST /event → Server.broadcast()
+                          ├─ WebSocket → live clients (in-app)
+                          └─ push.observeForPush() → Expo Push API → APNs → your phone
+```
+
+- On every (re)connect the phone registers its **Expo push token** and syncs its per-server **mute** state (`register_push` + `set_mute` events).
+- The server feeds every broadcast event to the push module, which decides what to deliver. All the delivery logic — which events alert, the preview text, mute filtering — lives in `apps/server/src/push.ts`, an isolated, swappable seam, so the core stays a dumb router.
+- Tokens and mutes are persisted (`push_tokens.json`, `push_mutes.json`) and tokens auto-prune when Expo reports `DeviceNotRegistered` (e.g. after an uninstall).
+- Delivery is outbound from the server to `exp.host`, so it works off-network too (the phone doesn't need to be reachable) — but the server **does** need outbound internet.
+
+### WhatsApp/Telegram-style behavior
+
+- **Message preview** — streamed `text_delta`s are accumulated in the push module (keyed by message id, bounded) and sent as the notification body on `message_end`, so you see the actual message, not "New message". The body falls back to a generic string only for empty/file messages.
+- **Tap to open the chat** — each push carries `data: { serverId, channel }`; tapping it deep-links straight to that conversation (warm or cold start).
+- **App-icon badge** — kept in sync with the total unread count (the same tally the home-screen pills use); cleared per-chat when you open it.
+- **Smart suppression** — a push for the chat you're currently viewing is shown in-app as a chime only, not a banner.
+- **Per-server mute** — the mute toggle is mirrored to the server, so muted servers don't push. Your own messages never alert.
+
+### Setup (iOS)
+
+1. **Requires a real build** — push does not work in Expo Go or the simulator. Use a `development` or `preview` build (see [iOS Builds](#ios-builds-eas)).
+2. The `expo-notifications` config plugin (in `app.json`) adds the `aps-environment` entitlement automatically.
+3. On your next `eas build`, EAS will prompt to create an **Apple Push Notifications key** (or reuse one) — accept it. This needs your Apple Developer account, which is why the account was required.
+4. Launch the build and grant the notification permission prompt. The token registers automatically on connect.
+
+### Testing it
+
+With a real build installed and the app **backgrounded**, send a message from the server:
+
+```bash
+pnpm send "ping from the server"
+```
+
+You should get a banner notification showing the message text. Check the server log for `ws:register_push` (token received) and confirm `push_tokens.json` exists in your data dir (`~/.aji-chat/` by default). Tap the notification — it should open that exact conversation.
+
+### Notes
+
+- The preview body fires on **message completion** (`message_end`), so for a long streamed reply the notification lands when the message finishes, not when it starts.
+- Badge counts and mute sync rely on the phone being the source of truth; the server mirrors them via `set_mute` and self-heals the full state on reconnect.
+
 ## Agent Integration
 
 ### Claude Code

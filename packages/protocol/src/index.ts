@@ -411,7 +411,36 @@ export interface GetMissedEvents {
   after_seq: number
 }
 
-export type ClientEvent = UserMessage | UserFile | PromptResponse | ClearChannel | CreateChannel | DeleteChannel | GetCommands | GetMissedEvents
+/**
+ * Register an Expo push token so the server can deliver a remote push when a new
+ * message arrives while the app is backgrounded or killed. Mobile sends this on
+ * every (re)connect; the server keeps a token registry and prunes tokens Expo
+ * reports as no longer registered (`DeviceNotRegistered`). This is the only path
+ * by which the dumb-router server learns where to deliver out-of-band alerts —
+ * actual notification fan-out lives in the swappable `push` module.
+ */
+export interface RegisterPush {
+  type: 'register_push'
+  /** Expo push token, e.g. "ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]". */
+  token: string
+  /** Originating platform, for future per-platform formatting. */
+  platform?: 'ios' | 'android'
+}
+
+/**
+ * Sync a server's mute state so the server suppresses push notifications for it.
+ * The mute toggle is otherwise client-side (it silences the in-app chime); this
+ * mirrors it to the server, which can't see the client's local DB. Mobile sends
+ * one on toggle and replays the full muted set on (re)connect. Handled by the
+ * swappable `push` module — the dumb router just routes it there.
+ */
+export interface SetMute {
+  type: 'set_mute'
+  serverId: ServerId
+  muted: boolean
+}
+
+export type ClientEvent = UserMessage | UserFile | PromptResponse | ClearChannel | CreateChannel | DeleteChannel | GetCommands | GetMissedEvents | RegisterPush | SetMute
 
 // ---------------------------------------------------------------------------
 // Helpers

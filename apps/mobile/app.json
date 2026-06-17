@@ -60,6 +60,7 @@
       "expo-status-bar",
       "expo-web-browser",
       "expo-asset",
+      "expo-notifications",
       [
         "expo-media-library",
         {

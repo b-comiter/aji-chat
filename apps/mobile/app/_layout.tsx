@@ -7,6 +7,7 @@ import { WSProvider } from '../context/WebSocketContext'
 import { ThemeProvider } from '../context/ThemeContext'
 import { AudioPlayerProvider } from '../context/AudioPlayerContext'
 import { MiniPlayer } from '../components/audio/MiniPlayer'
+import { PushRegistrar } from '../hooks/usePushNotifications'
 
 SplashScreen.preventAutoHideAsync()
 
@@ -17,6 +18,7 @@ export default function RootLayout() {
     <DBProvider>
       <ThemeProvider>
         <WSProvider>
+          <PushRegistrar />
           <AudioPlayerProvider>
             <View style={{ flex: 1 }}>
               <Stack screenOptions={{ headerShown: false }}>

@@ -22,6 +22,8 @@ import * as Clipboard from 'expo-clipboard'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useDB } from '../../../db/DBProvider'
 import { serverDisplayName, DEFAULT_CHANNEL, deleteItem, getChannelLastRead, markChannelRead } from '../../../db/database'
+import { syncAppBadge } from '../../../utils/badge'
+import { setFocusedChat } from '../../../utils/focusedChat'
 import { useWS } from '../../../context/WebSocketContext'
 import { useTheme } from '../../../context/ThemeContext'
 import type { Item } from '../../../hooks/chatTypes'
@@ -97,17 +99,28 @@ export default function ChatScreen() {
         if (cancelled) return
         setUnreadBaseline(ts)
         setOpenedAt(Date.now())
-        markChannelRead(db, resolvedServerId, resolvedChannel).catch(() => {})
+        markChannelRead(db, resolvedServerId, resolvedChannel)
+          .then(() => syncAppBadge(db))
+          .catch(() => {})
       })
       .catch(() => {})
     return () => { cancelled = true }
   }, [db, resolvedServerId, resolvedChannel])
 
-  // Re-mark read on blur so messages that streamed in while viewing are cleared
-  // from the home + channel-list badges when the user leaves.
+  // Mark this the focused chat while the screen is mounted+focused (so a push
+  // for it is suppressed in-app), and re-mark read on blur so messages that
+  // streamed in while viewing are cleared from the home + channel-list badges.
   useFocusEffect(
-    useCallback(() => () => {
-      if (resolvedServerId) markChannelRead(db, resolvedServerId, resolvedChannel).catch(() => {})
+    useCallback(() => {
+      if (resolvedServerId) setFocusedChat(resolvedServerId, resolvedChannel)
+      return () => {
+        setFocusedChat(null)
+        if (resolvedServerId) {
+          markChannelRead(db, resolvedServerId, resolvedChannel)
+            .then(() => syncAppBadge(db))
+            .catch(() => {})
+        }
+      }
     }, [db, resolvedServerId, resolvedChannel]),
   )
 

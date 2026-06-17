@@ -46,6 +46,7 @@ import { convKey } from '../db/convKey'
 import { filePreviewLabel } from '../components/chat/fileHelpers'
 import { SERVER_CONFIG } from '../constants/server'
 import { useMessageSound } from '../hooks/useMessageSound'
+import { syncAppBadge } from '../utils/badge'
 
 const SERVER_WS = SERVER_CONFIG.wsEndpoint
 const BACKOFF = [1000, 2000, 4000, 8000, 16000, 30000]
@@ -339,6 +340,12 @@ export function WSProvider({ children }: { children: ReactNode }) {
 
     // Fan out to subscribers regardless of DB success
     notify(key, event)
+
+    // A new message/file changes the unread tally — keep the app-icon badge in
+    // step (the item is already persisted above, so getUnreadCounts sees it).
+    if (event.type === 'message_end' || event.type === 'file') {
+      syncAppBadge(db).catch(() => {})
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -404,8 +411,14 @@ export function WSProvider({ children }: { children: ReactNode }) {
       connect()
     })
 
+    // Reconcile the app-icon badge with persisted unread on launch.
+    syncAppBadge(db).catch(() => {})
+
     const appState = AppState.addEventListener('change', (next) => {
       if (next === 'active') {
+        // Re-sync the badge — unread may have changed while backgrounded (pushes
+        // arrived) or been cleared by opening a chat on another device.
+        syncAppBadge(db).catch(() => {})
         const s = ws.current?.readyState
         if (s === WebSocket.CLOSED || s === WebSocket.CLOSING) {
           if (timer.current) clearTimeout(timer.current)
