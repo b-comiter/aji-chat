@@ -159,6 +159,62 @@ Expo creates its own tunnel for hot reload. Scan the new QR code it prints.
 - Unset `AJI_ACCESS_TOKEN` for local-only development — the token is only needed when the tunnel is running.
 - `/status` is intentionally exempt from auth (it only returns a connected-client count).
 
+## iOS Builds (EAS)
+
+Cloud builds are produced with [EAS Build](https://docs.expo.dev/build/introduction/). Run all build commands from `apps/mobile`.
+
+### Build profiles (`apps/mobile/eas.json`)
+
+| Profile | Distribution | Use for |
+|---|---|---|
+| `development` | internal, dev client | Running against the Metro dev server |
+| `preview` | internal (ad-hoc) | **Installing on your own device** without the App Store |
+| `production` | store | TestFlight / App Store submission |
+
+### Get the app onto your iPhone (no App Store)
+
+Use **internal distribution** (`preview` profile). Requires a paid **Apple Developer Program** account ($99/yr) — ad-hoc provisioning needs it. (A free account only allows USB + Xcode dev builds that expire after 7 days.)
+
+```bash
+cd apps/mobile
+
+# 1. Register your iPhone with EAS (one-time per device)
+pnpm dlx eas-cli device:create
+#    → register a new device → open the URL / scan the QR on your iPhone
+#    → install the provisioning profile when iOS prompts
+
+# 2. Build for internal distribution
+pnpm dlx eas-cli build --platform ios --profile preview
+
+# 3. EAS prints a QR code + install link when done.
+#    Open the link in Safari on your iPhone → tap Install.
+#    The app lands on your home screen.
+```
+
+> Note: `eas build` with no `--profile` defaults to `production`, which is an App Store distribution build — it can **only** be installed via TestFlight, not sideloaded. Use `--profile preview` for direct device installs.
+
+### Alternative: TestFlight
+
+To share with other testers (or to use a `production` build):
+
+```bash
+pnpm dlx eas-cli submit --platform ios   # uploads to App Store Connect
+```
+
+Add testers in App Store Connect and install via the **TestFlight** app. Internal testers skip Apple review.
+
+### Monorepo gotcha: `.easignore`
+
+This is a pnpm monorepo, and EAS's default git-tree archiver **drops committed binary assets** (the app icon PNG, fonts) from the uploaded build — causing prebuild to fail with `ENOENT: ... aji-logo.png` even though the files are committed. The root `.easignore` fixes this: its presence switches EAS to a working-directory copy that includes the physically-present files. **Do not delete `.easignore`.**
+
+To verify what EAS actually uploads (without running a full build):
+
+```bash
+cd apps/mobile
+pnpm dlx eas-cli build:inspect --platform ios --stage archive --output /tmp/eas-archive
+ls /tmp/eas-archive/apps/mobile/assets/images/   # should list aji-logo.png et al.
+```
+
 ## Agent Integration
 
 ### Claude Code
