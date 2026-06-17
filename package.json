@@ -16,6 +16,8 @@
     "hermes:uninstall": "tsx tools/hermes-plugin-uninstall.ts",
     "channel:bridge": "tsx tools/claude-channel-bridge.ts",
     "channel:smoke": "tsx tools/claude-channel-bridge.smoke.ts",
+    "autolaunch": "tsx tools/claude-auto-launcher.ts",
+    "autolaunch:smoke": "tsx tools/claude-auto-launcher.smoke.ts",
     "test:message": "tsx tools/test-mobile-message.ts",
     "test": "jest",
     "test:watch": "jest --watch",
