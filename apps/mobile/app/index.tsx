@@ -136,8 +136,11 @@ function applyLiveServerEvent(prev: ServerRow[], event: ServerEvent): ServerRow[
       return upsertMissingServer(prev, serverId)
 
     case 'message_end':
+      // An arriving agent message clears the live "working/thinking" indicator
+      // (Telegram-style), mirroring the DB write in WebSocketContext so the row
+      // updates instantly without waiting for a focus re-read.
       return prev.map((s) =>
-        s.id === serverId ? { ...s, last_event_at: Date.now() } : s,
+        s.id === serverId ? { ...s, last_event_at: Date.now(), last_status: 'idle' } : s,
       )
 
     case 'status': {

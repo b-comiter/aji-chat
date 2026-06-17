@@ -134,6 +134,14 @@ export function WSProvider({ children }: { children: ReactNode }) {
   // final payload to SQLite only on message_end / tool_end.
   const inFlight = useRef<Map<string, InFlight>>(new Map())
 
+  // Serializes event handling. handleEvent is async, and onmessage fires it
+  // per message without awaiting — so two events (notably a `status:working`
+  // and a later `status:idle`) could otherwise race past their first await and
+  // apply out of order, leaving a stuck "working" indicator. This is most acute
+  // during the rapid get_missed_events replay burst after a reconnect. Chaining
+  // through one promise applies events strictly in receipt (seq) order.
+  const handlerChain = useRef<Promise<void>>(Promise.resolve())
+
   // ---------------------------------------------------------------------------
   // Fan-out helpers
   // ---------------------------------------------------------------------------
@@ -211,6 +219,16 @@ export function WSProvider({ children }: { children: ReactNode }) {
               data: { kind: 'message' as const, id: event.id, role: inf.role ?? 'assistant', text: inf.text ?? '', done: true, turnId: inf.turnId },
               turnId: inf.turnId,
             }, inf.text ?? '')
+
+            // Telegram-style: an arriving agent message means it's done composing,
+            // so clear any lingering "working/thinking" indicator. This self-heals
+            // a stuck status when the agent's explicit `status:idle` never arrives
+            // (crash, dropped event). A genuinely continuing turn re-emits
+            // `status:working` on its next step, which restores the indicator.
+            if (inf.role !== 'user') {
+              await updateServerStatus(db, inf.serverId, 'idle')
+              await updateChannelStatus(db, inf.serverId, inf.channel, 'idle')
+            }
           }
           break
         }
@@ -395,9 +413,11 @@ export function WSProvider({ children }: { children: ReactNode }) {
               }, 500)
             }
           }
-          handleEvent(event).catch((err) =>
-            console.warn('[WSContext] handleEvent error', err),
-          )
+          // Apply events strictly in order (see handlerChain) so status updates
+          // can't race out of sequence.
+          handlerChain.current = handlerChain.current
+            .then(() => handleEvent(event))
+            .catch((err) => console.warn('[WSContext] handleEvent error', err))
         } catch (err) {
           console.warn('[WSContext] parse error', err)
         }
