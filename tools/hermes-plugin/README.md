@@ -40,7 +40,11 @@ Set these in `~/.hermes/.env` (Hermes loads it automatically at gateway start):
 | `AJI_ALLOW_ALL_USERS` | _required_ | Set to `true` — aji-chat is a personal app; network access is the auth boundary |
 | `AJI_PLUGIN_PORT` | `4001` | Local port the plugin's webhook listener binds to |
 | `AJI_PLUGIN_HOST` | `127.0.0.1` | Interface for the webhook listener (use `0.0.0.0` if the aji-chat server runs on a different host) |
-| `AJI_HOME_CHANNEL` | _optional_ | Default `chat_id` for cron delivery |
+| `AJI_HOME_CHANNEL` | `general` | Home channel for cron delivery **and** gateway lifecycle notices (shutdown/restart, "back online"). Accepts a bare channel (`alerts`), a full chat_id (`room:alerts`), or `default`/unset → the `general` channel. |
+
+### Home channel & gateway lifecycle notices
+
+The Hermes gateway sends "⚠️ Gateway restarting…" / "♻️ Gateway online" messages to each platform's **home channel**. The gateway only rehydrates that home channel from `<PLATFORM>_HOME_CHANNEL` at startup for its built-in platforms (Telegram, Discord, …) — plugin platforms are skipped, so without this the messages would never reach aji-chat. The adapter works around it by setting its own home channel at startup from `AJI_HOME_CHANNEL` (defaulting to `general`), so aji-chat receives the same lifecycle notices Telegram does. Running `/sethome` from a channel in the app overrides it (it writes `AJI_HOME_CHANNEL=room:<channel>`).
 
 ## End-to-end run
 

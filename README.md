@@ -234,7 +234,7 @@ Agent → POST /event → Server.broadcast()
 
 ### WhatsApp/Telegram-style behavior
 
-- **Message preview** — streamed `text_delta`s are accumulated in the push module (keyed by message id, bounded) and sent as the notification body on `message_end`, so you see the actual message, not "New message". The body falls back to a generic string only for empty/file messages.
+- **Title + preview** — the title is `server:channel` (the default `general` channel is dropped, so mono-channel servers like Claude Code just show the server name); the body is the message itself. Streamed `text_delta`s are accumulated in the push module (keyed by message id, bounded) and sent on `message_end`, so you see the actual text, not "New message".
 - **Tap to open the chat** — each push carries `data: { serverId, channel }`; tapping it deep-links straight to that conversation (warm or cold start).
 - **App-icon badge** — kept in sync with the total unread count (the same tally the home-screen pills use); cleared per-chat when you open it.
 - **Smart suppression** — a push for the chat you're currently viewing is shown in-app as a chime only, not a banner.

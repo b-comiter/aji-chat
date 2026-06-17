@@ -95,8 +95,12 @@ export function setServerMuted(serverId: string, muted: boolean): void {
 // Pure content helpers
 // ---------------------------------------------------------------------------
 
-function titleFor(displayName?: string, serverId?: string): string {
-  return displayName || serverId || 'aji-chat'
+function titleFor(displayName?: string, serverId?: string, channel?: string): string {
+  const server = displayName || serverId || 'aji-chat'
+  // Show "server:channel" so you can tell conversations apart, but drop the
+  // default 'general' channel — it carries no information (and is the only
+  // channel on mono-channel servers like Claude Code).
+  return channel && channel !== 'general' ? `${server}:${channel}` : server
 }
 
 /** Collapse whitespace and truncate to a notification-friendly preview. */
@@ -121,7 +125,7 @@ export function notificationFor(
   const serverId = opts.serverId ?? ('serverId' in event ? event.serverId : undefined)
   const channel = opts.channel ?? ('channel' in event ? event.channel : undefined)
   const data = { serverId, channel }
-  const title = titleFor(opts.displayName, serverId)
+  const title = titleFor(opts.displayName, serverId, channel)
 
   if (event.type === 'message_end') {
     return { title, body: messagePreview(opts.text ?? ''), data }
