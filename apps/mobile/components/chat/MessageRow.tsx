@@ -11,6 +11,8 @@ import type { Item } from '../../hooks/chatTypes'
 import { stripStreamingCursor } from '../../hooks/chatTypes'
 import { Avatar } from './Avatar'
 import { PromptRow } from './PromptRow'
+import { DiffCard } from './DiffCard'
+import { parseEditDiff } from './diffHelpers'
 import { AudioMessage } from './AudioMessage'
 import { ImageMessage } from './ImageMessage'
 import { fileViewerKind, fileIconName, approxBytesFromBase64, formatBytes } from './fileHelpers'
@@ -252,8 +254,25 @@ export const Row = memo(function Row({ item, onChoose, isGroupStart, dividerKind
     return <PromptRow item={item} onChoose={onChoose} />
   }
 
-  // Tool items are filtered out at the chat-screen level and surface via the
-  // toolBadge on the preceding assistant message instead.
+  // File-edit tool calls render inline as a diff card (Option C). All other tool
+  // items are filtered out at the chat-screen level and surface via the toolBadge
+  // on the preceding assistant message instead.
+  if (item.kind === 'tool') {
+    const diff = parseEditDiff(item.name, item.args, item.result)
+    if (!diff) return null
+    return (
+      <View style={[styles.msgWrapper, dividerKind === 'light' && styles.msgBorderLight,
+      dividerKind === 'heavy' && styles.msgBorderHeavy]}>
+        <View style={styles.msgAlignLeft}>
+          <DiffCard diff={diff} />
+          {item.createdAt != null && (
+            <Text style={styles.time}>{formatMessageTime(item.createdAt)}</Text>
+          )}
+        </View>
+      </View>
+    )
+  }
+
   return null
 })
 
