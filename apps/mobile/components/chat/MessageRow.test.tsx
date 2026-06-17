@@ -6,8 +6,8 @@ import type { Item } from '../../hooks/chatTypes'
 // branch can render in isolation.
 jest.mock('../MarkdownMessage', () => ({ MarkdownMessage: () => null }))
 
-import { Row } from './MessageRow'
 import { AudioPlayerProvider } from '../../context/AudioPlayerContext'
+import { Row } from './MessageRow'
 
 // Native modules expo-audio + expo-file-system aren't available under jest;
 // mock just enough for AudioMessage + AudioPlayerProvider to render.
@@ -23,6 +23,8 @@ jest.mock('expo-file-system/legacy', () => ({
   writeAsStringAsync: jest.fn().mockResolvedValue(undefined),
   EncodingType: { Base64: 'base64' },
 }))
+
+jest.mock('react-native-webview', () => ({ WebView: () => null }))
 
 const noop = () => {}
 
