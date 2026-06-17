@@ -28,8 +28,13 @@ describe('notificationFor — push content + deep-link data', () => {
     })
   })
 
-  it('drops the default "general" channel from the title', () => {
+  it('always includes the channel in the title, including "general"', () => {
     const event: ServerEvent = { type: 'message_end', id: 'm1', serverId: 'hermes', channel: 'general' }
+    expect(notificationFor(event, { displayName: 'Hermes', text: 'hi' })?.title).toBe('Hermes:general')
+  })
+
+  it('omits the channel only when the event carries none', () => {
+    const event: ServerEvent = { type: 'message_end', id: 'm1', serverId: 'hermes' }
     expect(notificationFor(event, { displayName: 'Hermes', text: 'hi' })?.title).toBe('Hermes')
   })
 
