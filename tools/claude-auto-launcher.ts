@@ -211,11 +211,32 @@ async function handleMessage(event: ClientEvent): Promise<void> {
     return
   }
   if (await sessionRunning()) {
-    log('session already running — channel bridge will deliver')
+    // A channel session is live. Closing a tmux-backed Terminal only DETACHES it
+    // (claude keeps running), so if our session exists with no attached client,
+    // re-open a visible Terminal instead of leaving the user with no window.
+    if (await tmuxSessionDetached()) {
+      log('session running but detached — reattaching a visible Terminal')
+      openVisibleTerminal()
+    } else {
+      log('session already running — channel bridge will deliver')
+    }
     return
   }
   log('no live session — launching for:', event.text.slice(0, 80))
   launchSession(event.text)
+}
+
+// True when our tmux session exists but has no attached client (i.e. the user
+// closed the Terminal window; the session is alive but invisible).
+function tmuxSessionDetached(): Promise<boolean> {
+  return new Promise((resolve) => {
+    execFile(TMUX_BIN, ['has-session', '-t', TMUX_SESSION], (hasErr) => {
+      if (hasErr) return resolve(false) // not our tmux session (or none)
+      execFile(TMUX_BIN, ['list-clients', '-t', TMUX_SESSION], (lcErr, stdout) => {
+        resolve(!lcErr && stdout.trim().length === 0)
+      })
+    })
+  })
 }
 
 // ---------------------------------------------------------------------------
