@@ -19,13 +19,23 @@ describe('messagePreview', () => {
 })
 
 describe('notificationFor — push content + deep-link data', () => {
-  it('builds a message_end note with the accumulated preview as the body', () => {
+  it('builds a message_end note titled "server:channel" with the preview as the body', () => {
     const event: ServerEvent = { type: 'message_end', id: 'm1', serverId: 'hermes', channel: 'daily' }
     expect(notificationFor(event, { displayName: 'Hermes', text: 'the answer is 42' })).toEqual({
-      title: 'Hermes',
+      title: 'Hermes:daily',
       body: 'the answer is 42',
       data: { serverId: 'hermes', channel: 'daily' },
     })
+  })
+
+  it('always includes the channel in the title, including "general"', () => {
+    const event: ServerEvent = { type: 'message_end', id: 'm1', serverId: 'hermes', channel: 'general' }
+    expect(notificationFor(event, { displayName: 'Hermes', text: 'hi' })?.title).toBe('Hermes:general')
+  })
+
+  it('omits the channel only when the event carries none', () => {
+    const event: ServerEvent = { type: 'message_end', id: 'm1', serverId: 'hermes' }
+    expect(notificationFor(event, { displayName: 'Hermes', text: 'hi' })?.title).toBe('Hermes')
   })
 
   it('prefers captured serverId/channel over the event for deep-link data', () => {

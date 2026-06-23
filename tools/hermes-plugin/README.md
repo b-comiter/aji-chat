@@ -40,7 +40,22 @@ Set these in `~/.hermes/.env` (Hermes loads it automatically at gateway start):
 | `AJI_ALLOW_ALL_USERS` | _required_ | Set to `true` — aji-chat is a personal app; network access is the auth boundary |
 | `AJI_PLUGIN_PORT` | `4001` | Local port the plugin's webhook listener binds to |
 | `AJI_PLUGIN_HOST` | `127.0.0.1` | Interface for the webhook listener (use `0.0.0.0` if the aji-chat server runs on a different host) |
-| `AJI_HOME_CHANNEL` | _optional_ | Default `chat_id` for cron delivery |
+| `AJI_HOME_CHANNEL` | `general` | Fallback home channel for the **live gateway lifecycle notices only** (see below). Accepts a bare channel (`alerts`), a full chat_id (`room:alerts`), or `default`/unset → `general`. Does **not** affect `send_message`/cron delivery — those need the config.yaml block below. |
+
+### Home channel (required for cron + `send_message` delivery)
+
+Anything that delivers to a bare `aji-chat` target — cron jobs (`--deliver aji-chat`), the `send_message` tool, and the gateway's "⚠️ Gateway restarting / ♻️ online" notices — resolves the destination via `config.get_home_channel("aji-chat")`. The gateway only rehydrates that from `<PLATFORM>_HOME_CHANNEL` env vars for its **built-in** platforms; **plugin platforms are skipped**, and `/sethome` only writes those (ignored) env vars. So set it explicitly in `~/.hermes/config.yaml`:
+
+```yaml
+platforms:
+  aji-chat:
+    home_channel:
+      platform: aji-chat
+      chat_id: room:general   # delivers to the "general" channel; use room:<channel> for others
+      name: aji-chat
+```
+
+`load_gateway_config()` reads this fresh, so `send_message`/cron pick it up immediately; the gateway must be restarted for the live lifecycle path to see it. As a backstop for the live path (in case config loads before the plugin's platform registers at startup), the adapter also seeds its in-memory home channel from `AJI_HOME_CHANNEL` (default `general`). Without a channel, deliver explicitly with `aji-chat:CHANNEL_NAME`.
 
 ## End-to-end run
 

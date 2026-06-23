@@ -119,6 +119,14 @@ export function WSProvider({ children }: { children: ReactNode }) {
   const mounted = useRef(true)
   const lastSeqRef = useRef(0)
 
+  // The server's per-process boot epoch, stamped on every envelope. The server's
+  // seq counter is in-memory and resets to 0 on restart, but `lastSeqRef` is
+  // persisted across app launches — so a stale-high cursor would make the server
+  // replay nothing (and live seqs would never advance past it). When the epoch
+  // changes we know the server restarted and reset the cursor to 0. Persisted so
+  // the comparison survives an app restart too. null = not yet known.
+  const serverEpochRef = useRef<number | null>(null)
+
   // Seqs already processed on the *current* WS connection. The offline-replay
   // path (get_missed_events) can redeliver an event that also arrived live;
   // without this guard a redelivered append-only text_delta would double the
@@ -133,6 +141,14 @@ export function WSProvider({ children }: { children: ReactNode }) {
   // Tracks in-flight messages/tools so we can accumulate text and write the
   // final payload to SQLite only on message_end / tool_end.
   const inFlight = useRef<Map<string, InFlight>>(new Map())
+
+  // Serializes event handling. handleEvent is async, and onmessage fires it
+  // per message without awaiting — so two events (notably a `status:working`
+  // and a later `status:idle`) could otherwise race past their first await and
+  // apply out of order, leaving a stuck "working" indicator. This is most acute
+  // during the rapid get_missed_events replay burst after a reconnect. Chaining
+  // through one promise applies events strictly in receipt (seq) order.
+  const handlerChain = useRef<Promise<void>>(Promise.resolve())
 
   // ---------------------------------------------------------------------------
   // Fan-out helpers
@@ -211,6 +227,16 @@ export function WSProvider({ children }: { children: ReactNode }) {
               data: { kind: 'message' as const, id: event.id, role: inf.role ?? 'assistant', text: inf.text ?? '', done: true, turnId: inf.turnId },
               turnId: inf.turnId,
             }, inf.text ?? '')
+
+            // Telegram-style: an arriving agent message means it's done composing,
+            // so clear any lingering "working/thinking" indicator. This self-heals
+            // a stuck status when the agent's explicit `status:idle` never arrives
+            // (crash, dropped event). A genuinely continuing turn re-emits
+            // `status:working` on its next step, which restores the indicator.
+            if (inf.role !== 'user') {
+              await updateServerStatus(db, inf.serverId, 'idle')
+              await updateChannelStatus(db, inf.serverId, inf.channel, 'idle')
+            }
           }
           break
         }
@@ -378,8 +404,23 @@ export function WSProvider({ children }: { children: ReactNode }) {
       }
       socket.onmessage = (e) => {
         try {
-          const parsed = JSON.parse(e.data as string) as { seq?: number; event?: ServerEvent }
+          const parsed = JSON.parse(e.data as string) as { seq?: number; epoch?: number; event?: ServerEvent }
           const event: ServerEvent = parsed.event ?? (parsed as unknown as ServerEvent)
+
+          // Detect a server restart: a changed boot epoch means the seq space
+          // reset under us. Drop the stale cursor so live seqs (now starting low)
+          // advance it again and the next reconnect requests the right range.
+          // The server has already replayed its full buffer for this connection.
+          if (parsed.epoch !== undefined && parsed.epoch !== serverEpochRef.current) {
+            const known = serverEpochRef.current !== null
+            serverEpochRef.current = parsed.epoch
+            setSetting(db, 'ws_server_epoch', String(parsed.epoch)).catch(() => {})
+            if (known) {
+              lastSeqRef.current = 0
+              seenSeqs.current = new Set()
+              setSetting(db, 'ws_last_seq', '0').catch(() => {})
+            }
+          }
           if (parsed.seq !== undefined) {
             // Drop a redelivered event (live broadcast + offline replay can
             // overlap on reconnect) so append-only deltas aren't applied twice.
@@ -395,21 +436,27 @@ export function WSProvider({ children }: { children: ReactNode }) {
               }, 500)
             }
           }
-          handleEvent(event).catch((err) =>
-            console.warn('[WSContext] handleEvent error', err),
-          )
+          // Apply events strictly in order (see handlerChain) so status updates
+          // can't race out of sequence.
+          handlerChain.current = handlerChain.current
+            .then(() => handleEvent(event))
+            .catch((err) => console.warn('[WSContext] handleEvent error', err))
         } catch (err) {
           console.warn('[WSContext] parse error', err)
         }
       }
     }
 
-    // Load the last seen seq from SQLite before first connect so we can
-    // request only genuinely missed events (not replay already-stored ones).
-    getSetting(db, 'ws_last_seq').then((val) => {
-      if (val) lastSeqRef.current = parseInt(val, 10)
-      connect()
-    })
+    // Load the last seen seq + server epoch from SQLite before first connect so
+    // we can request only genuinely missed events (not replay already-stored
+    // ones) and recognize the same server instance across app launches.
+    Promise.all([getSetting(db, 'ws_last_seq'), getSetting(db, 'ws_server_epoch')]).then(
+      ([seq, epoch]) => {
+        if (seq) lastSeqRef.current = parseInt(seq, 10)
+        if (epoch) serverEpochRef.current = parseInt(epoch, 10)
+        connect()
+      },
+    )
 
     // Reconcile the app-icon badge with persisted unread on launch.
     syncAppBadge(db).catch(() => {})

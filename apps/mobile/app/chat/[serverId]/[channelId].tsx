@@ -36,6 +36,7 @@ import { MessageList } from '../../../components/chat/MessageList'
 import type { MessageListHandle } from '../../../components/chat/MessageList'
 import { CommandPicker } from '../../../components/chat/CommandPicker'
 import { Row } from '../../../components/chat/MessageRow'
+import { parseEditDiff } from '../../../components/chat/diffHelpers'
 import { avatarInitials } from '../../../components/chat/Avatar'
 import { DaySeparator } from '../../../components/chat/DaySeparator'
 import { NewMessagesDivider } from '../../../components/chat/NewMessagesDivider'
@@ -124,31 +125,43 @@ export default function ChatScreen() {
     }, [db, resolvedServerId, resolvedChannel]),
   )
 
+  // Edit tools that yield a renderable diff are shown inline as diff cards; the
+  // rest (and any edit whose result has no usable change data) fall back to the
+  // tool badge. Computed once so grouping + display agree.
+  const diffToolIds = useMemo(() => {
+    const set = new Set<string>()
+    for (const it of items) {
+      if (it.kind === 'tool' && parseEditDiff(it.name, it.args, it.result)) set.add(it.id)
+    }
+    return set
+  }, [items])
+
   const toolsByAgentMsgId = useMemo(() => {
     const map = new Map<string, Item[]>()
     let lastAgentMsgId: string | null = null
     for (const it of items) {
       if (it.kind === 'message' && it.role === 'assistant') {
         lastAgentMsgId = it.id
-      } else if (it.kind === 'tool' && lastAgentMsgId) {
+      } else if (it.kind === 'tool' && !diffToolIds.has(it.id) && lastAgentMsgId) {
         const arr = map.get(lastAgentMsgId) ?? []
         arr.push(it)
         map.set(lastAgentMsgId, arr)
       }
     }
     return map
-  }, [items])
+  }, [items, diffToolIds])
 
-  // Filter tools (rendered via badge) and ghost agent messages (done, no text, no tool badge).
-  // Ghost messages arise when message_end arrives with no preceding text_delta; they produce
-  // an empty wrapper + divider with no visible content, causing blank divider stacking.
+  // Decide which items render. Diff-rendered edit tools stay (inline diff cards);
+  // all other tools are hidden (they surface via the tool badge). Ghost agent
+  // messages (done, no text, no badge) are dropped — they arise when message_end
+  // arrives with no preceding text_delta, producing an empty wrapper + divider.
   const displayItems = useMemo(() => items.filter((it) => {
-    if (it.kind === 'tool') return false
+    if (it.kind === 'tool') return diffToolIds.has(it.id)
     if (it.kind === 'message' && it.role !== 'user' && it.done && !it.text.trim()) {
       return (toolsByAgentMsgId.get(it.id)?.length ?? 0) > 0
     }
     return true
-  }), [items, toolsByAgentMsgId])
+  }), [items, diffToolIds, toolsByAgentMsgId])
 
   const hasPendingPrompt = useMemo(
     () => displayItems.some((it) => it.kind === 'prompt' && !it.resolved),

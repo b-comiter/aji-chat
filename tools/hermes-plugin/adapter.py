@@ -86,7 +86,7 @@ from gateway.platforms.base import (  # type: ignore[import-not-found]
     SendResult,
     ProcessingOutcome,
 )
-from gateway.config import Platform, PlatformConfig  # type: ignore[import-not-found]
+from gateway.config import HomeChannel, Platform, PlatformConfig  # type: ignore[import-not-found]
 from gateway.session import SessionSource  # type: ignore[import-not-found]
 
 logger = logging.getLogger(__name__)
@@ -107,6 +107,21 @@ _DEFAULT_USER_ID = "aji-mobile"
 def _chat_id_for_channel(channel: Optional[str]) -> str:
     """Map a mobile channel id to a Hermes chat_id (one session per channel)."""
     return f"room:{channel or _DEFAULT_CHANNEL}"
+
+
+def _resolve_home_chat_id(raw: Optional[str]) -> str:
+    """Resolve AJI_HOME_CHANNEL into a routable home chat_id.
+
+    Accepts a bare channel ("alerts"), a full chat_id ("room:alerts"), or the
+    "default"/empty placeholder — all of which fall back to the default channel.
+    aji-chat is a single-tenant personal app, so there's always a sensible home
+    (the general channel) for gateway lifecycle notices to land in. `/sethome`
+    writes a "room:<channel>" value here, which is passed through unchanged.
+    """
+    value = (raw or "").strip()
+    if not value or value.lower() == "default":
+        return _chat_id_for_channel(None)
+    return value if value.startswith("room:") else _chat_id_for_channel(value)
 
 
 # Bot-token analogue. Stored in ~/.hermes/.env exactly like DISCORD_BOT_TOKEN, so
@@ -200,6 +215,22 @@ class AjiChatAdapter(BasePlatformAdapter):
         super().__init__(config=config, platform=platform)
         global _current_adapter
         _current_adapter = self
+
+        # The gateway rehydrates each platform's home_channel from
+        # <PLATFORM>_HOME_CHANNEL at startup — but only for built-in platforms
+        # (gateway/config.py). Plugin platforms are skipped, so aji-chat would
+        # never have a home channel after a fresh start, which means gateway
+        # lifecycle notices (shutdown/restart, "back online") are delivered to
+        # Telegram et al. but silently dropped for aji-chat. Mirror the built-in
+        # behavior here so those notices reach mobile too. `/sethome` overrides
+        # this by writing AJI_HOME_CHANNEL; an explicit config.yaml home_channel
+        # is left untouched.
+        if config.home_channel is None:
+            config.home_channel = HomeChannel(
+                platform=platform,
+                chat_id=_resolve_home_chat_id(os.getenv("AJI_HOME_CHANNEL")),
+                name="aji-chat",
+            )
 
         server_url = (
             os.getenv("AJI_SERVER_URL")

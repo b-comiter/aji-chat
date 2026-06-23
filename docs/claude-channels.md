@@ -63,9 +63,15 @@ The bridge is an **adapter**, consistent with the project philosophy: it require
    pnpm server
    ```
 
-2. **Register the bridge as an MCP server** for Claude Code:
+2. **Register the bridge as an MCP server** for Claude Code. Run `tsx` directly
+   (absolute paths) rather than `pnpm` — Claude spawns MCP servers from a login
+   shell, where `pnpm` may resolve to a different install (e.g. Homebrew's) that
+   rejects this repo's `package.json` (`pnpm@^11.1.3`) and exits, so the bridge
+   silently never starts (`/mcp` shows `aji-chat ✘ failed`):
    ```bash
-   claude mcp add aji-chat -- pnpm --dir /Users/bcom/dev/aji-chat channel:bridge
+   claude mcp add -s user aji-chat -- \
+     /Users/bcom/dev/aji-chat/node_modules/.bin/tsx \
+     /Users/bcom/dev/aji-chat/tools/claude-channel-bridge.ts
    ```
    (or add an equivalent entry to your `.mcp.json` / `~/.claude.json`).
    Verify with `claude mcp list` — it should show `aji-chat … ✓ Connected`.
@@ -80,6 +86,45 @@ The bridge is an **adapter**, consistent with the project philosophy: it require
 
 4. **Send a message from the phone.** It appears in the Claude Code session as a
    `<channel source="aji-chat">…</channel>` block, and Claude responds to it.
+
+## Auto-launch: spawn a session on demand
+
+The channel bridge can only inject into a session that is **already running**. To
+also get *"message Claude Code and have it open a session if none is running,"*
+run the **auto-launcher** alongside the server (requires `brew install tmux`):
+
+```bash
+pnpm autolaunch
+```
+
+It is a plain webhook subscriber (no server changes — same adapter pattern as the
+bridge). On each phone message for `claude-code` it:
+
+1. checks whether a session is already alive (`pgrep` for the channel flag);
+2. if one is — does nothing; the bridge delivers via the channel as usual;
+3. if not — starts `claude --dangerously-load-development-channels server:aji-chat
+   -- "<your message>"` in a detached **tmux** session, **auto-accepts** the
+   interactive dev-channels warning (polls the pane, presses Enter), then opens a
+   visible **Terminal.app** window attached to it. The triggering message becomes
+   the session's opening prompt; everything after flows through the channel.
+
+tmux is what makes the warning auto-accept possible (we can't send keystrokes into
+a bare Terminal window) while keeping the session visible/attachable on the Mac.
+
+There is no double-delivery: when a session exists the launcher defers to the
+bridge; when none exists only the launcher is listening.
+
+| Var | Default | Meaning |
+|---|---|---|
+| `AJI_PROJECT_DIR` | `process.cwd()` (repo root under `pnpm`) | working dir for the spawned session |
+| `AJI_CLAUDE_BIN` | `claude` | claude executable (resolved on the login shell's PATH) |
+| `AJI_TMUX_BIN` | `tmux` | tmux executable |
+| `AJI_TMUX_SESSION` | `aji-cc` | tmux session name (reused; stale same-named sessions are cleared first) |
+| `AJI_LAUNCH_DRYRUN` | _unset_ | `1` logs the spawn instead of launching (used by `pnpm autolaunch:smoke`) |
+
+Limitations: macOS only (uses `osascript`/Terminal.app) and requires tmux; spawns
+a single session (if several messages arrive during the boot window, only the
+first opens the session). Verify the pure logic with `pnpm autolaunch:smoke`.
 
 ### Why "Connected" is not enough
 

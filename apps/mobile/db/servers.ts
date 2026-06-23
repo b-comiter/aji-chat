@@ -48,16 +48,43 @@ export async function updateServerPreview(
   )
 }
 
+/**
+ * A server's presence is the aggregate of its channels' live status: it reads as
+ * "working"/"thinking" while ANY channel is, and only settles to "idle" once
+ * every channel has. Derived at read time (not stored) so the presence dot can
+ * never get stuck non-idle while all channels are idle — the denormalized
+ * `servers.last_status` scalar drifts under interleaved multi-channel turns or a
+ * dropped terminal event, since each per-channel status write clobbers it.
+ * Servers with no channel rows fall back to the stored scalar.
+ */
+const SERVER_STATUS_EXPR = `
+  CASE
+    WHEN EXISTS (SELECT 1 FROM channels c WHERE c.server_id = servers.id AND c.last_status = 'working')  THEN 'working'
+    WHEN EXISTS (SELECT 1 FROM channels c WHERE c.server_id = servers.id AND c.last_status = 'thinking') THEN 'thinking'
+    WHEN EXISTS (SELECT 1 FROM channels c WHERE c.server_id = servers.id)                                THEN 'idle'
+    ELSE servers.last_status
+  END`
+
+// Explicit column list (not `*`) so the derived status replaces the stored one
+// without a duplicate `last_status` in the result set.
+const SERVER_COLUMNS = `
+  id, display_name, last_message_preview, last_event_at,
+  ${SERVER_STATUS_EXPR} AS last_status,
+  avatar, mono_channel_advertised, mono_channel_override, muted, pin_position`
+
 export async function getAllServers(db: SQLiteDatabase): Promise<ServerRow[]> {
   // Pinned rows float to the top (by pin slot); everything else by recency.
   return db.getAllAsync<ServerRow>(
-    `SELECT * FROM servers
+    `SELECT ${SERVER_COLUMNS} FROM servers
      ORDER BY (pin_position IS NULL), pin_position ASC, last_event_at DESC`,
   )
 }
 
 export async function getServer(db: SQLiteDatabase, id: string): Promise<ServerRow | null> {
-  const row = await db.getFirstAsync<ServerRow>(`SELECT * FROM servers WHERE id = ? LIMIT 1`, id)
+  const row = await db.getFirstAsync<ServerRow>(
+    `SELECT ${SERVER_COLUMNS} FROM servers WHERE id = ? LIMIT 1`,
+    id,
+  )
   return row ?? null
 }
 

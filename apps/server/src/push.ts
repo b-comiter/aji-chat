@@ -95,8 +95,22 @@ export function setServerMuted(serverId: string, muted: boolean): void {
 // Pure content helpers
 // ---------------------------------------------------------------------------
 
-function titleFor(displayName?: string, serverId?: string): string {
-  return displayName || serverId || 'aji-chat'
+function titleFor(displayName?: string, serverId?: string, channel?: string): string {
+  const server = displayName || serverId || 'aji-chat'
+  // Always show "server:channel" so you can tell which conversation a
+  // notification belongs to. Only omit the channel when the event carries none.
+  return channel ? `${server}:${channel}` : server
+}
+
+/**
+ * Per-conversation collapse key. iOS/Android coalesce notifications sharing a
+ * collapseId into a single one that updates in place, so a burst of replies from
+ * one chat reads as one updating notification instead of a growing stack. Scoped
+ * to (serverId, channel) so distinct conversations never collapse into each other.
+ */
+function collapseIdFor(serverId?: string, channel?: string): string | undefined {
+  if (!serverId) return undefined
+  return `${serverId}:${channel ?? 'general'}`
 }
 
 /** Collapse whitespace and truncate to a notification-friendly preview. */
@@ -121,7 +135,7 @@ export function notificationFor(
   const serverId = opts.serverId ?? ('serverId' in event ? event.serverId : undefined)
   const channel = opts.channel ?? ('channel' in event ? event.channel : undefined)
   const data = { serverId, channel }
-  const title = titleFor(opts.displayName, serverId)
+  const title = titleFor(opts.displayName, serverId, channel)
 
   if (event.type === 'message_end') {
     return { title, body: messagePreview(opts.text ?? ''), data }
@@ -184,6 +198,7 @@ async function deliver(note: PushNote): Promise<void> {
   if (tokens.size === 0) return
   if (note.data.serverId && mutedServers.has(note.data.serverId)) return
 
+  const collapseId = collapseIdFor(note.data.serverId, note.data.channel)
   const recipients = [...tokens]
   const messages = recipients.map((to) => ({
     to,
@@ -191,6 +206,7 @@ async function deliver(note: PushNote): Promise<void> {
     body: note.body,
     data: note.data,
     sound: 'default' as const,
+    ...(collapseId ? { collapseId } : {}),
   }))
 
   try {

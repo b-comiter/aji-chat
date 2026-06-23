@@ -42,6 +42,48 @@ export function inferLanguage(code: string, language: string | undefined): strin
   return resolved && hljs.getLanguage(resolved) ? resolved : undefined
 }
 
+// Common file extensions → highlight.js language id, for highlighting a diff by
+// its filename. `getLanguage` guards each lookup, so an extension whose grammar
+// isn't in this build resolves to undefined (rendered as plain text).
+const EXT_LANGS: Record<string, string> = {
+  js: 'javascript', jsx: 'javascript', mjs: 'javascript', cjs: 'javascript',
+  ts: 'typescript', tsx: 'typescript', mts: 'typescript', cts: 'typescript',
+  py: 'python', pyi: 'python', rb: 'ruby', go: 'go', rs: 'rust',
+  java: 'java', kt: 'kotlin', kts: 'kotlin', swift: 'swift', scala: 'scala',
+  c: 'c', h: 'c', cpp: 'cpp', cc: 'cpp', cxx: 'cpp', hpp: 'cpp', hh: 'cpp',
+  cs: 'csharp', php: 'php', sh: 'bash', bash: 'bash', zsh: 'bash',
+  css: 'css', scss: 'scss', less: 'less', html: 'xml', htm: 'xml', xml: 'xml', svg: 'xml', vue: 'xml',
+  json: 'json', jsonc: 'json', yaml: 'yaml', yml: 'yaml', toml: 'ini', ini: 'ini', cfg: 'ini',
+  md: 'markdown', markdown: 'markdown', sql: 'sql', graphql: 'graphql', gql: 'graphql',
+  lua: 'lua', r: 'r', dart: 'dart', pl: 'perl', pm: 'perl', ex: 'elixir', exs: 'elixir',
+}
+
+// Extension-less filenames that still map to a grammar.
+const FILENAME_LANGS: Record<string, string> = {
+  dockerfile: 'dockerfile',
+  makefile: 'makefile',
+  gnumakefile: 'makefile',
+}
+
+/**
+ * Resolve the highlight language from a file path's extension (or a bare,
+ * extension-less filename like `Dockerfile`). Returns undefined when there's no
+ * confident match — the diff then renders as plain (but still tinted) text.
+ */
+export function inferLanguageFromPath(filePath: string | undefined): string | undefined {
+  if (!filePath) return undefined
+  const name = filePath.replace(/\\/g, '/').split('/').pop()?.toLowerCase() ?? ''
+  if (!name) return undefined
+
+  const byName = FILENAME_LANGS[name]
+  if (byName) return hljs.getLanguage(byName) ? byName : undefined
+
+  const dot = name.lastIndexOf('.')
+  if (dot <= 0) return undefined // no extension, or a dotfile like `.gitignore`
+  const lang = EXT_LANGS[name.slice(dot + 1)]
+  return lang && hljs.getLanguage(lang) ? lang : undefined
+}
+
 function decodeHtmlEntities(s: string): string {
   return s
     .replace(/&amp;/g, '&')

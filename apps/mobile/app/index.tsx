@@ -136,8 +136,11 @@ function applyLiveServerEvent(prev: ServerRow[], event: ServerEvent): ServerRow[
       return upsertMissingServer(prev, serverId)
 
     case 'message_end':
+      // An arriving agent message clears the live "working/thinking" indicator
+      // (Telegram-style), mirroring the DB write in WebSocketContext so the row
+      // updates instantly without waiting for a focus re-read.
       return prev.map((s) =>
-        s.id === serverId ? { ...s, last_event_at: Date.now() } : s,
+        s.id === serverId ? { ...s, last_event_at: Date.now(), last_status: 'idle' } : s,
       )
 
     case 'status': {
@@ -273,10 +276,18 @@ export default function HomeScreen() {
 
       // Re-read after events that change persisted columns we don't patch
       // in-memory (preview text, advertised name/mono-channel from server_info)
-      // and refresh unread counts as messages land.
+      // and refresh unread counts as messages land. `status` is included because
+      // a server's presence dot is the DB-derived aggregate of its channels'
+      // statuses (see getAllServers) — the naive in-memory patch above can't see
+      // sibling channels, so re-reading is what keeps the dot truthful.
       // The subscribe() return unsubscribes on unmount, so the handler can't
       // fire post-unmount — no cancellation guard needed on the re-read.
-      if (event.type === 'message_end' || event.type === 'file' || event.type === 'server_info') {
+      if (
+        event.type === 'message_end' ||
+        event.type === 'file' ||
+        event.type === 'server_info' ||
+        event.type === 'status'
+      ) {
         getAllServers(db).then(setServers).catch((err) =>
           console.warn('[Home] server re-read failed', err),
         )

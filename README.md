@@ -234,7 +234,8 @@ Agent → POST /event → Server.broadcast()
 
 ### WhatsApp/Telegram-style behavior
 
-- **Message preview** — streamed `text_delta`s are accumulated in the push module (keyed by message id, bounded) and sent as the notification body on `message_end`, so you see the actual message, not "New message". The body falls back to a generic string only for empty/file messages.
+- **Title + preview** — the title is `server:channel` (the channel is always shown so you can tell conversations apart; it's omitted only when the event carries none); the body is the message itself. Streamed `text_delta`s are accumulated in the push module (keyed by message id, bounded) and sent on `message_end`, so you see the actual text, not "New message".
+- **Grouping** — each push carries a `collapseId` of `serverId:channel`, so a burst of replies from one conversation collapses into a single notification that updates in place instead of a growing stack. Distinct conversations never collapse into each other. (Expo's push API has no iOS `threadId`, so `collapseId` is the supported mechanism — it shows the latest message per chat; the unread count lives on the app badge.)
 - **Tap to open the chat** — each push carries `data: { serverId, channel }`; tapping it deep-links straight to that conversation (warm or cold start).
 - **App-icon badge** — kept in sync with the total unread count (the same tally the home-screen pills use); cleared per-chat when you open it.
 - **Smart suppression** — a push for the chat you're currently viewing is shown in-app as a chime only, not a banner.
@@ -261,6 +262,14 @@ You should get a banner notification showing the message text. Check the server 
 
 - The preview body fires on **message completion** (`message_end`), so for a long streamed reply the notification lands when the message finishes, not when it starts.
 - Badge counts and mute sync rely on the phone being the source of truth; the server mirrors them via `set_mute` and self-heals the full state on reconnect.
+
+### Not yet: rich image push
+
+Showing the image inline in the notification (`richContent: { image }`) is **not** wired up — it needs two prerequisites that don't exist yet:
+1. A **publicly-reachable image URL** (files currently ride as inline base64; Expo's image field requires a URL the device can fetch). This depends on the server-hosted media transport.
+2. On iOS, a **Notification Service Extension** to download + attach the image — Expo does not include one by default.
+
+Until both exist, image messages push as a normal notification with a generic body.
 
 ## Agent Integration
 
