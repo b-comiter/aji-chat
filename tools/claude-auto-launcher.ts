@@ -196,9 +196,10 @@ function autoAcceptDevChannelWarning(): void {
 }
 
 // Open a visible Terminal.app window attached to the tmux session so the user can
-// watch and take over the running Claude Code session on their Mac.
+// watch and take over the running Claude Code session on their Mac. `attach -d`
+// detaches any other (including stale/phantom) client so this window takes over.
 function openVisibleTerminal(): void {
-  const script = buildTerminalAppleScript(`${TMUX_BIN} attach -t ${TMUX_SESSION}`)
+  const script = buildTerminalAppleScript(`${TMUX_BIN} attach -d -t ${TMUX_SESSION}`)
   execFile('osascript', ['-e', script], (err) => {
     if (err) log('osascript attach failed:', err.message)
   })
@@ -211,11 +212,12 @@ async function handleMessage(event: ClientEvent): Promise<void> {
     return
   }
   if (await sessionRunning()) {
-    // A channel session is live. Closing a tmux-backed Terminal only DETACHES it
-    // (claude keeps running), so if our session exists with no attached client,
-    // re-open a visible Terminal instead of leaving the user with no window.
-    if (await tmuxSessionDetached()) {
-      log('session running but detached — reattaching a visible Terminal')
+    // A channel session is live, but closing a tmux-backed Terminal only DETACHES
+    // it (claude keeps running) — and a window that closed abnormally can leave a
+    // stale "attached" client tmux never cleaned up. If there's no LIVE window,
+    // re-open one (attach -d kicks any stale client); otherwise defer to the bridge.
+    if (await tmuxSessionNeedsWindow()) {
+      log('session running with no live window — reopening Terminal')
       openVisibleTerminal()
     } else {
       log('session already running — channel bridge will deliver')
@@ -226,14 +228,26 @@ async function handleMessage(event: ClientEvent): Promise<void> {
   launchSession(event.text)
 }
 
-// True when our tmux session exists but has no attached client (i.e. the user
-// closed the Terminal window; the session is alive but invisible).
-function tmuxSessionDetached(): Promise<boolean> {
+// True when our tmux session exists but has no *live* attached terminal: either
+// no clients at all, or only stale/phantom clients whose tty has no live process
+// (a Terminal window that closed without tmux noticing).
+function tmuxSessionNeedsWindow(): Promise<boolean> {
   return new Promise((resolve) => {
     execFile(TMUX_BIN, ['has-session', '-t', TMUX_SESSION], (hasErr) => {
-      if (hasErr) return resolve(false) // not our tmux session (or none)
-      execFile(TMUX_BIN, ['list-clients', '-t', TMUX_SESSION], (lcErr, stdout) => {
-        resolve(!lcErr && stdout.trim().length === 0)
+      if (hasErr) return resolve(false) // not our tmux session (or none) → caller spawns
+      execFile(TMUX_BIN, ['list-clients', '-t', TMUX_SESSION, '-F', '#{client_tty}'], (lcErr, stdout) => {
+        if (lcErr) return resolve(true)
+        const ttys = stdout.split('\n').map((s) => s.trim()).filter(Boolean)
+        if (ttys.length === 0) return resolve(true) // detached
+        // Resolve true (needs window) only if NONE of the client ttys has a live process.
+        let pending = ttys.length
+        let anyLive = false
+        for (const tty of ttys) {
+          execFile('ps', ['-t', tty.replace(/^\/dev\//, ''), '-o', 'pid='], (psErr, psOut) => {
+            if (!psErr && psOut.trim().length > 0) anyLive = true
+            if (--pending === 0) resolve(!anyLive)
+          })
+        }
       })
     })
   })
