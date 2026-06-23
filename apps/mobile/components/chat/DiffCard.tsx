@@ -5,6 +5,7 @@
  * agnostic to which agent produced the change.
  */
 import { memo, useMemo, useState } from 'react'
+import type { ReactNode } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { Feather } from '@expo/vector-icons'
 import { useTheme } from '../../context/ThemeContext'
@@ -12,13 +13,16 @@ import { spacing, typography, radius } from '../../constants/theme'
 import type { ThemeColors } from '../../constants/theme'
 import { CodeViewerModal, CopyButton } from '../markdown/CodeViewerModal'
 import type { ViewerRow } from '../markdown/CodeViewerModal'
+import { highlightCodeLines, inferLanguageFromPath } from '../markdown/highlight'
 import type { EditDiff, DiffLineType } from './diffHelpers'
 
 // Lines shown inline before clipping to the expand action — keeps a big edit
 // from dominating the scrollback on a phone. The full diff opens in a window.
 const PREVIEW_LINES = 14
 
-type FlatLine = { text: string; type: DiffLineType; hunkBreak: boolean; num: string }
+// `nodes` holds syntax-highlighted spans when the file extension resolves to a
+// known grammar, else null (plain text, kept green/red for the add/del tint).
+type FlatLine = { text: string; type: DiffLineType; hunkBreak: boolean; num: string; nodes: ReactNode[] | null }
 
 function baseName(p?: string): string {
   if (!p) return 'file'
@@ -27,28 +31,40 @@ function baseName(p?: string): string {
 }
 
 export const DiffCard = memo(function DiffCard({ diff }: { diff: EditDiff }) {
-  const { colors } = useTheme()
+  const { colors, tokenColors } = useTheme()
   const styles = useMemo(() => makeStyles(colors), [colors])
   const [viewerOpen, setViewerOpen] = useState(false)
+
+  // Highlight by the edited file's extension (e.g. `.ts` → typescript).
+  const lang = useMemo(() => inferLanguageFromPath(diff.filePath), [diff.filePath])
 
   // Flatten hunks into one line list, marking where a new hunk begins (for the
   // separator) and assigning each line its real file line number. Deletions show
   // the old-file number, additions/context the new-file number — one column.
+  //
+  // Each hunk side (new = context+add, old = context+del) is highlighted as a
+  // block so multi-line constructs (strings, comments) parse correctly, then the
+  // highlighted lines are zipped back onto the diff lines in order.
   const flat = useMemo<FlatLine[]>(() => {
     const out: FlatLine[] = []
     diff.hunks.forEach((h, hi) => {
       let oldNo = h.oldStart ?? 1
       let newNo = h.newStart ?? 1
+      const newHl = lang ? highlightCodeLines(h.lines.filter((l) => l.type !== 'del').map((l) => l.text).join('\n'), lang, colors, tokenColors) : null
+      const oldHl = lang ? highlightCodeLines(h.lines.filter((l) => l.type !== 'add').map((l) => l.text).join('\n'), lang, colors, tokenColors) : null
+      let ni = 0
+      let oi = 0
       h.lines.forEach((line, li) => {
         let num: string
-        if (line.type === 'del') { num = String(oldNo); oldNo++ }
-        else if (line.type === 'add') { num = String(newNo); newNo++ }
-        else { num = String(newNo); oldNo++; newNo++ }
-        out.push({ ...line, hunkBreak: hi > 0 && li === 0, num })
+        let nodes: ReactNode[] | null
+        if (line.type === 'del') { num = String(oldNo); oldNo++; nodes = oldHl ? oldHl[oi++] ?? [] : null }
+        else if (line.type === 'add') { num = String(newNo); newNo++; nodes = newHl ? newHl[ni++] ?? [] : null }
+        else { num = String(newNo); oldNo++; newNo++; oi++; nodes = newHl ? newHl[ni++] ?? [] : null }
+        out.push({ ...line, hunkBreak: hi > 0 && li === 0, num, nodes })
       })
     })
     return out
-  }, [diff])
+  }, [diff, lang, colors, tokenColors])
 
   const isTruncated = flat.length > PREVIEW_LINES
   const shown = isTruncated ? flat.slice(0, PREVIEW_LINES) : flat
@@ -65,12 +81,12 @@ export const DiffCard = memo(function DiffCard({ diff }: { diff: EditDiff }) {
           <Text
             style={[
               styles.viewerCode,
-              line.type === 'add' && styles.codeAdd,
-              line.type === 'del' && styles.codeDel,
+              !line.nodes && line.type === 'add' && styles.codeAdd,
+              !line.nodes && line.type === 'del' && styles.codeDel,
             ]}
             selectable
           >
-            {line.text.length ? line.text : ' '}
+            {line.nodes ? (line.nodes.length ? line.nodes : ' ') : line.text.length ? line.text : ' '}
           </Text>
         ),
       })),
@@ -128,11 +144,13 @@ export const DiffCard = memo(function DiffCard({ diff }: { diff: EditDiff }) {
               <Text
                 style={[
                   styles.code,
-                  line.type === 'add' && styles.codeAdd,
-                  line.type === 'del' && styles.codeDel,
+                  // Syntax colors win when highlighted; the green/red text tint is
+                  // the fallback for files with no known grammar.
+                  !line.nodes && line.type === 'add' && styles.codeAdd,
+                  !line.nodes && line.type === 'del' && styles.codeDel,
                 ]}
               >
-                {line.text.length ? line.text : ' '}
+                {line.nodes ? (line.nodes.length ? line.nodes : ' ') : line.text.length ? line.text : ' '}
               </Text>
             </View>
           ))}
