@@ -12,7 +12,10 @@
 
 export type DiffLineType = 'add' | 'del' | 'context'
 export type DiffLine = { type: DiffLineType; text: string }
-export type DiffHunk = { header?: string; lines: DiffLine[] }
+// `oldStart`/`newStart` are the 1-based line numbers the hunk begins at in the
+// old and new file (from the unified-diff `@@` header). They let the viewer show
+// real line numbers; absent for the old/new-string fallback, which starts at 1.
+export type DiffHunk = { header?: string; oldStart?: number; newStart?: number; lines: DiffLine[] }
 export type EditDiff = {
   filePath?: string
   hunks: DiffHunk[]
@@ -84,11 +87,13 @@ export function parseEditDiff(name: string, args: AnyRecord, result: unknown): E
         lines.push(line)
       }
       if (lines.length === 0) continue
+      const oldStart = typeof hr?.oldStart === 'number' ? hr.oldStart : undefined
+      const newStart = typeof hr?.newStart === 'number' ? hr.newStart : undefined
       const header =
-        typeof hr?.oldStart === 'number' && typeof hr?.newStart === 'number'
-          ? `@@ -${hr.oldStart} +${hr.newStart} @@`
+        oldStart !== undefined && newStart !== undefined
+          ? `@@ -${oldStart} +${newStart} @@`
           : undefined
-      hunks.push({ header, lines })
+      hunks.push({ header, oldStart, newStart, lines })
     }
     if (hunks.length > 0) return { filePath, hunks, additions, deletions }
   }
@@ -102,7 +107,7 @@ export function parseEditDiff(name: string, args: AnyRecord, result: unknown): E
     let deletions = 0
     if (oldString) for (const t of oldString.split('\n')) { lines.push({ type: 'del', text: t }); deletions++ }
     if (newString) for (const t of newString.split('\n')) { lines.push({ type: 'add', text: t }); additions++ }
-    return { filePath, hunks: [{ lines }], additions, deletions }
+    return { filePath, hunks: [{ oldStart: 1, newStart: 1, lines }], additions, deletions }
   }
 
   return null
