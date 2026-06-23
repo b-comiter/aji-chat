@@ -63,9 +63,15 @@ The bridge is an **adapter**, consistent with the project philosophy: it require
    pnpm server
    ```
 
-2. **Register the bridge as an MCP server** for Claude Code:
+2. **Register the bridge as an MCP server** for Claude Code. Run `tsx` directly
+   (absolute paths) rather than `pnpm` — Claude spawns MCP servers from a login
+   shell, where `pnpm` may resolve to a different install (e.g. Homebrew's) that
+   rejects this repo's `package.json` (`pnpm@^11.1.3`) and exits, so the bridge
+   silently never starts (`/mcp` shows `aji-chat ✘ failed`):
    ```bash
-   claude mcp add aji-chat -- pnpm --dir /Users/bcom/dev/aji-chat channel:bridge
+   claude mcp add -s user aji-chat -- \
+     /Users/bcom/dev/aji-chat/node_modules/.bin/tsx \
+     /Users/bcom/dev/aji-chat/tools/claude-channel-bridge.ts
    ```
    (or add an equivalent entry to your `.mcp.json` / `~/.claude.json`).
    Verify with `claude mcp list` — it should show `aji-chat … ✓ Connected`.
