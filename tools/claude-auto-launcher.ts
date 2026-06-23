@@ -167,6 +167,10 @@ function launchSession(text: string): void {
           return
         }
         log('tmux session started; initial prompt:', text.slice(0, 80))
+        // End the session when its Terminal window closes (client detaches), so a
+        // later phone message starts a fresh session rather than resurfacing this
+        // one. Set before attaching; it only fires on a real detach, not creation.
+        execFile(TMUX_BIN, ['set-hook', '-t', TMUX_SESSION, 'client-detached', `kill-session -t ${TMUX_SESSION}`], () => {})
         autoAcceptDevChannelWarning()
         openVisibleTerminal()
       },
@@ -212,13 +216,13 @@ async function handleMessage(event: ClientEvent): Promise<void> {
     return
   }
   if (await sessionRunning()) {
-    // A channel session is live, but closing a tmux-backed Terminal only DETACHES
-    // it (claude keeps running) — and a window that closed abnormally can leave a
-    // stale "attached" client tmux never cleaned up. If there's no LIVE window,
-    // re-open one (attach -d kicks any stale client); otherwise defer to the bridge.
+    // Closing the window ends the session (client-detached hook), so a live
+    // session normally means its window is still open → let the bridge deliver.
+    // If the window closed abnormally and left a stale session with no live
+    // client, start fresh — the user wants a new session, not the old one.
     if (await tmuxSessionNeedsWindow()) {
-      log('session running with no live window — reopening Terminal')
-      openVisibleTerminal()
+      log('previous window is gone — starting a fresh session')
+      launchSession(event.text)
     } else {
       log('session already running — channel bridge will deliver')
     }
