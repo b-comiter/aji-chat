@@ -42,6 +42,7 @@ import * as path from 'node:path'
 import * as fs from 'node:fs'
 import { execFile } from 'node:child_process'
 import type { ClientEvent, UserMessage } from '@aji/protocol'
+import { startWebhookClient, type WebhookClient } from './lib/webhookClient.ts'
 
 const AJI_SERVER = (process.env.AJI_SERVER ?? 'http://localhost:4000').replace(/\/$/, '')
 const AJI_AGENT = process.env.AJI_AGENT ?? 'claude-code'
@@ -280,45 +281,12 @@ const httpServer = http.createServer((req, res) => {
 })
 
 // ---------------------------------------------------------------------------
-// Webhook (de)registration against the running aji-chat server. Mirrors the
-// bridge: re-register every 30 s so a server restart re-connects automatically.
+// Webhook (de)registration against the running aji-chat server.
 // ---------------------------------------------------------------------------
-let webhookUrl: string | null = null
-let webhookPort: number | null = null
-let reregisterTimer: ReturnType<typeof setInterval> | null = null
-
-async function registerWebhook(port: number): Promise<void> {
-  webhookUrl = `http://localhost:${port}/`
-  webhookPort = port
-  try {
-    await fetch(`${AJI_SERVER}/webhook`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(ACCESS_TOKEN ? { 'X-Aji-Token': ACCESS_TOKEN } : {}) },
-      body: JSON.stringify({ url: webhookUrl, serverId: AJI_AGENT }),
-    })
-    log('registered webhook', webhookUrl, 'with', AJI_SERVER)
-  } catch (err) {
-    log('webhook registration failed (server down? will retry):', (err as Error).message)
-  }
-}
-
-async function deregisterWebhook(): Promise<void> {
-  if (!webhookUrl) return
-  try {
-    await fetch(`${AJI_SERVER}/webhook`, {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json', ...(ACCESS_TOKEN ? { 'X-Aji-Token': ACCESS_TOKEN } : {}) },
-      body: JSON.stringify({ url: webhookUrl }),
-    })
-    log('deregistered webhook', webhookUrl)
-  } catch {
-    /* best effort on shutdown */
-  }
-}
+let webhook: WebhookClient | null = null
 
 function shutdown(): void {
-  if (reregisterTimer !== null) clearInterval(reregisterTimer)
-  void deregisterWebhook().finally(() => process.exit(0))
+  void (webhook?.stop() ?? Promise.resolve()).finally(() => process.exit(0))
 }
 process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)
@@ -328,10 +296,7 @@ async function main(): Promise<void> {
     const addr = httpServer.address()
     const port = typeof addr === 'object' && addr ? addr.port : 0
     log('webhook listener on port', port)
-    void registerWebhook(port)
-    reregisterTimer = setInterval(() => {
-      if (webhookPort !== null) void registerWebhook(webhookPort)
-    }, 30_000)
+    webhook = startWebhookClient({ serverBase: AJI_SERVER, serverId: AJI_AGENT, accessToken: ACCESS_TOKEN, port, log })
   })
   log('auto-launcher started; agent =', AJI_AGENT, 'server =', AJI_SERVER, 'projectDir =', PROJECT_DIR)
 }
