@@ -148,32 +148,36 @@ function shortDir(dir: string): string {
 }
 
 /**
- * Summarize ALL permission suggestions into the single label Claude Code's TUI
- * shows for its combined "Yes, allow …" option. Claude Code applies the whole
- * suggestion set together (e.g. acceptEdits mode + an added directory), so we
- * surface one option, not one per suggestion.
+ * Approximate the single label Claude Code's TUI shows for its combined "Yes,
+ * allow …" option. Claude Code applies the whole suggestion set together (e.g.
+ * acceptEdits mode + an added directory), so we surface one option, not one per
+ * suggestion.
+ *
+ * NOTE: we cannot reproduce Claude Code's label verbatim — it's generated TUI-side
+ * from context not present in the hook payload (the SAME suggestion shape reads as
+ * "all edits … this session" for a Write but "access to … this project" for Bash).
+ * This mirrors the wording as closely as the structured data allows: file-editing
+ * tools phrase as "all edits", everything else as "access", with the directory and
+ * the suggestion's own scope.
  */
-function describeSuggestions(suggestions: PermissionSuggestion[]): string {
-  let acceptEdits = false
-  let allowRules = false
+const EDIT_TOOLS = new Set(['edit', 'write', 'multiedit', 'notebookedit', 'update', 'create'])
+
+function describeSuggestions(suggestions: PermissionSuggestion[], toolName: string): string {
   let denyRules = false
   const dirs: string[] = []
   let destination: string | undefined
   for (const s of suggestions) {
     if (s.destination) destination = s.destination
-    if (s.type === 'setMode' && s.mode === 'acceptEdits') acceptEdits = true
-    else if (s.type === 'addDirectories' && Array.isArray(s.directories)) dirs.push(...s.directories)
-    else if (s.type === 'addRules') {
-      if (s.behavior === 'deny') denyRules = true
-      else allowRules = true
-    }
+    if (s.type === 'addDirectories' && Array.isArray(s.directories)) dirs.push(...s.directories)
+    else if (s.type === 'addRules' && s.behavior === 'deny') denyRules = true
   }
   const scope = permissionScopeLabel(destination)
-  const where = dirs.length ? ` in ${dirs.map(shortDir).join(', ')}` : ''
-  if (acceptEdits) return `Allow all edits${where} (${scope})`
-  if (denyRules) return `Always deny (${scope})`
-  if (allowRules || dirs.length) return `Always allow${where} (${scope})`
-  return `Apply suggested permissions (${scope})`
+  const where = dirs.length ? ` ${dirs.map(shortDir).join(', ')}` : ''
+  if (denyRules) return `Always deny${where} (${scope})`
+  if (EDIT_TOOLS.has(toolName.toLowerCase())) {
+    return `Allow all edits${where ? ` in${where}` : ''} (${scope})`
+  }
+  return `Always allow${where ? ` access to${where}` : ''} (${scope})`
 }
 
 function buildPermissionOptions(payload: Record<string, unknown>): {
@@ -186,9 +190,10 @@ function buildPermissionOptions(payload: Record<string, unknown>): {
 
   // Claude Code applies the whole suggestion set as one "allow" action, so we
   // mirror its three-option layout: allow once / allow + apply suggestions / deny.
+  const toolName = String(payload.tool_name ?? '')
   const options: PromptOption[] = [{ id: 'allow_once', label: 'Allow once' }]
   if (suggestions.length > 0) {
-    options.push({ id: 'apply_suggestions', label: describeSuggestions(suggestions) })
+    options.push({ id: 'apply_suggestions', label: describeSuggestions(suggestions, toolName) })
   }
   options.push({ id: 'deny', label: 'Deny' })
 
