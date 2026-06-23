@@ -15,7 +15,12 @@
  *
  * Data path:
  *   phone → WS /ws → aji-chat server → POST (webhook) → this launcher
- *        → osascript → Terminal.app → `claude … "<your message>"`
+ *        → tmux (detached `claude … "<your message>"`, dev-channel warning
+ *          auto-accepted via send-keys) → osascript attaches a visible Terminal
+ *
+ * Requires tmux (`brew install tmux`): it lets us programmatically dismiss
+ * Claude Code's interactive dev-channels warning while keeping the session
+ * visible/attachable on the Mac.
  *
  * Interplay with the bridge (no double-delivery):
  *   • No session running → only THIS launcher has a live webhook, so it alone
@@ -43,6 +48,8 @@ const AJI_AGENT = process.env.AJI_AGENT ?? 'claude-code'
 const ACCESS_TOKEN = process.env.AJI_ACCESS_TOKEN?.trim()
 const PROJECT_DIR = process.env.AJI_PROJECT_DIR ?? process.cwd()
 const CLAUDE_BIN = process.env.AJI_CLAUDE_BIN ?? 'claude'
+const TMUX_BIN = process.env.AJI_TMUX_BIN ?? 'tmux'
+const TMUX_SESSION = process.env.AJI_TMUX_SESSION ?? 'aji-cc'
 const DRY_RUN = process.env.AJI_LAUNCH_DRYRUN === '1'
 
 // The launch flag that loads our custom channel.
@@ -127,30 +134,73 @@ function launchSession(text: string): void {
   spawning = true
   setTimeout(() => { spawning = false }, SPAWN_LOCK_MS)
 
-  const promptFile = path.join(os.tmpdir(), `aji-cc-initial-${Date.now()}.txt`)
+  const stamp = Date.now()
+  const promptFile = path.join(os.tmpdir(), `aji-cc-initial-${stamp}.txt`)
+  const scriptFile = path.join(os.tmpdir(), `aji-cc-launch-${stamp}.sh`)
+  const shellCommand = buildLaunchCommand({ projectDir: PROJECT_DIR, claudeBin: CLAUDE_BIN, promptFile })
   try {
     fs.writeFileSync(promptFile, text, 'utf8')
+    // The claude command runs from a script file so its quoting/`$(cat …)` survive
+    // intact through tmux + osascript instead of being escaped three times over.
+    fs.writeFileSync(scriptFile, `#!/bin/zsh -l\n${shellCommand}\n`, 'utf8')
   } catch (err) {
-    log('failed to stage prompt file:', (err as Error).message)
+    log('failed to stage launch files:', (err as Error).message)
     spawning = false
     return
   }
 
-  const shellCommand = buildLaunchCommand({ projectDir: PROJECT_DIR, claudeBin: CLAUDE_BIN, promptFile })
-
   if (DRY_RUN) {
-    log('DRYRUN would launch →', text.slice(0, 80))
+    log('DRYRUN would launch via tmux →', text.slice(0, 80))
     return
   }
 
-  const script = buildTerminalAppleScript(shellCommand)
+  // Clear any stale same-named session (only reached when no live session exists),
+  // then start the claude command detached inside tmux.
+  execFile(TMUX_BIN, ['kill-session', '-t', TMUX_SESSION], () => {
+    execFile(
+      TMUX_BIN,
+      ['new-session', '-d', '-s', TMUX_SESSION, '-x', '220', '-y', '50', `zsh -l ${scriptFile}`],
+      (err) => {
+        if (err) {
+          log('tmux new-session failed:', err.message)
+          spawning = false
+          return
+        }
+        log('tmux session started; initial prompt:', text.slice(0, 80))
+        autoAcceptDevChannelWarning()
+        openVisibleTerminal()
+      },
+    )
+  })
+}
+
+// The --dangerously-load-development-channels flag shows an interactive warning
+// ("I am using this for local development") that blocks startup. Poll the pane
+// for it and press Enter (option 1 is preselected) so the session boots
+// unattended. Gives up after ~15s if it never appears.
+function autoAcceptDevChannelWarning(): void {
+  let attempts = 0
+  const timer = setInterval(() => {
+    attempts += 1
+    execFile(TMUX_BIN, ['capture-pane', '-p', '-t', TMUX_SESSION], (err, stdout) => {
+      if (err) { clearInterval(timer); return } // session gone
+      if (stdout.includes('Loading development channels')) {
+        clearInterval(timer)
+        execFile(TMUX_BIN, ['send-keys', '-t', TMUX_SESSION, 'Enter'], () => {})
+        log('auto-accepted dev-channels warning')
+      } else if (attempts >= 30) {
+        clearInterval(timer)
+      }
+    })
+  }, 500)
+}
+
+// Open a visible Terminal.app window attached to the tmux session so the user can
+// watch and take over the running Claude Code session on their Mac.
+function openVisibleTerminal(): void {
+  const script = buildTerminalAppleScript(`${TMUX_BIN} attach -t ${TMUX_SESSION}`)
   execFile('osascript', ['-e', script], (err) => {
-    if (err) {
-      log('osascript failed:', err.message)
-      spawning = false
-    } else {
-      log('launched Terminal session with initial prompt:', text.slice(0, 80))
-    }
+    if (err) log('osascript attach failed:', err.message)
   })
 }
 
