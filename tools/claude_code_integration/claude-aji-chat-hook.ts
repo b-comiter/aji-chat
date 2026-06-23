@@ -31,10 +31,9 @@ interface PromptResponse {
 
 interface PermissionSuggestion {
   type?: string
-  mode?: string
   destination?: string
   behavior?: 'allow' | 'deny' | 'ask'
-  rules?: Array<{ toolName?: string; ruleContent?: string }>
+  directories?: string[]
 }
 
 // ---------------------------------------------------------------------------
