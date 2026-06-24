@@ -109,7 +109,16 @@ export function SwipeableRow({
         if (leadingAction && curOpen !== 'trailing' && (current > leadingWidth / 2 || vx > 0.3)) {
           animateTo(leadingWidth)
           onOpenSide('leading')
-        } else if (curOpen !== 'leading' && (current < -trailingWidth / 3 || vx < -0.3)) {
+        } else if (
+          curOpen !== 'leading' &&
+          (curOpen === 'trailing'
+            // Already open: a fast rightward flick closes regardless of position;
+            // otherwise keep open only if dragged back less than 1/3 of the width
+            // (so a short ~1-slab swipe is enough to snap it shut).
+            ? vx <= 0.3 && current < -(trailingWidth * 2) / 3
+            // Closed: same open threshold as before — pull 1/3 or flick left.
+            : current < -trailingWidth / 3 || vx < -0.3)
+        ) {
           animateTo(-trailingWidth)
           onOpenSide('trailing')
         } else {
