@@ -66,6 +66,36 @@ const MAX_BUFFER = 500
 const eventBuffer: Array<{ seq: number; event: ServerEvent }> = []
 let nextSeq = 0
 
+const BUFFER_FILE = process.env.AJI_DATA_DIR
+  ? join(process.env.AJI_DATA_DIR, 'event_buffer.json')
+  : join(homedir(), '.aji-chat', 'event_buffer.json')
+
+function loadBuffer(): void {
+  const saved = loadJson<{ nextSeq: number; events: typeof eventBuffer }>(BUFFER_FILE)
+  if (!saved || !Array.isArray(saved.events)) return
+  const sliced = saved.events.slice(-MAX_BUFFER)
+  eventBuffer.push(...sliced)
+  nextSeq = typeof saved.nextSeq === 'number' ? saved.nextSeq : (sliced.at(-1)?.seq ?? 0) + 1
+}
+
+let bufferSaveTimer: ReturnType<typeof setTimeout> | null = null
+
+function scheduleBufferSave(): void {
+  if (bufferSaveTimer) clearTimeout(bufferSaveTimer)
+  bufferSaveTimer = setTimeout(() => {
+    bufferSaveTimer = null
+    saveJson(BUFFER_FILE, { nextSeq, events: eventBuffer })
+  }, 3000)
+}
+
+function flushBufferSync(): void {
+  if (bufferSaveTimer) {
+    clearTimeout(bufferSaveTimer)
+    bufferSaveTimer = null
+  }
+  saveJson(BUFFER_FILE, { nextSeq, events: eventBuffer })
+}
+
 // Per-process boot id, stamped on every envelope. The ring buffer + seq counter
 // are in-memory, so a restart resets `seq` to 0 while clients still hold a high
 // persisted cursor. Clients compare this epoch to detect the restart and reset
@@ -82,6 +112,7 @@ function envelope(seq: number, event: ServerEvent): string {
 loadAgents()
 loadChannels()
 loadServerInfo()
+loadBuffer()
 loadPushState()
 
 // ---------------------------------------------------------------------------
@@ -155,6 +186,8 @@ function broadcast(event: ServerEvent): void {
   const pushServerId = 'serverId' in event ? event.serverId : undefined
   observeForPush(event, pushServerId ? serverInfoCache.get(pushServerId)?.displayName : undefined)
 
+  scheduleBufferSave()
+
   if (event.type === 'file') {
     log(' ', '(file event data omitted)', { ...event, data: '[base64 data]' })
   } else if (event.type === 'commands') {
@@ -163,6 +196,17 @@ function broadcast(event: ServerEvent): void {
     log('➡️', event.type, { seq, event })
   }
 }
+
+// Flush the ring buffer to disk on graceful shutdown so missed-event replay
+// survives a server restart. Synchronous write ensures no data is lost before
+// the process exits.
+function handleShutdown(signal: string): void {
+  log(' ', `${signal} received — flushing ring buffer and exiting`)
+  flushBufferSync()
+  process.exit(0)
+}
+process.once('SIGTERM', () => handleShutdown('SIGTERM'))
+process.once('SIGINT', () => handleShutdown('SIGINT'))
 
 function dispatchToWebhooks(event: ClientEvent): void {
   const body = JSON.stringify(event)

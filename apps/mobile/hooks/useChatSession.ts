@@ -36,6 +36,10 @@ import type { ConnStatus } from '../context/WebSocketContext'
 const WINDOW_LIMIT = 200
 const BATCH_SIZE = 100
 const INACTIVITY_TIMEOUT_MS = 2 * 60 * 1000
+// How long to wait after the last text_delta before marking the message done
+// in the UI. Handles agents (like Hermes) that do post-processing after the
+// final token and don't emit message_end for many seconds.
+const STREAM_IDLE_MS = 1000
 
 // Hermes approval requests are transmitted as text messages and converted to
 // prompt items by tryApprovalPrompt during DB intake and WS message completion.
@@ -65,6 +69,9 @@ export function useChatSession(
 
   const loadingOlderRef = useRef(false)
   const inactivityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Per-message timers that fire `done:true` after STREAM_IDLE_MS of no text_delta.
+  // Cleared immediately when the real message_end arrives.
+  const streamingTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
 
   const clearInactivityTimer = useCallback(() => {
     if (inactivityTimerRef.current) {
@@ -97,8 +104,12 @@ export function useChatSession(
       localIdMapRef.current.set(row.id, row.local_id)
       if (skipIds?.has(row.id)) continue
       const item = rowToItem(row)
-      // Drop orphaned streaming-cursor rows (incomplete non-user messages).
-      if (item.kind === 'message' && item.role !== 'user' && !item.done) continue
+      // Keep partially-streamed assistant messages — they're persisted
+      // incrementally (see WSContext message_start/text_delta) so a mid-stream
+      // navigation away doesn't lose them. Still drop truly-empty placeholders
+      // (message_start with no text yet, or an interrupted message that never
+      // streamed any text), which would otherwise render as an empty bubble.
+      if (item.kind === 'message' && item.role !== 'user' && !item.done && item.text.length === 0) continue
       // Items stored as 'message' that are still unresolved approval requests get
       // converted to prompt cards on load. Items already answered have been
       // overwritten to { kind: 'prompt', resolved: true } by respond(), so they
@@ -144,6 +155,8 @@ export function useChatSession(
     oldestLocalIdRef.current = null
     localIdMapRef.current = new Map()
     loadingOlderRef.current = false
+    streamingTimers.current.forEach((t) => clearTimeout(t))
+    streamingTimers.current.clear()
 
     if (!chatId) return
     let cancelled = false
@@ -254,6 +267,37 @@ export function useChatSession(
     // Any non-status, non-commands event from the agent is a sign of life —
     // reset the inactivity timer so we only auto-idle on true silence.
     resetInactivityTimer()
+
+    // Per-message streaming-idle timer: if no text_delta arrives for STREAM_IDLE_MS
+    // after the last one, visually mark the message done without waiting for the real
+    // message_end. Handles agents (e.g. Hermes) that delay message_end by many seconds
+    // after the final token. The real message_end (when it arrives) clears the timer
+    // early and the done transition is idempotent, so no double-apply issues.
+    if (event.type === 'text_delta') {
+      const existing = streamingTimers.current.get(event.id)
+      if (existing) clearTimeout(existing)
+      streamingTimers.current.set(
+        event.id,
+        setTimeout(() => {
+          streamingTimers.current.delete(event.id)
+          setItems((prev) =>
+            prev.map((it) =>
+              it.kind === 'message' && it.id === event.id && !it.done
+                ? { ...it, done: true }
+                : it,
+            ),
+          )
+        }, STREAM_IDLE_MS),
+      )
+    }
+
+    if (event.type === 'message_end') {
+      const t = streamingTimers.current.get(event.id)
+      if (t) {
+        clearTimeout(t)
+        streamingTimers.current.delete(event.id)
+      }
+    }
 
     setItems((prev) =>
       reduceItemsForServerEvent(prev, event, turnId, {

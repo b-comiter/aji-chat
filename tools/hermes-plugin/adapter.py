@@ -203,6 +203,13 @@ def get_current_adapter() -> "Optional[AjiChatAdapter]":
 
 _RECONNECT_DELAYS = [1, 2, 4, 8, 16, 30]
 _POLL_INTERVAL = 300
+# How long after the last edit_message() call before we proactively emit
+# message_end. Hermes calls finish() on the stream consumer only after
+# run_conversation() returns (which includes memory writes, context
+# compression, etc.) — easily 20-30 seconds after the last LLM token.
+# The stream consumer edits every ~0.2-0.8 s while streaming, so 5 s of
+# silence reliably means the LLM has finished and only post-processing remains.
+_STREAM_IDLE_SECONDS = float(os.getenv("AJI_STREAM_IDLE_SECONDS", "1.5"))
 
 
 class AjiChatAdapter(BasePlatformAdapter):
@@ -274,6 +281,9 @@ class AjiChatAdapter(BasePlatformAdapter):
         self._last_status: dict[str, str] = {}
         # message_id -> (chat_id, turn_id) for open messages tracked in state.last_sent.
         self._open_message_scope: dict[str, tuple[str, Optional[str]]] = {}
+        # Per-message asyncio Tasks that emit message_end after _STREAM_IDLE_SECONDS
+        # of no edit_message() calls. Cancelled when the real finalize arrives.
+        self._stream_idle_tasks: dict[str, asyncio.Task] = {}
         # Captured in connect() once the event loop is confirmed running.
         # hooks.py reads this to submit coroutines from worker threads via
         # run_coroutine_threadsafe() instead of create_task().
@@ -362,6 +372,9 @@ class AjiChatAdapter(BasePlatformAdapter):
             flog("disconnect() no-op (not running)")
             return
         self._running = False
+        for task in list(self._stream_idle_tasks.values()):
+            task.cancel()
+        self._stream_idle_tasks.clear()
         try:
             await self._client.deregister_webhook(self._webhook.url)
         finally:
@@ -733,6 +746,55 @@ class AjiChatAdapter(BasePlatformAdapter):
         self._open_message_scope[message_id] = (chat_id, turn_id)
         return SendResult(success=True, message_id=message_id)
 
+    # -------------------------------------------------------------------
+    # Stream-idle close — emit message_end after silence without waiting
+    # for on_processing_complete (which fires only after run_conversation
+    # finishes its full post-processing tail, up to 30 s after last token).
+    # -------------------------------------------------------------------
+
+    def _cancel_stream_idle(self, message_id: str) -> None:
+        task = self._stream_idle_tasks.pop(message_id, None)
+        if task and not task.done():
+            task.cancel()
+
+    def _schedule_stream_idle(
+        self, message_id: str, chat_id: str, turn_id: Optional[str]
+    ) -> None:
+        """(Re)start the idle timer for message_id. Called on every delta emit."""
+        self._cancel_stream_idle(message_id)
+        self._stream_idle_tasks[message_id] = asyncio.create_task(
+            self._stream_idle_close(message_id, chat_id, turn_id)
+        )
+
+    async def _stream_idle_close(
+        self, message_id: str, chat_id: str, turn_id: Optional[str]
+    ) -> None:
+        """Fires _STREAM_IDLE_SECONDS after the last delta when no finalize arrived."""
+        await asyncio.sleep(_STREAM_IDLE_SECONDS)
+        self._stream_idle_tasks.pop(message_id, None)
+        # Guard: real finalize or on_processing_complete may have already closed it.
+        if not self._state.is_tracked(message_id):
+            flog("_stream_idle_close() msg=%.12s already closed — no-op", message_id)
+            return
+        flog_info(
+            "_stream_idle_close() proactively closing msg=%.12s after %.0fs of silence",
+            message_id, _STREAM_IDLE_SECONDS,
+        )
+        try:
+            await self._client.emit(
+                {"type": "message_end", "id": message_id},
+                chat_id=chat_id,
+                turn_id=turn_id,
+            )
+        except Exception as exc:
+            flog_warn("_stream_idle_close() emit failed: %s", exc)
+        self._state.forget_sent(message_id)
+        self._open_message_scope.pop(message_id, None)
+        try:
+            await self._emit_status("idle", chat_id)
+        except Exception as exc:
+            flog_warn("_stream_idle_close() status:idle emit failed: %s", exc)
+
     async def edit_message(
         self,
         chat_id: str,
@@ -748,6 +810,10 @@ class AjiChatAdapter(BasePlatformAdapter):
         if finalize and not self._state.is_tracked(message_id):
             flog("edit_message() skipping redundant finalize for already-closed msg=%.12s", message_id)
             return SendResult(success=True, message_id=message_id)
+
+        # Any edit proves the stream is still alive — cancel a pending idle close.
+        # We reschedule below after emitting a delta (not on empty-delta edits).
+        self._cancel_stream_idle(message_id)
 
         previous = self._state.get_sent(message_id)
         turn_id = self._state.current_turn(chat_id)
@@ -780,6 +846,11 @@ class AjiChatAdapter(BasePlatformAdapter):
             )
             self._state.forget_sent(message_id)
             self._open_message_scope.pop(message_id, None)
+        elif delta:
+            # Reschedule: if no further edit arrives within _STREAM_IDLE_SECONDS,
+            # proactively emit message_end rather than waiting for finish() which
+            # only fires after run_conversation() fully completes post-processing.
+            self._schedule_stream_idle(message_id, chat_id, turn_id)
 
         return SendResult(success=True, message_id=message_id)
 
@@ -974,6 +1045,7 @@ class AjiChatAdapter(BasePlatformAdapter):
                 continue
 
             flog_info("on_processing_complete() closing open message %s", message_id)
+            self._cancel_stream_idle(message_id)
             await self._client.emit(
                 {"type": "message_end", "id": message_id},
                 chat_id=chat_id, turn_id=turn_id,

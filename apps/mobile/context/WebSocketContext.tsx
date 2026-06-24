@@ -31,6 +31,10 @@ import {
   getItemById,
   getSetting,
   persistItem,
+  markItemDone,
+  updateItemData,
+  updateServerPreview,
+  updateChannelPreview,
   saveCachedCommands,
   setSetting,
   updateServerStatus,
@@ -139,8 +143,14 @@ export function WSProvider({ children }: { children: ReactNode }) {
   const subscribers = useRef<Map<string, Set<(e: ServerEvent) => void>>>(new Map())
 
   // Tracks in-flight messages/tools so we can accumulate text and write the
-  // final payload to SQLite only on message_end / tool_end.
+  // final payload to SQLite on message_end / tool_end.
   const inFlight = useRef<Map<string, InFlight>>(new Map())
+
+  // Per-message debounce timers for incrementally persisting streaming text.
+  // text_delta arrives 10-20x/sec; we coalesce writes so a mid-stream navigation
+  // away (which destroys the chat screen's in-memory copy) can still recover the
+  // partial message from SQLite instead of losing it until message_end.
+  const partialFlushTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
 
   // Serializes event handling. handleEvent is async, and onmessage fires it
   // per message without awaiting — so two events (notably a `status:working`
@@ -157,6 +167,37 @@ export function WSProvider({ children }: { children: ReactNode }) {
   function notify(key: string, event: ServerEvent) {
     subscribers.current.get(key)?.forEach((h) => h(event))
     subscribers.current.get('*')?.forEach((h) => h(event))
+  }
+
+  // Schedule a debounced write of an in-flight message's accumulated text to
+  // SQLite. Leading-edge debounce: at most one write per window per message id,
+  // so a fast stream doesn't hammer the DB. The flush writes the full snapshot
+  // (not a delta) with done:false, so the row always holds a correct prefix of
+  // the final text. message_end cancels the pending timer and writes the final.
+  function schedulePartialFlush(id: string): void {
+    if (partialFlushTimers.current.has(id)) return
+    const t = setTimeout(() => {
+      partialFlushTimers.current.delete(id)
+      const inf = inFlight.current.get(id)
+      if (!inf || inf.kind !== 'message') return
+      updateItemData(db, id, {
+        kind: 'message' as const,
+        id,
+        role: inf.role ?? 'assistant',
+        text: inf.text ?? '',
+        done: false,
+        turnId: inf.turnId,
+      }).catch((err) => console.warn('[WSContext] partial flush error', err))
+    }, 400)
+    partialFlushTimers.current.set(id, t)
+  }
+
+  function cancelPartialFlush(id: string): void {
+    const t = partialFlushTimers.current.get(id)
+    if (t) {
+      clearTimeout(t)
+      partialFlushTimers.current.delete(id)
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -203,15 +244,30 @@ export function WSProvider({ children }: { children: ReactNode }) {
             text: '',
           })
 
-          touchConversation().catch((err) =>
-            console.warn('[WSContext] touchConversation error', err),
-          )
+          // Persist an empty partial row up front (INSERT OR IGNORE, so a replay
+          // is a no-op). This also upserts the server + channel rows, so it
+          // subsumes touchConversation. Awaited so the row is guaranteed present
+          // before the subsequent text_delta / message_end (also serialized
+          // through handlerChain) UPDATE it. The row is finalized on message_end;
+          // if the user navigates away mid-stream the partial text is recoverable
+          // from SQLite instead of vanishing with the chat screen's React state.
+          await persistItem(db, {
+            id: event.id,
+            serverId,
+            channel,
+            kind: 'message',
+            turnId,
+            data: { kind: 'message' as const, id: event.id, role: event.role, text: '', done: false, turnId },
+          })
           break
         }
 
         case 'text_delta': {
           const inf = inFlight.current.get(event.id)
-          if (inf) inf.text = (inf.text ?? '') + event.text
+          if (inf) {
+            inf.text = (inf.text ?? '') + event.text
+            schedulePartialFlush(event.id)
+          }
           break
         }
 
@@ -219,14 +275,20 @@ export function WSProvider({ children }: { children: ReactNode }) {
           const inf = inFlight.current.get(event.id)
           if (inf) {
             inFlight.current.delete(event.id)
-            await persistItem(db, {
+            cancelPartialFlush(event.id)
+            // The row already exists (inserted on message_start), so finalize it
+            // with an UPDATE — persistItem's INSERT OR IGNORE would no-op here and
+            // leave the row stuck at its last partial snapshot.
+            await markItemDone(db, event.id, {
+              kind: 'message' as const,
               id: event.id,
-              serverId: inf.serverId,
-              channel: inf.channel,
-              kind: 'message',
-              data: { kind: 'message' as const, id: event.id, role: inf.role ?? 'assistant', text: inf.text ?? '', done: true, turnId: inf.turnId },
+              role: inf.role ?? 'assistant',
+              text: inf.text ?? '',
+              done: true,
               turnId: inf.turnId,
-            }, inf.text ?? '')
+            })
+            await updateServerPreview(db, inf.serverId, inf.text ?? '')
+            await updateChannelPreview(db, inf.serverId, inf.channel, inf.text ?? '')
 
             // Telegram-style: an arriving agent message means it's done composing,
             // so clear any lingering "working/thinking" indicator. This self-heals
@@ -483,6 +545,8 @@ export function WSProvider({ children }: { children: ReactNode }) {
         clearTimeout(seqFlushTimer.current)
         setSetting(db, 'ws_last_seq', String(lastSeqRef.current)).catch(() => {})
       }
+      partialFlushTimers.current.forEach((t) => clearTimeout(t))
+      partialFlushTimers.current.clear()
       ws.current?.close()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
