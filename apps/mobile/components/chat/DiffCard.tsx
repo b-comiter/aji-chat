@@ -33,6 +33,7 @@ function baseName(p?: string): string {
 export const DiffCard = memo(function DiffCard({ diff }: { diff: EditDiff }) {
   const { colors, tokenColors } = useTheme()
   const styles = useMemo(() => makeStyles(colors), [colors])
+  const [collapsed, setCollapsed] = useState(true)
   const [viewerOpen, setViewerOpen] = useState(false)
 
   // Highlight by the edited file's extension (e.g. `.ts` → typescript).
@@ -102,7 +103,12 @@ export const DiffCard = memo(function DiffCard({ diff }: { diff: EditDiff }) {
   return (
     <View style={styles.wrap}>
       <View style={styles.card}>
-        <View style={styles.header}>
+        <Pressable
+          onPress={() => setCollapsed((c) => !c)}
+          style={styles.header}
+          accessibilityRole="button"
+          accessibilityLabel={collapsed ? 'Expand diff' : 'Collapse diff'}
+        >
           <Feather name="edit-3" size={13} color={colors.tool} />
           <Text style={styles.fileName} numberOfLines={1}>{baseName(diff.filePath)}</Text>
           <View style={styles.stats}>
@@ -114,52 +120,59 @@ export const DiffCard = memo(function DiffCard({ diff }: { diff: EditDiff }) {
             style={styles.expandBtn}
             hitSlop={8}
             accessibilityRole="button"
-            accessibilityLabel={`Expand diff, ${flat.length} line${flat.length === 1 ? '' : 's'}`}
+            accessibilityLabel={`Open full-screen viewer, ${flat.length} lines`}
           >
             <Feather name="maximize-2" size={13} color={colors.textMuted} />
             <Text style={styles.expandLabel}>{flat.length}</Text>
           </Pressable>
-        </View>
+          <Feather
+            name={collapsed ? 'chevron-down' : 'chevron-up'}
+            size={13}
+            color={colors.textMuted}
+          />
+        </Pressable>
 
-        <View style={styles.body}>
-          {shown.map((line, i) => (
-            <View
-              key={i}
-              style={[
-                styles.line,
-                line.type === 'add' && styles.lineAdd,
-                line.type === 'del' && styles.lineDel,
-                line.hunkBreak && styles.hunkBreak,
-              ]}
-            >
-              <Text
-                style={[
-                  styles.gutter,
-                  line.type === 'add' && styles.gutterAdd,
-                  line.type === 'del' && styles.gutterDel,
-                ]}
-              >
-                {line.type === 'add' ? '+' : line.type === 'del' ? '−' : ' '}
-              </Text>
-              <Text
-                style={[
-                  styles.code,
-                  // Syntax colors win when highlighted; the green/red text tint is
-                  // the fallback for files with no known grammar.
-                  !line.nodes && line.type === 'add' && styles.codeAdd,
-                  !line.nodes && line.type === 'del' && styles.codeDel,
-                ]}
-              >
-                {line.nodes ? (line.nodes.length ? line.nodes : ' ') : line.text.length ? line.text : ' '}
-              </Text>
+        {!collapsed && (
+          <>
+            <View style={styles.body}>
+              {shown.map((line, i) => (
+                <View
+                  key={i}
+                  style={[
+                    styles.line,
+                    line.type === 'add' && styles.lineAdd,
+                    line.type === 'del' && styles.lineDel,
+                    line.hunkBreak && styles.hunkBreak,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.gutter,
+                      line.type === 'add' && styles.gutterAdd,
+                      line.type === 'del' && styles.gutterDel,
+                    ]}
+                  >
+                    {line.type === 'add' ? '+' : line.type === 'del' ? '−' : ' '}
+                  </Text>
+                  <Text
+                    style={[
+                      styles.code,
+                      !line.nodes && line.type === 'add' && styles.codeAdd,
+                      !line.nodes && line.type === 'del' && styles.codeDel,
+                    ]}
+                  >
+                    {line.nodes ? (line.nodes.length ? line.nodes : ' ') : line.text.length ? line.text : ' '}
+                  </Text>
+                </View>
+              ))}
             </View>
-          ))}
-        </View>
 
-        {isTruncated && (
-          <Pressable onPress={() => setViewerOpen(true)} style={styles.moreBtn} hitSlop={6} accessibilityRole="button">
-            <Text style={styles.moreText}>Show {hidden} more line{hidden === 1 ? '' : 's'}</Text>
-          </Pressable>
+            {isTruncated && (
+              <Pressable onPress={() => setViewerOpen(true)} style={styles.moreBtn} hitSlop={6} accessibilityRole="button">
+                <Text style={styles.moreText}>Show {hidden} more line{hidden === 1 ? '' : 's'}</Text>
+              </Pressable>
+            )}
+          </>
         )}
       </View>
 

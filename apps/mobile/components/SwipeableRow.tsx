@@ -68,6 +68,10 @@ export function SwipeableRow({
   // +leadingWidth (leading open). Read on gesture grant so a drag continues from
   // the current position rather than snapping.
   const offset = useRef(0)
+  // Ref mirror of openSide so PanResponder handlers (memoized on widths only)
+  // can read the live committed state without being recreated on every change.
+  const openSideRef = useRef<OpenSide>(openSide)
+  useEffect(() => { openSideRef.current = openSide }, [openSide])
 
   const animateTo = (to: number) => {
     offset.current = to
@@ -95,12 +99,17 @@ export function SwipeableRow({
     // Settle to the nearest rest state from wherever the drag ended. Reads the
     // live translateX so it's correct on both a normal release and a forced
     // terminate.
+    //
+    // When one side is already open, velocity toward the opposite side is
+    // intentionally ignored — a fast return-swipe should only close, never
+    // accidentally flip to the other panel.
     const settle = (vx: number) => {
+      const curOpen = openSideRef.current
       translateX.stopAnimation((current: number) => {
-        if (leadingAction && (current > leadingWidth / 2 || vx > 0.3)) {
+        if (leadingAction && curOpen !== 'trailing' && (current > leadingWidth / 2 || vx > 0.3)) {
           animateTo(leadingWidth)
           onOpenSide('leading')
-        } else if (current < -trailingWidth / 3 || vx < -0.3) {
+        } else if (curOpen !== 'leading' && (current < -trailingWidth / 3 || vx < -0.3)) {
           animateTo(-trailingWidth)
           onOpenSide('trailing')
         } else {
@@ -115,7 +124,13 @@ export function SwipeableRow({
       onMoveShouldSetPanResponderCapture: (_e, g) =>
         Math.abs(g.dx) > Math.abs(g.dy) && Math.abs(g.dx) > CLAIM_THRESHOLD,
       onPanResponderMove: (_e, g) => {
-        const next = Math.max(-trailingWidth, Math.min(leadingWidth, offset.current + g.dx))
+        // When one side is open, clamp drag to [0, leadingWidth] or
+        // [-trailingWidth, 0] so the row can only return to closed — it cannot
+        // cross center and accidentally reveal the opposite panel.
+        const curOpen = openSideRef.current
+        const minX = curOpen === 'leading' ? 0 : -trailingWidth
+        const maxX = curOpen === 'trailing' ? 0 : leadingWidth
+        const next = Math.max(minX, Math.min(maxX, offset.current + g.dx))
         translateX.setValue(next)
       },
       onPanResponderRelease: (_e, g) => settle(g.vx),
