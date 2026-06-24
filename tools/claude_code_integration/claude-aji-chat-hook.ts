@@ -19,7 +19,13 @@ import * as path from 'node:path'
 import type { PermissionRequest, PromptOption, ServerEvent } from '@aji/protocol'
 
 const SERVER = process.env.AJI_SERVER ?? 'http://localhost:4000/event'
-const AGENT = 'claude-code'
+// Route Claude Desktop's activity to its own server so it doesn't interleave with
+// the interactive CLI. Claude Desktop sets CLAUDE_CODE_ENTRYPOINT=claude-desktop;
+// the CLI sets "cli". Desktop is view-only on mobile (no channel inbound), so it
+// surfaces as a separate, read-only activity feed.
+const IS_DESKTOP = process.env.CLAUDE_CODE_ENTRYPOINT === 'claude-desktop'
+const AGENT = IS_DESKTOP ? 'claude-desktop' : 'claude-code'
+const DISPLAY_NAME = IS_DESKTOP ? 'Claude Desktop' : 'Claude Code'
 const PROMPT_SERVER = process.env.AJI_PROMPT_SERVER ?? 'http://localhost:4000/prompt/wait'
 const ACCESS_TOKEN = process.env.AJI_ACCESS_TOKEN?.trim() || undefined
 
@@ -224,15 +230,15 @@ function writeHookJson(body: unknown): void {
 // ---------------------------------------------------------------------------
 
 async function emitClaudeCodeServerInfo(): Promise<void> {
-  // Advertise Claude Code as a single-channel server so the mobile home screen
-  // opens its one chat directly instead of drilling into a (one-entry) channel
-  // list. Idempotent on the mobile side; the server also caches + replays it to
-  // clients that connect later.
+  // Advertise as a single-channel server so the mobile home screen opens its
+  // one chat directly. Desktop is view-only (no inbound channel bridge), so we
+  // skip emitting commands for it. Idempotent; server caches + replays to late
+  // connectors.
   await emit({
     type: 'server_info',
     serverId: AGENT,
     monoChannel: true,
-    displayName: 'Claude Code',
+    displayName: DISPLAY_NAME,
   })
 }
 
@@ -285,7 +291,7 @@ async function main(): Promise<void> {
       // contact so both are available immediately (server caches them for the
       // session lifetime).
       await emitClaudeCodeServerInfo()
-      await emitClaudeCodeCommands()
+      if (!IS_DESKTOP) await emitClaudeCodeCommands()
       break
     }
     case 'PreToolUse': {
@@ -304,6 +310,9 @@ async function main(): Promise<void> {
       break
     }
     case 'PermissionRequest': {
+      // Desktop has no inbound channel — the user can't respond from mobile, so
+      // fall through to Claude's default behavior.
+      if (IS_DESKTOP) break
       const { options, suggestions } = buildPermissionOptions(payload)
       const response = await waitForPermission({
         type: 'permission_request',
@@ -357,25 +366,30 @@ async function main(): Promise<void> {
       const id = String(payload.tool_use_id ?? randomUUID())
       const turnId = readTurnId(sessionId)
       await emit({ type: 'tool_end', id, result: payload.tool_response, serverId: AGENT, ...(turnId ? { turn_id: turnId } : {}) })
+      // Claude resumes reasoning after the tool result — go back to thinking so
+      // mobile doesn't show the agent as still running a tool between calls.
+      await emit({ type: 'status', value: 'thinking', serverId: AGENT })
       break
     }
     case 'Stop': {
+      // Read turn ID before clearing; emit idle first so mobile is unblocked
+      // even if the subsequent message emits hit their 4 s timeout.
+      const turnId = readTurnId(sessionId)
+      clearTurnId(sessionId)
+      await emit({ type: 'status', value: 'idle', serverId: AGENT })
       const transcriptPath = payload.transcript_path as string | undefined
       const text = transcriptPath ? lastAssistantText(transcriptPath) : null
-      const turnId = readTurnId(sessionId)
       if (text) {
         const id = randomUUID()
         await emit({ type: 'message_start', id, role: 'assistant', serverId: AGENT, ...(turnId ? { turn_id: turnId } : {}) })
         await emit({ type: 'text_delta', id, text, serverId: AGENT, ...(turnId ? { turn_id: turnId } : {}) })
         await emit({ type: 'message_end', id, serverId: AGENT, ...(turnId ? { turn_id: turnId } : {}) })
       }
-      clearTurnId(sessionId)
-      await emit({ type: 'status', value: 'idle', serverId: AGENT })
       // Refresh mono-channel advertisement + the mobile command picker when
       // Claude goes idle — best time to send (and re-seed the server cache if it
       // restarted mid-session).
       await emitClaudeCodeServerInfo()
-      await emitClaudeCodeCommands()
+      if (!IS_DESKTOP) await emitClaudeCodeCommands()
       break
     }
     default:
