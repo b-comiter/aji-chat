@@ -119,7 +119,6 @@ export function WSProvider({ children }: { children: ReactNode }) {
   const ws = useRef<WebSocket | null>(null)
   const attempt = useRef(0)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const seqFlushTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const mounted = useRef(true)
   const lastSeqRef = useRef(0)
 
@@ -459,6 +458,7 @@ export function WSProvider({ children }: { children: ReactNode }) {
       socket.onerror = () => socket.close()
       socket.onclose = () => {
         if (!mounted.current) return
+        setSetting(db, 'ws_last_seq', String(lastSeqRef.current)).catch(() => {})
         setConn('disconnected')
         const delay = BACKOFF[Math.min(attempt.current, BACKOFF.length - 1)]
         attempt.current += 1
@@ -490,12 +490,6 @@ export function WSProvider({ children }: { children: ReactNode }) {
             seenSeqs.current.add(parsed.seq)
             if (parsed.seq > lastSeqRef.current) {
               lastSeqRef.current = parsed.seq
-              // Debounce the SQLite write — text_delta arrives 10-20x/sec during
-              // streaming; we only need the seq persisted before the next reconnect.
-              if (seqFlushTimer.current) clearTimeout(seqFlushTimer.current)
-              seqFlushTimer.current = setTimeout(() => {
-                setSetting(db, 'ws_last_seq', String(lastSeqRef.current)).catch(() => {})
-              }, 500)
             }
           }
           // Apply events strictly in order (see handlerChain) so status updates
@@ -541,10 +535,7 @@ export function WSProvider({ children }: { children: ReactNode }) {
       mounted.current = false
       appState.remove()
       if (timer.current) clearTimeout(timer.current)
-      if (seqFlushTimer.current) {
-        clearTimeout(seqFlushTimer.current)
-        setSetting(db, 'ws_last_seq', String(lastSeqRef.current)).catch(() => {})
-      }
+      setSetting(db, 'ws_last_seq', String(lastSeqRef.current)).catch(() => {})
       partialFlushTimers.current.forEach((t) => clearTimeout(t))
       partialFlushTimers.current.clear()
       ws.current?.close()

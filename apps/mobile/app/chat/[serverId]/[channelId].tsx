@@ -168,60 +168,31 @@ export default function ChatScreen() {
     [displayItems],
   )
 
-  // Compute which items start a new message group (avatar visible, metadata shown).
-  //
-  // Why precompute over chronological items + id-based lookup?
-  //   - MessageList reverses items for inverted rendering (data[0] = newest)
-  //   - renderItem's `index` is now meaningless (data[5] is the 5th newest, not 5th chronologically)
-  //   - Computing "group start" from index would fail (prev item in reversed order ≠ prev in time)
-  //
-  // Solution: Compute once over chronological items, store IDs in a Set.
-  // renderItem does O(1) lookup: `isGroupStart = groupStartIds.has(item.id)`.
-  // Result: same semantics ("first in a same-sender run") regardless of render order.
-  const groupStartIds = useMemo(() => {
-    const set = new Set<string>()
+  // Single pass over chronological displayItems to build all per-item rendering metadata.
+  // Id-based maps (not index-based) because MessageList reverses items for the inverted
+  // FlatList — renderItem's `index` is the nth-newest, not nth-chronological.
+  //  - groupStartIds: items that open a new sender group (avatar + name header shown)
+  //  - dividerMap: 'heavy' on sender transitions, 'light' within a run, 'none' at tail
+  //  - daySeparators: label for the first item in each new calendar day
+  const { groupStartIds, dividerMap, daySeparators } = useMemo(() => {
+    const groupStartIds = new Set<string>()
+    const dividerMap = new Map<string, 'light' | 'heavy' | 'none'>()
+    const daySeparators = new Map<string, string>()
     let prev: Item | undefined
-    for (const item of displayItems) {
-      if (computeIsGroupStart(item, prev)) set.add(item.id)
-      prev = item
-    }
-    return set
-  }, [displayItems])
-
-  // Divider style per item ID, keyed by the item's bottom border.
-  // 'heavy' on role transitions (user↔agent) for clear visual separation.
-  // 'light' between same-sender messages for subtle readability breaks.
-  // 'none' on the chronologically newest item (no border needed at visual bottom).
-  const dividerMap = useMemo(() => {
-    const map = new Map<string, 'light' | 'heavy' | 'none'>()
+    let prevTs: number | undefined
     for (let i = 0; i < displayItems.length; i++) {
       const cur = displayItems[i]
       const next = displayItems[i + 1]
-      if (!next) {
-        map.set(cur.id, 'none')
-        continue
+      if (computeIsGroupStart(cur, prev)) groupStartIds.add(cur.id)
+      dividerMap.set(cur.id, !next ? 'none' : senderRole(cur) !== senderRole(next) ? 'heavy' : 'light')
+      const ts = cur.createdAt
+      if (ts != null) {
+        if (prevTs == null || !sameCalendarDay(prevTs, ts)) daySeparators.set(cur.id, formatDaySeparator(ts))
+        prevTs = ts
       }
-      // 'heavy' exactly where the avatar group breaks (sender changes), 'light'
-      // within a same-sender run. Mirrors computeIsGroupStart's boundary.
-      map.set(cur.id, senderRole(cur) !== senderRole(next) ? 'heavy' : 'light')
+      prev = cur
     }
-    return map
-  }, [displayItems])
-
-  // Label for the day-separator above an item that opens a new calendar day.
-  // Computed over chronological items; items without a createdAt are skipped.
-  const daySeparators = useMemo(() => {
-    const map = new Map<string, string>()
-    let prevTs: number | undefined
-    for (const item of displayItems) {
-      const ts = item.createdAt
-      if (ts == null) continue
-      if (prevTs == null || !sameCalendarDay(prevTs, ts)) {
-        map.set(item.id, formatDaySeparator(ts))
-      }
-      prevTs = ts
-    }
-    return map
+    return { groupStartIds, dividerMap, daySeparators }
   }, [displayItems])
 
   // Id of the first item the user hadn't seen when they opened the chat — gets a
@@ -284,45 +255,43 @@ export default function ChatScreen() {
 
   // ── Attachment handlers ──────────────────────────────────────────────────
 
-  const handleAttachCamera = useCallback(async () => {
-    const perm = await ImagePicker.requestCameraPermissionsAsync()
-    if (!perm.granted) {
-      Alert.alert('Camera access required', 'Allow camera access in Settings to send photos.')
-      return
+  const handleAttach = useCallback(async (mode: 'camera' | 'photo' | 'file') => {
+    if (mode === 'camera') {
+      const perm = await ImagePicker.requestCameraPermissionsAsync()
+      if (!perm.granted) {
+        Alert.alert('Camera access required', 'Allow camera access in Settings to send photos.')
+        return
+      }
+    } else if (mode === 'photo') {
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync()
+      if (!perm.granted) {
+        Alert.alert('Photo library access required', 'Allow photo library access in Settings to share images.')
+        return
+      }
     }
-    const result = await ImagePicker.launchCameraAsync({
-      mediaTypes: ['images', 'videos'],
-      quality: 0.85,
-    })
-    if (result.canceled) return
-    const asset = result.assets[0]
-    sendAttachment({ uri: asset.uri, mime: asset.mimeType ?? 'image/jpeg', name: asset.fileName ?? undefined }).catch(console.warn)
+
+    let uri: string, mime: string, name: string | undefined
+    if (mode === 'file') {
+      const result = await DocumentPicker.getDocumentAsync({ type: '*/*', copyToCacheDirectory: true })
+      if (result.canceled) return
+      const asset = result.assets[0]
+      uri = asset.uri; mime = asset.mimeType ?? 'application/octet-stream'; name = asset.name
+    } else {
+      const result = mode === 'camera'
+        ? await ImagePicker.launchCameraAsync({ mediaTypes: ['images', 'videos'], quality: 0.85 })
+        : await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images', 'videos'], quality: 0.85 })
+      if (result.canceled) return
+      const asset = result.assets[0]
+      uri = asset.uri; mime = asset.mimeType ?? 'image/jpeg'; name = asset.fileName ?? undefined
+    }
+
+    sendAttachment({ uri, mime, name }).catch(console.warn)
     messageListRef.current?.scrollToBottom()
   }, [sendAttachment])
 
-  const handleAttachPhoto = useCallback(async () => {
-    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync()
-    if (!perm.granted) {
-      Alert.alert('Photo library access required', 'Allow photo library access in Settings to share images.')
-      return
-    }
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images', 'videos'],
-      quality: 0.85,
-    })
-    if (result.canceled) return
-    const asset = result.assets[0]
-    sendAttachment({ uri: asset.uri, mime: asset.mimeType ?? 'image/jpeg', name: asset.fileName ?? undefined }).catch(console.warn)
-    messageListRef.current?.scrollToBottom()
-  }, [sendAttachment])
-
-  const handleAttachFile = useCallback(async () => {
-    const result = await DocumentPicker.getDocumentAsync({ type: '*/*', copyToCacheDirectory: true })
-    if (result.canceled) return
-    const asset = result.assets[0]
-    sendAttachment({ uri: asset.uri, mime: asset.mimeType ?? 'application/octet-stream', name: asset.name }).catch(console.warn)
-    messageListRef.current?.scrollToBottom()
-  }, [sendAttachment])
+  const handleAttachCamera = useCallback(() => handleAttach('camera'), [handleAttach])
+  const handleAttachPhoto = useCallback(() => handleAttach('photo'), [handleAttach])
+  const handleAttachFile = useCallback(() => handleAttach('file'), [handleAttach])
 
   const handleCommandSelect = useCallback((name: string) => {
     setDraft(`/${name} `)
