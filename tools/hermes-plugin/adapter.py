@@ -293,8 +293,8 @@ class AjiChatAdapter(BasePlatformAdapter):
     # Connection lifecycle
     # -------------------------------------------------------------------
 
-    async def connect(self) -> bool:
-        flog_info("connect() called")
+    async def connect(self, *, is_reconnect: bool = False, **_: Any) -> bool:
+        flog_info("connect() called (is_reconnect=%s)", is_reconnect)
         # Capture the running event loop now — hooks.py needs it to submit
         # coroutines from ThreadPoolExecutor threads via run_coroutine_threadsafe.
         self._loop = asyncio.get_running_loop()
