@@ -9,15 +9,15 @@ import type { ClientEvent, Commands, PermissionRequest, PromptResponse, ServerEv
 import { textMessage } from '@aji/protocol'
 import { shouldDeliverToWebhook } from './routing'
 import {
-  loadChannels, registerChannel, deregisterChannel, channelsEvent, allServerIds,
+  loadChannels, channelsEvent, allServerIds,
 } from './channels'
 import {
   loadAgents, saveAgents, bearerToken, agentIdForToken, getAgentRecord, hasToken, mintAgent,
 } from './agents'
 import { loadJson, saveJson } from './persist'
-import { loadPushState, registerPushToken, setServerMuted, observeForPush } from './push'
-import { selectMissedEvents } from './replay'
+import { loadPushState, observeForPush } from './push'
 import { registerDebugRoutes } from './debugRoutes'
+import { handleWsClientEvent } from './wsClientEvents'
 
 const PORT = Number(process.env.AJI_PORT) || 4000
 const ACCESS_TOKEN = process.env.AJI_ACCESS_TOKEN?.trim() || undefined
@@ -422,41 +422,18 @@ wss.on('connection', (ws, request) => {
     try {
       const event = JSON.parse(raw.toString()) as ClientEvent
       log('⬅️', `ws:${event.type}`, event)
-      if (event.type === 'prompt_response') {
-        resolvePrompt(event)
-      } else if (event.type === 'get_commands') {
-        if (ws.readyState === WebSocket.OPEN) replayCommandsTo(ws)
-      } else if (event.type === 'create_channel') {
-        registerChannel(event.serverId, event.channel, event.displayName, event.cwd)
-        broadcast(channelsEvent(event.serverId))
-      } else if (event.type === 'delete_channel') {
-        deregisterChannel(event.serverId, event.channel)
-        broadcast(channelsEvent(event.serverId))
-      } else if (event.type === 'get_missed_events') {
-        const after = event.after_seq
-        // Restart-aware: a cursor ahead of our seq counter means the client is
-        // from a previous instance, so replay the whole buffer rather than
-        // filtering everything out (see selectMissedEvents).
-        const missed = selectMissedEvents(eventBuffer, after, nextSeq)
-        const restarted = after >= nextSeq
-        log(' ', `ws:get_missed_events  after=${after} replaying=${missed.length}${restarted ? ' (server restart — full replay)' : ''}`)
-        for (const entry of missed) {
-          if (ws.readyState === WebSocket.OPEN) ws.send(envelope(entry.seq, entry.event))
-        }
-      } else if (event.type === 'register_push') {
-        if (registerPushToken(event.token)) {
-          log(' ', `ws:register_push  ${event.platform ?? '-'} token=…${event.token.slice(-12)}`)
-        }
-      } else if (event.type === 'set_mute') {
-        setServerMuted(event.serverId, event.muted)
-        log(' ', `ws:set_mute  serverId=${event.serverId} muted=${event.muted}`)
-      }
-
-      // register_push / set_mute are infra (the phone configuring its own
-      // delivery) — not agent-facing messages, so they're never forwarded.
-      if (event.type !== 'register_push' && event.type !== 'set_mute') {
-        dispatchToWebhooks(event)
-      }
+      handleWsClientEvent({
+        ws,
+        event,
+        eventBuffer,
+        nextSeq,
+        envelope,
+        replayCommandsTo,
+        broadcast,
+        resolvePrompt,
+        dispatchToWebhooks,
+        log,
+      })
     } catch {
       log(' ', 'ws:unparseable', raw.toString().slice(0, 200))
     }
