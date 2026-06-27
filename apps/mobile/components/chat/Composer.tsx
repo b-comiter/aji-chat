@@ -21,164 +21,27 @@
  *     expo-document-picker (File)
  */
 import { Feather } from '@expo/vector-icons'
-import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio'
 import { forwardRef, memo, useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Linking, Pressable, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native'
 import type { ThemeColors } from '../../constants/theme'
 import { spacing, typography } from '../../constants/theme'
 import { useTheme } from '../../context/ThemeContext'
-import type { RecordedClip } from '../../hooks/useVoiceRecorder'
 import { useVoiceRecorder } from '../../hooks/useVoiceRecorder'
 import { impactHaptic } from '../../utils/haptics'
+import { AttachMenu } from './composer/AttachMenu'
+import { MAX_INPUT_HEIGHT_FRACTION, MIN_INPUT_HEIGHT, formatDuration } from './composer/constants'
+import { StopGlyph, VoiceModeIcon } from './composer/icons'
+import type { AttachItem, ComposerMode, ComposerProps } from './composer/types'
+import { useVoicePreview } from './composer/useVoicePreview'
 import { RecordingWaveform } from './RecordingWaveform'
 import { downsampleBars, normalizeDb } from './waveformHelpers'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type Props = {
-  draft: string
-  setDraft: (text: string) => void
-  onSend: () => void
-  canSend: boolean
-  blocked?: boolean
-  /** Voice recording: fires when the user sends a clip. */
-  onSendAudio?: (uri: string, durationMs: number) => void
-  onAttachCamera?: () => void
-  onAttachPhoto?: () => void
-  onAttachFile?: () => void
-}
-
-type Mode = 'text' | 'voice-recording' | 'voice-review'
-
-// Auto-grow bounds for the text input. MIN matches the 40px side buttons so a
-// one-line composer lines up. The MAX is computed per-device as a fraction of
-// the screen height (see the component) so the field can grow to show a sizable
-// chunk of a long message before it falls back to internal scrolling.
-const MIN_INPUT_HEIGHT = 40
-const MAX_INPUT_HEIGHT_FRACTION = 0.45
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function formatDuration(ms: number): string {
-  const total = Math.max(0, Math.floor(ms / 1000))
-  const m = Math.floor(total / 60)
-  const s = total % 60
-  return `${m}:${String(s).padStart(2, '0')}`
-}
-
-// ─── 3-bar custom waveform glyph ─────────────────────────────────────────────
-// Three vertical bars at heights [45 %, 100 %, 45 %] — the universal "voice"
-// symbol, matching what RecordingWaveform renders at the larger scale.
-
-function VoiceModeIcon({ size, color }: { size: number; color: string }) {
-  const barW = 3
-  const barGap = 2
-  const heights = [size * 0.45, size, size * 0.45]
-  return (
-    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', width: size }}>
-      {heights.map((h, i) => (
-        <View
-          key={i}
-          style={{ width: barW, height: h, borderRadius: barW / 2, backgroundColor: color, marginLeft: i === 0 ? 0 : barGap }}
-        />
-      ))}
-    </View>
-  )
-}
-
-// ─── Stop glyph (red rounded square) ─────────────────────────────────────────
-
-function StopGlyph() {
-  return <View style={{ width: 17, height: 17, borderRadius: 3, backgroundColor: '#e23b3b' }} />
-}
-
-// ─── Attachment menu ──────────────────────────────────────────────────────────
-// Rendered above the composer row (normal flow, not absolute-positioned).
-// Only shows options whose handler props are provided.
-
-interface AttachItem {
-  icon: React.ComponentProps<typeof Feather>['name']
-  label: string
-  onPress: (() => void) | undefined
-}
-
-function AttachMenu({
-  items,
-  colors,
-  styles,
-}: {
-  items: AttachItem[]
-  colors: ThemeColors
-  styles: ReturnType<typeof makeStyles>
-}) {
-  const visible = items.filter((it) => it.onPress !== undefined)
-  if (visible.length === 0) return null
-  return (
-    <View style={styles.attachMenu}>
-      {visible.map(({ icon, label, onPress }) => (
-        <Pressable
-          key={label}
-          style={({ pressed }) => [styles.attachItem, pressed && styles.iconBtnPressed]}
-          onPress={onPress}
-          accessibilityRole="button"
-          accessibilityLabel={label}
-        >
-          <View style={[styles.attachIconCircle, { borderColor: colors.border }]}>
-            <Feather name={icon} size={20} color={colors.text} />
-          </View>
-          <Text style={[styles.attachLabel, { color: colors.textDim }]}>{label}</Text>
-        </Pressable>
-      ))}
-    </View>
-  )
-}
-
-// ─── useVoicePreview ──────────────────────────────────────────────────────────
-// Encapsulates all preview-player state: source loading, polled playback time,
-// derived progress/finished flags, and the play/pause toggle.
-
-function useVoicePreview(clip: RecordedClip | null, mode: Mode) {
-  const previewSource = useMemo(
-    () => (mode === 'voice-review' && clip?.uri ? { uri: clip.uri } : null),
-    [mode, clip?.uri],
-  )
-  const player = useAudioPlayer(previewSource)
-  const status = useAudioPlayerStatus(player)
-
-  // useAudioPlayerStatus is event-driven — currentTime doesn't update
-  // continuously during playback. Poll the player directly instead.
-  const [polledTime, setPolledTime] = useState(0)
-  useEffect(() => {
-    if (!status.playing) {
-      setPolledTime(player.currentTime)
-      return
-    }
-    const id = setInterval(() => setPolledTime(player.currentTime), 50)
-    return () => clearInterval(id)
-  }, [status.playing, player])
-
-  const finished = status.duration > 0 && polledTime >= status.duration - 0.05
-  const progress = status.duration > 0 ? polledTime / status.duration : 0
-
-  const toggle = () => {
-    if (!previewSource) return
-    if (status.playing) {
-      player.pause()
-    } else {
-      if (finished) player.seekTo(0)
-      player.play()
-    }
-  }
-
-  const pause = () => { try { player.pause() } catch {} }
-
-  return { status, polledTime, progress, finished, toggle, pause }
-}
-
 // ─── Composer ─────────────────────────────────────────────────────────────────
 
 export const Composer = memo(
-  forwardRef<TextInput, Props>(function Composer(
+  forwardRef<TextInput, ComposerProps>(function Composer(
     {
       draft, setDraft, onSend, canSend, blocked, onSendAudio,
       onAttachCamera, onAttachPhoto, onAttachFile,
@@ -196,7 +59,7 @@ export const Composer = memo(
     const isSlashDraft = draft.trimStart().startsWith('/')
     const softBlocked = !!blocked && !isSlashDraft
 
-    const [mode, setMode] = useState<Mode>('text')
+    const [mode, setMode] = useState<ComposerMode>('text')
     const [inputFocused, setInputFocused] = useState(false)
     const [showAttachMenu, setShowAttachMenu] = useState(false)
     const [meteringTick, setMeteringTick] = useState(0)
