@@ -204,7 +204,14 @@ export function WSProvider({ children }: { children: ReactNode }) {
   // ---------------------------------------------------------------------------
 
   async function handleEvent(event: ServerEvent): Promise<void> {
-    const serverId: string = ('serverId' in event ? event.serverId : undefined) ?? 'unknown'
+    const rawServerId = 'serverId' in event ? event.serverId : undefined
+    // Drop events with no serverId entirely — without one we can't scope the
+    // event to a conversation and would create a spurious "unknown" server row.
+    if (!rawServerId) {
+      console.warn('[WSContext] event missing serverId, dropping', event.type)
+      return
+    }
+    const serverId: string = rawServerId
     // The channel scopes the conversation within a server. Absent ⇒ 'general',
     // which preserves the original single-conversation-per-server behavior.
     const channel: string = 'channel' in event && event.channel ? event.channel : DEFAULT_CHANNEL
@@ -298,6 +305,13 @@ export function WSProvider({ children }: { children: ReactNode }) {
               await updateServerStatus(db, inf.serverId, 'idle')
               await updateChannelStatus(db, inf.serverId, inf.channel, 'idle')
             }
+          } else {
+            // Orphaned message_end — no matching message_start on this connection.
+            // Some agents (e.g. Hermes) emit a cleanup message_end for internal
+            // work the client never received a message_start for. Synthesize
+            // status:idle so the typing indicator clears promptly instead of
+            // waiting for the 2-minute inactivity timer to fire.
+            notify(key, { type: 'status', value: 'idle' } as ServerEvent)
           }
           break
         }
@@ -337,6 +351,9 @@ export function WSProvider({ children }: { children: ReactNode }) {
         }
 
         case 'file': {
+          // An empty data field means the agent sent a file shell with no payload —
+          // skip persistence so no unplayable audio clip or blank image is stored.
+          if (!event.data) break
           // Single self-contained event — persist immediately (no inFlight).
           await persistItem(db, {
             id: event.id,
@@ -385,8 +402,14 @@ export function WSProvider({ children }: { children: ReactNode }) {
 
         case 'status': {
           await touchConversation()
-          await updateServerStatus(db, serverId, event.value)
-          await updateChannelStatus(db, serverId, channel, event.value)
+          // Only persist idle to SQLite — thinking/working are live signals that
+          // mean nothing across app restarts. A stuck 'thinking' in the DB from a
+          // crashed session would otherwise show forever. On next launch everything
+          // defaults idle; get_missed_events replay corrects active sessions fast.
+          if (event.value === 'idle') {
+            await updateServerStatus(db, serverId, event.value)
+            await updateChannelStatus(db, serverId, channel, event.value)
+          }
           break
         }
 

@@ -72,6 +72,10 @@ export function useChatSession(
   // Per-message timers that fire `done:true` after STREAM_IDLE_MS of no text_delta.
   // Cleared immediately when the real message_end arrives.
   const streamingTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+  // turn_id of the most recently completed turn (status:idle with a turn_id).
+  // Used to suppress stray status:working/thinking events that some agents (e.g.
+  // Hermes) emit for background cleanup after the conversation is already idle.
+  const lastIdledTurnRef = useRef<string | null>(null)
 
   const clearInactivityTimer = useCallback(() => {
     if (inactivityTimerRef.current) {
@@ -155,6 +159,7 @@ export function useChatSession(
     oldestLocalIdRef.current = null
     localIdMapRef.current = new Map()
     loadingOlderRef.current = false
+    lastIdledTurnRef.current = null
     streamingTimers.current.forEach((t) => clearTimeout(t))
     streamingTimers.current.clear()
 
@@ -251,10 +256,18 @@ export function useChatSession(
     const turnId = 'turn_id' in event ? (event.turn_id as string | undefined) : undefined
 
     if (event.type === 'status') {
-      setAgentStatus(event.value)
       if (event.value === 'idle') {
+        // Record the turn_id so a stray working/thinking for the same turn
+        // can be suppressed (Hermes emits cleanup events after conversations end).
+        if (turnId) lastIdledTurnRef.current = turnId
+        setAgentStatus('idle')
         clearInactivityTimer()
+      } else if (turnId && turnId === lastIdledTurnRef.current) {
+        // Spurious status for a turn that already completed — skip it.
+        // The turn_id matches the most recently idled turn, which means the
+        // agent is doing background work the client has no context for.
       } else {
+        setAgentStatus(event.value)
         resetInactivityTimer()
       }
       return
