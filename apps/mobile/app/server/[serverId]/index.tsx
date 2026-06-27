@@ -445,11 +445,11 @@ function makeStyles(colors: ThemeColors) {
       width: 32,
       height: 32,
       borderRadius: radius.full,
-      backgroundColor: colors.border,
+      backgroundColor: colors.accent,
       alignItems: 'center',
       justifyContent: 'center',
     },
-    addBtnText: { color: colors.text, fontSize: typography.sizeLg, lineHeight: 20 },
+    addBtnText: { color: colors.textOnAccent, fontSize: typography.sizeLg, lineHeight: 20 },
 
     modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center' },
     card: {
