@@ -4,6 +4,7 @@ type BroadcastFn = (event: ServerEvent) => void
 
 type PromptWaiter = {
   resolve: (event: PromptResponse | null) => void
+  timeout: ReturnType<typeof setTimeout>
 }
 
 type PromptWaiters = {
@@ -28,22 +29,27 @@ export function createPromptWaiters({ broadcast, timeoutMs = 10 * 60 * 1000 }: O
     const waiter = waiters.get(event.id)
     if (!waiter) return false
     waiters.delete(event.id)
+    clearTimeout(waiter.timeout)
     dismissPrompt(event.id)
     waiter.resolve(event)
     return true
   }
 
   function waitForPrompt(prompt: PermissionRequest): Promise<PromptResponse | null> {
-    broadcast(prompt)
     return new Promise((resolve) => {
-      waiters.set(prompt.id, { resolve })
-      // Safety valve: prevent stale waiters from blocking the prompt slot.
-      setTimeout(() => {
+      const timeout = setTimeout(() => {
         if (waiters.delete(prompt.id)) {
           dismissPrompt(prompt.id)
           resolve(null)
         }
       }, timeoutMs)
+
+      // Register before broadcasting so an immediate prompt_response cannot race
+      // ahead of this waiter and get dropped.
+      waiters.set(prompt.id, { resolve, timeout })
+      broadcast(prompt)
+
+      // Safety valve: prevent stale waiters from blocking the prompt slot.
     })
   }
 
@@ -54,6 +60,7 @@ export function createPromptWaiters({ broadcast, timeoutMs = 10 * 60 * 1000 }: O
       return false
     }
     waiters.delete(id)
+    clearTimeout(waiter.timeout)
     waiter.resolve(null)
     dismissPrompt(id)
     return true

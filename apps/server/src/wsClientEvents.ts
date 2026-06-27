@@ -45,8 +45,14 @@ function sendMissedEvents({
 }
 
 function shouldDispatchWebhook(event: ClientEvent): boolean {
-  // register_push / set_mute are infra-only control events from the phone.
-  return event.type !== 'register_push' && event.type !== 'set_mute'
+  // Infra/control events from the phone should not be forwarded to agent
+  // webhooks; only user-intent events and prompt responses are forwarded.
+  return (
+    event.type !== 'register_push' &&
+    event.type !== 'set_mute' &&
+    event.type !== 'get_commands' &&
+    event.type !== 'get_missed_events'
+  )
 }
 
 export function handleWsClientEvent({

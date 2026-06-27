@@ -288,7 +288,7 @@ app.post('/send', async (c) => {
   return c.json({ ok: true })
 })
 
-/** Broadcast a permission prompt and wait indefinitely for the first client response. */
+/** Broadcast a permission prompt and wait for the first client response (times out after 10 minutes). */
 app.post('/prompt/wait', async (c) => {
   const { prompt } = await c.req.json<{ prompt: PermissionRequest }>()
   log(' ', `POST /prompt/wait  id=${prompt.id} title="${prompt.title}"`)
