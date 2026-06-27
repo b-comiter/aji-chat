@@ -11,16 +11,17 @@ import Constants from 'expo-constants'
 import { Platform } from 'react-native'
 import { isChatFocused } from './focusedChat'
 
-// Foreground presentation. A push that lands while the app is open is shown as a
-// banner — UNLESS the user is already viewing that exact chat, in which case we
-// suppress it (the in-app chime already played) so they aren't double-notified
-// for a message they're watching arrive. The OS handles backgrounded pushes
-// without consulting this handler.
+// Foreground presentation. Local "chime" notifications play sound only (no
+// banner). Push notifications from the server are shown as banners UNLESS the
+// user is already on that chat (the in-app chime already played).
 Notifications.setNotificationHandler({
   handleNotification: async (notification) => {
     const data = notification.request.content.data as
-      | { serverId?: string; channel?: string }
+      | { serverId?: string; channel?: string; chime?: boolean }
       | undefined
+    if (data?.chime) {
+      return { shouldShowBanner: false, shouldShowList: false, shouldPlaySound: true, shouldSetBadge: false }
+    }
     const onThisChat = isChatFocused(data?.serverId, data?.channel)
     return {
       shouldShowBanner: !onThisChat,
