@@ -151,6 +151,13 @@ export function WSProvider({ children }: { children: ReactNode }) {
   // partial message from SQLite instead of losing it until message_end.
   const partialFlushTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
 
+  // Debounce timers for status fan-out. Replay can fire many status transitions
+  // (thinking → working → idle) in rapid succession — a 100ms quiet-window
+  // collapses the burst to just the final state so the UI never visibly blinks.
+  // Live status changes are separated by seconds, so 100ms is imperceptible there.
+  const statusNotifyTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+  const pendingStatusNotify = useRef<Map<string, ServerEvent>>(new Map())
+
   // Serializes event handling. handleEvent is async, and onmessage fires it
   // per message without awaiting — so two events (notably a `status:working`
   // and a later `status:idle`) could otherwise race past their first await and
@@ -410,6 +417,20 @@ export function WSProvider({ children }: { children: ReactNode }) {
             await updateServerStatus(db, serverId, event.value)
             await updateChannelStatus(db, serverId, channel, event.value)
           }
+          // Debounce fan-out: hold the latest status and deliver only after a
+          // 100ms quiet window (skipped from the bottom notify below).
+          pendingStatusNotify.current.set(key, event)
+          const existingTimer = statusNotifyTimers.current.get(key)
+          if (existingTimer) clearTimeout(existingTimer)
+          const t = setTimeout(() => {
+            statusNotifyTimers.current.delete(key)
+            const pending = pendingStatusNotify.current.get(key)
+            if (pending) {
+              pendingStatusNotify.current.delete(key)
+              notify(key, pending)
+            }
+          }, 100)
+          statusNotifyTimers.current.set(key, t)
           break
         }
 
@@ -448,8 +469,11 @@ export function WSProvider({ children }: { children: ReactNode }) {
       console.warn('[WSContext] DB error handling event', event.type, err)
     }
 
-    // Fan out to subscribers regardless of DB success
-    notify(key, event)
+    // Fan out to subscribers regardless of DB success.
+    // Status events are debounced above — skip them here so replay bursts don't blink.
+    if (event.type !== 'status') {
+      notify(key, event)
+    }
 
     // A new message/file changes the unread tally — keep the app-icon badge in
     // step (the item is already persisted above, so getUnreadCounts sees it).
@@ -504,6 +528,11 @@ export function WSProvider({ children }: { children: ReactNode }) {
               lastSeqRef.current = 0
               seenSeqs.current = new Set()
               setSetting(db, 'ws_last_seq', '0').catch(() => {})
+              // Cancel any pending status debounce timers from the dead server
+              // so their stale events don't fan out into the fresh session.
+              statusNotifyTimers.current.forEach((t) => clearTimeout(t))
+              statusNotifyTimers.current.clear()
+              pendingStatusNotify.current.clear()
             }
           }
           if (parsed.seq !== undefined) {
@@ -561,6 +590,9 @@ export function WSProvider({ children }: { children: ReactNode }) {
       setSetting(db, 'ws_last_seq', String(lastSeqRef.current)).catch(() => {})
       partialFlushTimers.current.forEach((t) => clearTimeout(t))
       partialFlushTimers.current.clear()
+      statusNotifyTimers.current.forEach((t) => clearTimeout(t))
+      statusNotifyTimers.current.clear()
+      pendingStatusNotify.current.clear()
       ws.current?.close()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

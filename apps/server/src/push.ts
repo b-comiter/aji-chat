@@ -206,7 +206,11 @@ async function deliver(note: PushNote): Promise<void> {
     body: note.body,
     data: note.data,
     sound: 'default' as const,
-    ...(collapseId ? { collapseId } : {}),
+    // collapseId replaces the live banner in real-time (apns-collapse-id).
+    // threadId groups all notifications from this conversation in Notification
+    // Center (apns-thread-id), so iOS shows "N messages from Claude Code" rather
+    // than N separate entries even when collapse timing doesn't catch them all.
+    ...(collapseId ? { collapseId, threadId: collapseId } : {}),
   }))
 
   try {

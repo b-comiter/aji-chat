@@ -34,6 +34,12 @@ const DISPLAY_NAME = IS_DESKTOP ? 'Claude Desktop' : 'Claude Code'
 const PROMPT_SERVER = process.env.AJI_PROMPT_SERVER ?? 'http://localhost:4000/prompt/wait'
 const ACCESS_TOKEN = process.env.AJI_ACCESS_TOKEN?.trim() || undefined
 
+// Set once per invocation from session_id so every event in this hook run
+// carries the same channel. Uses first 8 chars of the UUID — short enough to
+// display well, long enough to be collision-proof in practice.
+let CHANNEL: string | undefined
+const CHANNEL_EXEMPT: ReadonlySet<string> = new Set(['server_info', 'commands', 'channels'])
+
 interface PromptResponse {
   type: 'prompt_response'
   id: string
@@ -182,8 +188,10 @@ async function postJson(url: string, body: unknown, timeoutMs?: number): Promise
 }
 
 // Regular events get a 4 s deadline so a hung server never stalls the hook pipeline.
+// Content events carry the session channel; server-level events (server_info,
+// commands, channels) are exempt — they're not scoped to a single conversation.
 async function emit(event: ServerEvent): Promise<void> {
-  await postJson(SERVER, event, 4000)
+  await postJson(SERVER, CHANNEL && !CHANNEL_EXEMPT.has(event.type) ? { ...event, channel: CHANNEL } : event, 4000)
 }
 
 async function readStdin(): Promise<Record<string, unknown> | null> {
@@ -293,14 +301,14 @@ function writeHookJson(body: unknown): void {
 // ---------------------------------------------------------------------------
 
 async function emitClaudeCodeServerInfo(): Promise<void> {
-  // Advertise as a single-channel server so the mobile home screen opens its
-  // one chat directly. Desktop is view-only (no inbound channel bridge), so we
-  // skip emitting commands for it. Idempotent; server caches + replays to late
-  // connectors.
+  // Advertise as multi-channel so the mobile home screen shows the channel list
+  // (one channel per session). Desktop is view-only (no inbound channel bridge),
+  // so we skip emitting commands for it. Idempotent; server caches + replays to
+  // late connectors.
   await emit({
     type: 'server_info',
     serverId: AGENT,
-    monoChannel: true,
+    monoChannel: false,
     displayName: DISPLAY_NAME,
   })
 }
@@ -331,6 +339,7 @@ async function main(): Promise<void> {
 
   const event = payload.hook_event_name as string | undefined
   const sessionId = String(payload.session_id ?? 'default')
+  CHANNEL = sessionId.slice(0, 8)
 
   switch (event) {
     case 'UserPromptSubmit': {
