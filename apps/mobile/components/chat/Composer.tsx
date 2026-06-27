@@ -20,16 +20,16 @@
  *     expo-image-picker   (Camera + Photo Library)
  *     expo-document-picker (File)
  */
-import { forwardRef, memo, useEffect, useMemo, useRef, useState } from 'react'
-import { Pressable, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native'
 import { Feather } from '@expo/vector-icons'
 import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio'
-import { useTheme } from '../../context/ThemeContext'
-import { spacing, typography } from '../../constants/theme'
+import { forwardRef, memo, useEffect, useMemo, useRef, useState } from 'react'
+import { Alert, Linking, Pressable, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native'
 import type { ThemeColors } from '../../constants/theme'
-import { impactHaptic } from '../../utils/haptics'
-import { useVoiceRecorder } from '../../hooks/useVoiceRecorder'
+import { spacing, typography } from '../../constants/theme'
+import { useTheme } from '../../context/ThemeContext'
 import type { RecordedClip } from '../../hooks/useVoiceRecorder'
+import { useVoiceRecorder } from '../../hooks/useVoiceRecorder'
+import { impactHaptic } from '../../utils/haptics'
 import { RecordingWaveform } from './RecordingWaveform'
 import { downsampleBars, normalizeDb } from './waveformHelpers'
 
@@ -43,11 +43,6 @@ type Props = {
   blocked?: boolean
   /** Voice recording: fires when the user sends a clip. */
   onSendAudio?: (uri: string, durationMs: number) => void
-  /**
-   * Attachment handlers. Each is optional — omit to hide that option from
-   * the menu. Wire up with expo-image-picker / expo-document-picker in the
-   * parent screen.
-   */
   onAttachCamera?: () => void
   onAttachPhoto?: () => void
   onAttachFile?: () => void
@@ -235,7 +230,19 @@ export const Composer = memo(
       setShowAttachMenu(false)
       resetVoiceState()
       const ok = await recorder.start()
-      if (!ok) return   // permission denied — stays in text mode
+      if (!ok) {
+        if (recorder.permission === 'denied') {
+          Alert.alert(
+            'Microphone access required',
+            'Allow microphone access in Settings to send voice messages.',
+            [
+              { text: 'Cancel', style: 'cancel' },
+              { text: 'Open Settings', onPress: () => Linking.openSettings() },
+            ],
+          )
+        }
+        return
+      }
       setMode('voice-recording')
     }
 
@@ -388,10 +395,6 @@ export const Composer = memo(
             />
           </Pressable>
 
-          {/* Center: text input. No JS height control — a multiline TextInput
-              auto-grows live between minHeight (styles.input) and maxHeight as
-              you type, and shrinks back natively when the draft clears. The old
-              onContentSizeChange→height approach only updated on blur. */}
           <TextInput
             ref={ref}
             style={[styles.input, softBlocked && styles.inputBlocked, { maxHeight: maxInputHeight }]}
@@ -435,7 +438,10 @@ export const Composer = memo(
             onSendAudio ? (
               <Pressable
                 style={({ pressed }) => [styles.sendBtn, pressed && styles.iconBtnPressed]}
-                onPress={startRecording}
+                onPress={() => {
+                  console.log('[Composer] Audio record button pressed')
+                  startRecording()
+                }}
                 disabled={softBlocked}
                 accessibilityRole="button"
                 accessibilityLabel="Start voice recording"
