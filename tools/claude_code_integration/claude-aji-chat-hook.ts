@@ -340,6 +340,34 @@ function writeHookJson(body: unknown): void {
   process.stdout.write(`${JSON.stringify(body)}\n`)
 }
 
+type PermissionDecision = {
+  behavior: 'allow' | 'deny'
+  message?: string
+  updatedPermissions?: PermissionSuggestion[]
+}
+
+function permissionDecisionForChoice(
+  choice: string,
+  suggestions: PermissionSuggestion[],
+): PermissionDecision | null {
+  if (choice === 'allow_once') {
+    return { behavior: 'allow' }
+  }
+  if (choice === 'deny') {
+    return {
+      behavior: 'deny',
+      message: 'Permission denied from aji-chat',
+    }
+  }
+  if (choice === 'apply_suggestions' && suggestions.length > 0) {
+    return {
+      behavior: 'allow',
+      updatedPermissions: suggestions,
+    }
+  }
+  return null
+}
+
 // ---------------------------------------------------------------------------
 // Model-level commands exposed to the mobile command picker.
 //
@@ -382,6 +410,12 @@ async function emitClaudeCodeCommands(): Promise<void> {
   })
 }
 
+async function emitSessionCapabilities(sessionId: string): Promise<void> {
+  await emitClaudeCodeServerInfo()
+  if (!IS_DESKTOP) await emitClaudeCodeCommands()
+  await emitDesktopChannelName(sessionId)
+}
+
 async function main(): Promise<void> {
   const payload = await readStdin()
   if (!payload) return
@@ -415,9 +449,7 @@ async function main(): Promise<void> {
       // Advertise mono-channel + populate the mobile command picker on first
       // contact so both are available immediately (server caches them for the
       // session lifetime).
-      await emitClaudeCodeServerInfo()
-      if (!IS_DESKTOP) await emitClaudeCodeCommands()
-      await emitDesktopChannelName(sessionId)
+      await emitSessionCapabilities(sessionId)
       break
     }
     case 'PreToolUse': {
@@ -454,7 +486,6 @@ async function main(): Promise<void> {
       // fall through to Claude's default behavior.
       if (IS_DESKTOP) break
       const { options, suggestions } = buildPermissionOptions(payload)
-      const state = readTurnState(sessionId)
       const response = await waitForPermission({
         type: 'permission_request',
         id: randomUUID(),
@@ -466,44 +497,14 @@ async function main(): Promise<void> {
 
       if (!response) break
 
-      if (response.choice === 'allow_once') {
-        writeHookJson({
-          hookSpecificOutput: {
-            hookEventName: 'PermissionRequest',
-            decision: { behavior: 'allow' },
-          },
-        })
-        break
-      }
-
-      if (response.choice === 'deny') {
-        writeHookJson({
-          hookSpecificOutput: {
-            hookEventName: 'PermissionRequest',
-            decision: {
-              behavior: 'deny',
-              message: 'Permission denied from aji-chat',
-            },
-          },
-        })
-        break
-      }
-
-      if (response.choice === 'apply_suggestions') {
-        const { suggestions: s } = buildPermissionOptions(payload)
-        if (s.length === 0) break
-        writeHookJson({
-          hookSpecificOutput: {
-            hookEventName: 'PermissionRequest',
-            decision: {
-              behavior: 'allow',
-              updatedPermissions: s,
-            },
-          },
-        })
-      }
-
-      void state // used above for turn context; no further action needed
+      const decision = permissionDecisionForChoice(response.choice, suggestions)
+      if (!decision) break
+      writeHookJson({
+        hookSpecificOutput: {
+          hookEventName: 'PermissionRequest',
+          decision,
+        },
+      })
       break
     }
     case 'PostToolUse': {
@@ -537,9 +538,7 @@ async function main(): Promise<void> {
       // Claude goes idle — best time to send (and re-seed the server cache if it
       // restarted mid-session). Emit the channel name at Stop too — the title is
       // more likely to be finalized by the time the turn ends.
-      await emitClaudeCodeServerInfo()
-      if (!IS_DESKTOP) await emitClaudeCodeCommands()
-      await emitDesktopChannelName(sessionId)
+      await emitSessionCapabilities(sessionId)
       break
     }
     default:

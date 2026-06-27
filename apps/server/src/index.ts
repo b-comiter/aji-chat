@@ -5,7 +5,7 @@ import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { serve } from '@hono/node-server'
 import { WebSocketServer, WebSocket } from 'ws'
-import type { ClientEvent, Commands, PermissionRequest, PromptResponse, ServerEvent, ServerInfo } from '@aji/protocol'
+import type { ClientEvent, Commands, PermissionRequest, ServerEvent, ServerInfo } from '@aji/protocol'
 import { textMessage } from '@aji/protocol'
 import { shouldDeliverToWebhook } from './routing'
 import {
@@ -18,6 +18,8 @@ import { loadJson, saveJson } from './persist'
 import { loadPushState, observeForPush } from './push'
 import { registerDebugRoutes } from './debugRoutes'
 import { handleWsClientEvent } from './wsClientEvents'
+import { createPromptWaiters } from './promptWaiters'
+import { applyServerEventSideEffects } from './serverEventSideEffects'
 
 const PORT = Number(process.env.AJI_PORT) || 4000
 const ACCESS_TOKEN = process.env.AJI_ACCESS_TOKEN?.trim() || undefined
@@ -35,7 +37,6 @@ app.use('*', async (c, next) => {
 
 const clients = new Set<WebSocket>()
 const webhooks = new Map<string, string | undefined>()
-const promptWaiters = new Map<string, { resolve: (event: PromptResponse | null) => void }>()
 
 // ---------------------------------------------------------------------------
 // Server info + commands caches
@@ -221,33 +222,7 @@ function dispatchToWebhooks(event: ClientEvent): void {
   }
 }
 
-function dismissPrompt(id: string): void {
-  broadcast({ type: 'prompt_dismiss', id })
-}
-
-function resolvePrompt(event: PromptResponse): boolean {
-  const waiter = promptWaiters.get(event.id)
-  if (!waiter) return false
-  promptWaiters.delete(event.id)
-  dismissPrompt(event.id)
-  waiter.resolve(event)
-  return true
-}
-
-function waitForPrompt(prompt: PermissionRequest): Promise<PromptResponse | null> {
-  broadcast(prompt)
-  return new Promise((resolve) => {
-    promptWaiters.set(prompt.id, { resolve })
-    // Safety valve: auto-dismiss after 10 minutes so a crashed hook doesn't
-    // leave a stale waiter that permanently blocks the prompt slot.
-    setTimeout(() => {
-      if (promptWaiters.delete(prompt.id)) {
-        dismissPrompt(prompt.id)
-        resolve(null)
-      }
-    }, 10 * 60 * 1000)
-  })
-}
+const { resolvePrompt, waitForPrompt, cancelPrompt } = createPromptWaiters({ broadcast })
 
 // ---------------------------------------------------------------------------
 // HTTP endpoints — agent-facing
@@ -260,14 +235,13 @@ app.post('/event', async (c) => {
   const agentId = agentIdForToken(bearerToken(c))
   if (agentId) (event as { agentId?: string }).agentId = agentId
 
-  if (event.type === 'commands') {
-    commandsCache.set(event.serverId ?? '__global__', event)
-  } else if (event.type === 'server_info') {
-    serverInfoCache.set(event.serverId, event)
-    saveServerInfo()
-  } else if (event.type === 'permission_request') {
-    logPermissionRequest(event)
-  }
+  applyServerEventSideEffects({
+    event,
+    commandsCache,
+    serverInfoCache,
+    saveServerInfo,
+    logPermissionRequest,
+  })
   broadcast(event)
   return c.json({ ok: true })
 })
@@ -320,12 +294,7 @@ app.post('/prompt/wait', async (c) => {
   log(' ', `POST /prompt/wait  id=${prompt.id} title="${prompt.title}"`)
 
   c.req.raw.signal.addEventListener('abort', () => {
-    const waiter = promptWaiters.get(prompt.id)
-    if (waiter) {
-      promptWaiters.delete(prompt.id)
-      waiter.resolve(null)
-    }
-    dismissPrompt(prompt.id)
+    cancelPrompt(prompt.id)
   })
 
   const response = await waitForPrompt(prompt)
@@ -344,13 +313,7 @@ app.post('/prompt/wait', async (c) => {
 app.post('/prompt/cancel/:id', (c) => {
   const id = c.req.param('id')
   log(' ', `POST /prompt/cancel  id=${id}`)
-  const waiter = promptWaiters.get(id)
-  if (waiter) {
-    promptWaiters.delete(id)
-    waiter.resolve(null)
-  }
-  dismissPrompt(id)
-  return c.json({ cancelled: !!waiter })
+  return c.json({ cancelled: cancelPrompt(id) })
 })
 
 registerDebugRoutes(app, log)
