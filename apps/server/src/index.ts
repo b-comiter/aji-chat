@@ -191,7 +191,7 @@ function broadcast(event: ServerEvent): void {
   if (event.type === 'file') {
     log(' ', '(file event data omitted)', { ...event, data: '[base64 data]' })
   } else if (event.type === 'commands') {
-    log(' ', '(commands event data omitted)', { ...event, commands: '[...]' })
+    log(' ', '(commands event data omitted)', { ...event, commands: `[${event.commands.length} commands]` })
   } else {
     log('➡️', event.type, { seq, event })
   }

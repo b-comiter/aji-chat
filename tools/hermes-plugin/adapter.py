@@ -648,8 +648,72 @@ class AjiChatAdapter(BasePlatformAdapter):
                 "args_hint": "<on|off>",
             })
 
+        # Populate /model subcommands with the live provider+model list so the
+        # mobile picker has real choices. COMMAND_REGISTRY has no static model
+        # list (it's dynamic), so we fetch it here.
+        model_entry = next((c for c in commands if c.get("name") == "model"), None)
+        if model_entry is not None:
+            try:
+                loop = asyncio.get_running_loop()
+                model_ids = await loop.run_in_executor(None, self._fetch_model_ids)
+                if model_ids:
+                    model_entry["subcommands"] = model_ids
+                    flog_info("push_commands() populated /model with %d model IDs", len(model_ids))
+            except Exception as exc:
+                flog_warn("push_commands() model subcommands fetch failed: %s", exc)
+
         flog_info("push_commands() sending %d commands", len(commands))
         await self._client.emit({"type": "commands", "commands": commands})
+
+    def _fetch_model_ids(self) -> list:
+        """Synchronously fetch available model IDs for the /model picker.
+
+        Returns IDs in ``gateway@model_id`` format so the mobile picker can
+        group by gateway (e.g. "OpenRouter") rather than by AI sub-provider
+        (e.g. "Anthropic"). The mobile strips the gateway prefix before sending
+        ``/model <model_id>`` back to Hermes.
+
+        Called off the event loop via run_in_executor to avoid blocking while
+        list_picker_providers may do network I/O.
+        """
+        try:
+            from gateway.run import _load_gateway_config  # type: ignore[import-not-found]
+            from hermes_cli.model_switch import list_picker_providers  # type: ignore[import-not-found]
+
+            cfg = _load_gateway_config() or {}
+            model_cfg = cfg.get("model", {}) if isinstance(cfg, dict) else {}
+            if not isinstance(model_cfg, dict):
+                model_cfg = {}
+
+            providers = list_picker_providers(
+                current_provider=model_cfg.get("provider", "openrouter"),
+                current_base_url=model_cfg.get("base_url", ""),
+                current_model=model_cfg.get("default", ""),
+                user_providers=cfg.get("providers") if isinstance(cfg, dict) else None,
+                custom_providers=cfg.get("custom_providers") if isinstance(cfg, dict) else None,
+                max_models=50,
+            )
+
+            ids: list = []
+            for p in providers:
+                slug = str(p.get("slug", ""))
+                for mid in p.get("models", []):
+                    mid = str(mid)
+                    # Encode as "gateway@model_id" so the mobile picker groups by
+                    # gateway (e.g. all openrouter models together) rather than by
+                    # AI sub-provider prefix (e.g. "anthropic/"). The mobile strips
+                    # the "gateway@" prefix when building the /model command.
+                    ids.append(f"{slug}@{mid}" if slug else mid)
+
+            sample = ids[:3]
+            flog_info(
+                "_fetch_model_ids() returning %d IDs across %d provider(s); sample=%s",
+                len(ids), len(providers), sample,
+            )
+            return ids
+        except Exception as exc:
+            flog_warn("_fetch_model_ids() failed: %s", exc)
+            return []
 
     # -------------------------------------------------------------------
     # Outbound: send / edit_message → aji-chat events
