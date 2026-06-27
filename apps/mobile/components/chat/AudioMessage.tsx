@@ -44,6 +44,12 @@ export function AudioMessage({ item, tint, serverId, channelId, fallbackTitle }:
   const { colors } = useTheme()
   const styles = useMemo(() => makeStyles(colors), [colors])
   const [uri, setUri] = useState<string | null>(null)
+
+  // Guard: no payload means the agent sent an audio shell with no data.
+  if (!item.data) {
+    const fg = tint ? colors.userBubbleText : colors.textDim
+    return <Text style={{ color: fg, fontSize: 13 }}>Audio unavailable</Text>
+  }
   const { activeTrack, playing, currentTime, duration: activeDuration, play, toggle, seekTo } = useAudioPlayerContext()
   const bars = useMemo(() => pseudoWaveform(item.id, WAVE_BARS), [item.id])
 
