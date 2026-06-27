@@ -13,8 +13,8 @@
  *
  * See docs/chat-scroll-architecture.md for full design rationale.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Animated, View } from 'react-native'
+import { useMemo, useRef, useState } from 'react'
+import { Animated } from 'react-native'
 import { useLocalSearchParams } from 'expo-router'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useDB } from '../../../db/DBProvider'
@@ -31,16 +31,15 @@ import { useResolvedChatParams } from '../../../hooks/chatScreen/useResolvedChat
 import { useUnreadTracking } from '../../../hooks/chatScreen/useUnreadTracking'
 import { useAttachmentActions } from '../../../hooks/chatScreen/useAttachmentActions'
 import { useMessageActions } from '../../../hooks/chatScreen/useMessageActions'
+import { useChatInputActions } from '../../../hooks/chatScreen/useChatInputActions'
+import { useChatRowRenderer } from '../../../hooks/chatScreen/useChatRowRenderer'
 import { ChatHeader } from '../../../components/headers/ChatHeader'
 import { Composer } from '../../../components/chat/Composer'
 import { MessageList } from '../../../components/chat/MessageList'
 import type { MessageListHandle } from '../../../components/chat/MessageList'
 import { CommandPicker } from '../../../components/chat/CommandPicker'
 import { ModelPicker } from '../../../components/chat/ModelPicker'
-import { Row } from '../../../components/chat/MessageRow'
 import { avatarInitials } from '../../../components/chat/Avatar'
-import { DaySeparator } from '../../../components/chat/DaySeparator'
-import { NewMessagesDivider } from '../../../components/chat/NewMessagesDivider'
 import { MessageActionMenu } from '../../../components/chat/MessageActionMenu'
 import { ToolSheet } from '../../../components/chat/ToolSheet'
 import { FileViewer } from '../../../components/chat/FileViewer'
@@ -62,8 +61,6 @@ export default function ChatScreen() {
   const [draft, setDraft] = useState('')
   const [isToolSheetOpen, setIsToolSheetOpen] = useState<Item[] | null>(null)
   const [selectedFile, setSelectedFile] = useState<FileItem | null>(null)
-  const [showModelPicker, setShowModelPicker] = useState(false)
-  const [activeModel, setActiveModel] = useState<string | undefined>()
   const messageListRef = useRef<MessageListHandle | null>(null)
 
   const {
@@ -116,84 +113,41 @@ export default function ChatScreen() {
   })
 
   const { modelSubcommands, trimmedDraft, pickerItems } = useCommandPicker(draft, commands)
+  const {
+    showModelPicker,
+    setShowModelPicker,
+    activeModel,
+    handleSend,
+    handleSendAudio,
+    handleCommandSelect,
+    handleModelSelect,
+  } = useChatInputActions({
+    trimmedDraft,
+    setDraft,
+    sendMessage,
+    sendAudio,
+    onScrollToBottom: () => messageListRef.current?.scrollToBottom(),
+  })
 
   const serverName = resolvedServerId ? serverDisplayName(resolvedServerId) : 'Chat'
   const avatarLabel = useMemo(() => avatarInitials(serverName), [serverName])
   const canSend = trimmedDraft.length > 0 && conn === 'connected' && (!hasPendingPrompt || trimmedDraft.startsWith('/'))
 
-  const handleSend = useCallback(() => {
-    const text = trimmedDraft
-    if (!text) return
-    // Intercept /model with no args — open the picker instead of sending to server.
-    if (text === '/model') {
-      setShowModelPicker(true)
-      setDraft('')
-      return
-    }
-    sendMessage(text)
-    setDraft('')
-    // Explicit scroll to bottom on Send. In inverted FlatList, offset: 0 = visual bottom.
-    // We animate to ensure the user sees their message land and the agent's streaming reply.
-    // (Unlike most interactions, Send is an explicit "I want to be at the bottom" signal.)
-    messageListRef.current?.scrollToBottom()
-  }, [trimmedDraft, sendMessage])
-
-  const handleSendAudio = useCallback((uri: string, durationMs: number) => {
-    sendAudio(uri, durationMs).catch(console.warn)
-    messageListRef.current?.scrollToBottom()
-  }, [sendAudio])
-
-  const handleCommandSelect = useCallback((name: string) => {
-    if (name === 'model') {
-      setShowModelPicker(true)
-      setDraft('')
-      return
-    }
-    setDraft(`/${name} `)
-  }, [])
-
-  const handleModelSelect = useCallback((modelId: string) => {
-    setActiveModel(modelId)
-    sendMessage(`/model ${modelId}`)
-    messageListRef.current?.scrollToBottom()
-  }, [sendMessage])
-
-  const renderItem = useCallback(
-    ({ item }: { item: Item }) => {
-      const isGroupStart = groupStartIds.has(item.id)
-      const dividerKind = dividerMap.get(item.id) ?? 'none'
-      const tools =
-        item.kind === 'message' && item.role === 'assistant'
-          ? toolsByAgentMsgId.get(item.id) ?? []
-          : []
-      const daySeparator = daySeparators.get(item.id)
-      // Wrap in a plain View (not a Fragment): the inverted FlatList cell wrapper
-      // is `flexDirection: column-reverse`, which would otherwise render these
-      // siblings bottom-to-top (divider/day-separator below the Row). A single
-      // child View isolates our intended top-to-bottom order from that reversal.
-      return (
-        <View>
-          {daySeparator ? <DaySeparator label={daySeparator} /> : null}
-          {item.id === newMessagesDividerId ? <NewMessagesDivider /> : null}
-          <Row
-            item={item}
-            onChoose={respond}
-            isGroupStart={isGroupStart}
-            dividerKind={dividerKind}
-            tools={tools}
-            avatarLabel={avatarLabel}
-            onOpenTools={setIsToolSheetOpen}
-            onOpenFile={setSelectedFile}
-            onLongPressItem={handleLongPressItem}
-            serverId={resolvedServerId}
-            channelId={resolvedChannel}
-            serverName={serverName}
-          />
-        </View>
-      )
-    },
-    [groupStartIds, dividerMap, daySeparators, newMessagesDividerId, toolsByAgentMsgId, respond, avatarLabel, handleLongPressItem, resolvedServerId, resolvedChannel, serverName],
-  )
+  const renderItem = useChatRowRenderer({
+    groupStartIds,
+    dividerMap,
+    daySeparators,
+    newMessagesDividerId,
+    toolsByAgentMsgId,
+    respond,
+    avatarLabel,
+    serverId: resolvedServerId,
+    channelId: resolvedChannel,
+    serverName,
+    onOpenTools: setIsToolSheetOpen,
+    onOpenFile: setSelectedFile,
+    onLongPressItem: handleLongPressItem,
+  })
 
   return (
     <Animated.View style={{ flex: 1, backgroundColor: colors.bg, paddingBottom: kbOffset }}>
