@@ -67,7 +67,7 @@ export function CodeBlock({ code, language }: { code: string; language?: string 
     <View style={styles.block}>
       <View style={styles.header}>
         <View style={[styles.dot, { backgroundColor: dotColor }]} />
-        <Text style={styles.lang}>{displayLang}</Text>
+        <Text style={styles.lang} numberOfLines={1}>{displayLang}</Text>
         <Pressable
           onPress={() => setExpanded(true)}
           style={styles.expandBtn}
