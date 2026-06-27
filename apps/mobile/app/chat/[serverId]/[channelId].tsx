@@ -14,14 +14,11 @@
  * See docs/chat-scroll-architecture.md for full design rationale.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Animated, View } from 'react-native'
+import { Animated, View } from 'react-native'
 import { useLocalSearchParams } from 'expo-router'
-import * as ImagePicker from 'expo-image-picker'
-import * as DocumentPicker from 'expo-document-picker'
-import * as Clipboard from 'expo-clipboard'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useDB } from '../../../db/DBProvider'
-import { serverDisplayName, deleteItem } from '../../../db/database'
+import { serverDisplayName } from '../../../db/database'
 import { useWS } from '../../../context/WebSocketContext'
 import { useTheme } from '../../../context/ThemeContext'
 import type { Item } from '../../../hooks/chatTypes'
@@ -32,6 +29,8 @@ import { useChatDisplayDerivations } from '../../../hooks/chatScreen/useChatDisp
 import { useCommandPicker } from '../../../hooks/chatScreen/useCommandPicker'
 import { useResolvedChatParams } from '../../../hooks/chatScreen/useResolvedChatParams'
 import { useUnreadTracking } from '../../../hooks/chatScreen/useUnreadTracking'
+import { useAttachmentActions } from '../../../hooks/chatScreen/useAttachmentActions'
+import { useMessageActions } from '../../../hooks/chatScreen/useMessageActions'
 import { ChatHeader } from '../../../components/headers/ChatHeader'
 import { Composer } from '../../../components/chat/Composer'
 import { MessageList } from '../../../components/chat/MessageList'
@@ -42,8 +41,7 @@ import { Row } from '../../../components/chat/MessageRow'
 import { avatarInitials } from '../../../components/chat/Avatar'
 import { DaySeparator } from '../../../components/chat/DaySeparator'
 import { NewMessagesDivider } from '../../../components/chat/NewMessagesDivider'
-import { MessageActionMenu, messageCopyText } from '../../../components/chat/MessageActionMenu'
-import type { MessageMenuTarget, Rect } from '../../../components/chat/MessageActionMenu'
+import { MessageActionMenu } from '../../../components/chat/MessageActionMenu'
 import { ToolSheet } from '../../../components/chat/ToolSheet'
 import { FileViewer } from '../../../components/chat/FileViewer'
 
@@ -66,7 +64,6 @@ export default function ChatScreen() {
   const [selectedFile, setSelectedFile] = useState<FileItem | null>(null)
   const [showModelPicker, setShowModelPicker] = useState(false)
   const [activeModel, setActiveModel] = useState<string | undefined>()
-  const [menuTarget, setMenuTarget] = useState<MessageMenuTarget | null>(null)
   const messageListRef = useRef<MessageListHandle | null>(null)
 
   const {
@@ -80,6 +77,21 @@ export default function ChatScreen() {
 
   const { sendMessage, sendAudio, sendAttachment, respond } = useChatActions({ chatId: resolvedServerId, channel: resolvedChannel, db, conn, sendEvent, items, setItems })
   const kbOffset = useKeyboardOffset(safeBottom)
+  const {
+    menuTarget,
+    handleLongPressItem,
+    closeMessageMenu,
+    handleCopyItem,
+    handleDeleteItem,
+  } = useMessageActions({ db, setItems })
+  const {
+    handleAttachCamera,
+    handleAttachPhoto,
+    handleAttachFile,
+  } = useAttachmentActions({
+    sendAttachment,
+    onAttachmentSent: () => messageListRef.current?.scrollToBottom(),
+  })
 
   const { unreadBaseline, openedAt } = useUnreadTracking({
     db,
@@ -131,46 +143,6 @@ export default function ChatScreen() {
     messageListRef.current?.scrollToBottom()
   }, [sendAudio])
 
-  // ── Attachment handlers ──────────────────────────────────────────────────
-
-  const handleAttach = useCallback(async (mode: 'camera' | 'photo' | 'file') => {
-    if (mode === 'camera') {
-      const perm = await ImagePicker.requestCameraPermissionsAsync()
-      if (!perm.granted) {
-        Alert.alert('Camera access required', 'Allow camera access in Settings to send photos.')
-        return
-      }
-    } else if (mode === 'photo') {
-      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync()
-      if (!perm.granted) {
-        Alert.alert('Photo library access required', 'Allow photo library access in Settings to share images.')
-        return
-      }
-    }
-
-    let uri: string, mime: string, name: string | undefined
-    if (mode === 'file') {
-      const result = await DocumentPicker.getDocumentAsync({ type: '*/*', copyToCacheDirectory: true })
-      if (result.canceled) return
-      const asset = result.assets[0]
-      uri = asset.uri; mime = asset.mimeType ?? 'application/octet-stream'; name = asset.name
-    } else {
-      const result = mode === 'camera'
-        ? await ImagePicker.launchCameraAsync({ mediaTypes: ['images', 'videos'], quality: 0.85 })
-        : await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images', 'videos'], quality: 0.85 })
-      if (result.canceled) return
-      const asset = result.assets[0]
-      uri = asset.uri; mime = asset.mimeType ?? 'image/jpeg'; name = asset.fileName ?? undefined
-    }
-
-    sendAttachment({ uri, mime, name }).catch(console.warn)
-    messageListRef.current?.scrollToBottom()
-  }, [sendAttachment])
-
-  const handleAttachCamera = useCallback(() => handleAttach('camera'), [handleAttach])
-  const handleAttachPhoto = useCallback(() => handleAttach('photo'), [handleAttach])
-  const handleAttachFile = useCallback(() => handleAttach('file'), [handleAttach])
-
   const handleCommandSelect = useCallback((name: string) => {
     if (name === 'model') {
       setShowModelPicker(true)
@@ -185,37 +157,6 @@ export default function ChatScreen() {
     sendMessage(`/model ${modelId}`)
     messageListRef.current?.scrollToBottom()
   }, [sendMessage])
-
-  // ── Long-press message menu (copy / delete) ───────────────────────────────
-
-  const handleLongPressItem = useCallback((item: Item, rect: Rect) => {
-    setMenuTarget({ item, rect })
-  }, [])
-
-  const handleCopyItem = useCallback(async (item: Item) => {
-    const text = messageCopyText(item)
-    if (text) await Clipboard.setStringAsync(text)
-  }, [])
-
-  const handleDeleteItem = useCallback((item: Item) => {
-    // Local-only delete ("delete for me"): the protocol has no single-message
-    // delete and history is local-first, so we drop it from the window + SQLite.
-    Alert.alert(
-      'Delete message',
-      'Remove this message from this device? This can’t be undone.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: () => {
-            setItems((prev) => prev.filter((it) => it.id !== item.id))
-            deleteItem(db, item.id).catch(console.warn)
-          },
-        },
-      ],
-    )
-  }, [db, setItems])
 
   const renderItem = useCallback(
     ({ item }: { item: Item }) => {
@@ -299,7 +240,7 @@ export default function ChatScreen() {
       <FileViewer item={selectedFile} onClose={() => setSelectedFile(null)} />
       <MessageActionMenu
         target={menuTarget}
-        onClose={() => setMenuTarget(null)}
+        onClose={closeMessageMenu}
         onCopy={handleCopyItem}
         onDelete={handleDeleteItem}
       />
