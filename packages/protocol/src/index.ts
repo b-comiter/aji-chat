@@ -253,6 +253,14 @@ export interface ChannelInfo {
   id: ChannelId
   /** Human-readable name; defaults to `id` when absent. */
   displayName?: string
+  /**
+   * Optional working directory for adapters that map a channel to a process.
+   * The Claude Code launcher spawns each channel's terminal session in this dir
+   * (falling back to its default project dir when absent). The server persists
+   * it verbatim in the registry and echoes it back via `GET /channels`; it
+   * carries no meaning for channel-less or session-less servers.
+   */
+  cwd?: string
 }
 
 /**
@@ -265,6 +273,24 @@ export interface Channels {
   type: 'channels'
   serverId: ServerId
   channels: ChannelInfo[]
+  agentId?: AgentId
+}
+
+/**
+ * Reports which of a server's channels currently have a *live* backing session
+ * on the agent side. Emitted by adapters that map a channel to a process — the
+ * Claude Code launcher answers a `GetSessions` request (and re-broadcasts after
+ * spawning/killing a terminal) with the set of channels whose tmux session is
+ * alive. The mobile client treats any locally-known channel for this server that
+ * is absent from `liveChannels` (and has prior activity) as archived; channels
+ * present in the set are un-archived. Servers with no session concept never emit
+ * this, so their channels are never archived.
+ */
+export interface Sessions {
+  type: 'sessions'
+  serverId: ServerId
+  /** Channel ids whose backing session is currently alive. */
+  liveChannels: ChannelId[]
   agentId?: AgentId
 }
 
@@ -294,6 +320,7 @@ export type ServerEvent =
   | Commands
   | ServerInfo
   | Channels
+  | Sessions
 
 // ---------------------------------------------------------------------------
 // Client → Server
@@ -377,6 +404,12 @@ export interface CreateChannel {
   channel: ChannelId
   /** Human-readable name; defaults to `channel` when absent. */
   displayName?: string
+  /**
+   * Optional working directory for the channel's backing session (e.g. the
+   * Claude Code launcher spawns the terminal here). Persisted into the registry
+   * as `ChannelInfo.cwd`; ignored by session-less servers.
+   */
+  cwd?: string
 }
 
 /**
@@ -399,6 +432,19 @@ export interface DeleteChannel {
  */
 export interface GetCommands {
   type: 'get_commands'
+}
+
+/**
+ * Ask which of a server's channels have a live backing session on the agent
+ * side. The server forwards it (routed by `serverId`) to the matching webhook;
+ * a session-managing adapter (the Claude Code launcher) answers with a
+ * `Sessions` event. Mobile sends this when entering a server's channel/session
+ * list so it can mark channels whose terminal is gone as archived. Adapters with
+ * no session concept simply ignore it.
+ */
+export interface GetSessions {
+  type: 'get_sessions'
+  serverId: ServerId
 }
 
 /**
@@ -440,7 +486,7 @@ export interface SetMute {
   muted: boolean
 }
 
-export type ClientEvent = UserMessage | UserFile | PromptResponse | ClearChannel | CreateChannel | DeleteChannel | GetCommands | GetMissedEvents | RegisterPush | SetMute
+export type ClientEvent = UserMessage | UserFile | PromptResponse | ClearChannel | CreateChannel | DeleteChannel | GetCommands | GetSessions | GetMissedEvents | RegisterPush | SetMute
 
 // ---------------------------------------------------------------------------
 // Helpers

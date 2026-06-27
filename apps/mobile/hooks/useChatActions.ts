@@ -18,6 +18,7 @@ import {
   clearServerHistory,
   getDbDump,
   persistItem,
+  setChannelArchived,
   updateItemData,
   wipeAllHistory,
 } from '../db/database'
@@ -298,6 +299,10 @@ export function useChatActions({
     if (chatId) {
       persistItem(db, { id: msgId, serverId: chatId, channel, kind: 'message', data: msgData }, text)
         .catch(console.warn)
+      // If this channel was archived (its terminal had been torn down), sending
+      // respawns it on the agent side — optimistically un-archive so the channel
+      // list un-greys immediately; the agent's next `sessions` event confirms it.
+      setChannelArchived(db, chatId, channel, false).catch(console.warn)
     }
   }, [conn, chatId, channel, db, sendEvent, setItems, addSystemMessage, handleLocalCommand])
 

@@ -233,3 +233,43 @@ describe('ClearChannel', () => {
     expect(event.type).toBe('clear_channel')
   })
 })
+
+describe('per-session channel fields', () => {
+  test('CreateChannel carries an optional cwd', () => {
+    const event: ClientEvent = {
+      type: 'create_channel',
+      serverId: 'claude-code',
+      channel: 'feature-x',
+      displayName: 'Feature X',
+      cwd: '/Users/me/dev/feature-x',
+    }
+    if (event.type === 'create_channel') {
+      expect(event.cwd).toBe('/Users/me/dev/feature-x')
+    } else {
+      throw new Error('expected create_channel discriminant')
+    }
+  })
+
+  test('GetSessions narrows and carries serverId', () => {
+    const event: ClientEvent = { type: 'get_sessions', serverId: 'claude-code' }
+    if (event.type === 'get_sessions') {
+      expect(event.serverId).toBe('claude-code')
+    } else {
+      throw new Error('expected get_sessions discriminant')
+    }
+  })
+
+  test('Sessions narrows in a ServerEvent union and carries liveChannels', () => {
+    const event: ServerEvent = {
+      type: 'sessions',
+      serverId: 'claude-code',
+      liveChannels: ['general', 'feature-x'],
+    }
+    if (event.type === 'sessions') {
+      expect(event.serverId).toBe('claude-code')
+      expect(event.liveChannels).toEqual(['general', 'feature-x'])
+    } else {
+      throw new Error('expected sessions discriminant')
+    }
+  })
+})

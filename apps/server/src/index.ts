@@ -427,7 +427,7 @@ wss.on('connection', (ws, request) => {
       } else if (event.type === 'get_commands') {
         if (ws.readyState === WebSocket.OPEN) replayCommandsTo(ws)
       } else if (event.type === 'create_channel') {
-        registerChannel(event.serverId, event.channel, event.displayName)
+        registerChannel(event.serverId, event.channel, event.displayName, event.cwd)
         broadcast(channelsEvent(event.serverId))
       } else if (event.type === 'delete_channel') {
         deregisterChannel(event.serverId, event.channel)

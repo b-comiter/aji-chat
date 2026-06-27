@@ -23,8 +23,11 @@
  * only stderr (console.error) — or the transport will be corrupted.
  *
  * Env:
- *   AJI_SERVER  base URL of the aji-chat server    (default http://localhost:4000)
- *   AJI_AGENT   which server this bridge represents (default claude-code)
+ *   AJI_SERVER   base URL of the aji-chat server    (default http://localhost:4000)
+ *   AJI_AGENT    which server this bridge represents (default claude-code)
+ *   AJI_CHANNEL  which channel this session backs    (default general). Set by the
+ *                auto-launcher when it spawns this claude; with multiple sessions
+ *                running, the bridge must inject ONLY this channel's messages.
  */
 import * as http from 'node:http'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
@@ -36,6 +39,13 @@ import { startWebhookClient, type WebhookClient } from './lib/webhookClient.ts'
 const AJI_SERVER = (process.env.AJI_SERVER ?? 'http://localhost:4000').replace(/\/$/, '')
 const AJI_AGENT = process.env.AJI_AGENT ?? 'claude-code'
 const ACCESS_TOKEN = process.env.AJI_ACCESS_TOKEN?.trim()
+// Which channel this session backs. The auto-launcher exports AJI_CHANNEL when it
+// spawns claude (one terminal per channel), so the bridge must inject ONLY that
+// channel's messages. When it's unset (a manually-run or Desktop session that the
+// launcher didn't spawn) there is no single channel to scope to — the session's
+// outbound is keyed by session_id on the hook side — so we forward every message
+// for this server, preserving the original single-session behavior.
+const AJI_CHANNEL = process.env.AJI_CHANNEL?.trim() || undefined
 
 // stdout belongs to the MCP transport — log only to stderr.
 function log(...args: unknown[]): void {
@@ -44,16 +54,25 @@ function log(...args: unknown[]): void {
 
 /**
  * Pure routing predicate (exported for tests): does this client event belong to
- * the server this bridge represents? A `user_message` with no `serverId` is
- * treated as a match so older mobile builds (pre-serverId-field) still reach the
- * session.
+ * the server (and, when scoped, the channel) this bridge represents? A
+ * `user_message` with no `serverId` is treated as a server match so older mobile
+ * builds (pre-serverId) still reach the session.
+ *
+ * `channel` is the bridge's own channel scope: when set (launcher-spawned, one
+ * terminal per channel), the message's channel must match — this keeps a message
+ * for channel A out of channel B's session when several run at once. When
+ * `undefined` (a manual/Desktop session the launcher didn't scope), every
+ * channel matches, preserving the original forward-everything behavior.
  */
 export function shouldForward(
   event: ClientEvent,
   serverId: string,
+  channel: string | undefined,
 ): event is UserMessage {
   if (event.type !== 'user_message') return false
-  return event.serverId === undefined || event.serverId === serverId
+  const serverMatch = event.serverId === undefined || event.serverId === serverId
+  const channelMatch = channel === undefined || (event.channel ?? 'general') === channel
+  return serverMatch && channelMatch
 }
 
 const server = new Server(
@@ -107,8 +126,8 @@ const httpServer = http.createServer((req, res) => {
     res.end('{"ok":true}')
     try {
       const event = JSON.parse(body) as ClientEvent
-      if (shouldForward(event, AJI_AGENT)) {
-        log('forwarding user_message →', event.text.slice(0, 80))
+      if (shouldForward(event, AJI_AGENT, AJI_CHANNEL)) {
+        log(`forwarding user_message (channel ${AJI_CHANNEL ?? 'all'}) →`, event.text.slice(0, 80))
         void pushToChannel(event.text)
       }
     } catch {
@@ -137,7 +156,7 @@ async function main(): Promise<void> {
     log('webhook listener on port', port)
     webhook = startWebhookClient({ serverBase: AJI_SERVER, serverId: AJI_AGENT, accessToken: ACCESS_TOKEN, port, log })
   })
-  log('bridge started; agent =', AJI_AGENT, 'server =', AJI_SERVER)
+  log('bridge started; agent =', AJI_AGENT, 'channel =', AJI_CHANNEL, 'server =', AJI_SERVER)
 }
 
 // Only run the server when executed directly (so tests can import shouldForward

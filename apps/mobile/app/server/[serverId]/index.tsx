@@ -17,7 +17,9 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Alert,
   FlatList,
+  KeyboardAvoidingView,
   Modal,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -99,6 +101,9 @@ export default function ServerChannelsScreen() {
   const [server, setServer] = useState<ServerRow | null>(null)
   const [creating, setCreating] = useState(false)
   const [newName, setNewName] = useState('')
+  // Optional working directory for the new session's terminal (Claude Code). Blank
+  // ⇒ the launcher's default project dir.
+  const [newCwd, setNewCwd] = useState('')
   // Which row + side has its swipe drawer open (one at a time).
   const [open, setOpen] = useState<{ id: string; side: OpenSide } | null>(null)
 
@@ -132,15 +137,19 @@ export default function ServerChannelsScreen() {
 
   // Refresh unread counts whenever the screen regains focus — covers returning
   // from a channel chat, which marks that channel read with no WS event to catch.
+  // Also ask the agent which sessions are still alive so channels whose terminal
+  // is gone get archived (the agent replies with a `sessions` event the WS handler
+  // reconciles, then the live-refresh subscription below re-reads the list).
   useFocusEffect(
     useCallback(() => {
       if (!resolvedServerId) return
       let cancelled = false
+      sendEvent({ type: 'get_sessions', serverId: resolvedServerId })
       getUnreadChannelCounts(db, resolvedServerId)
         .then((counts) => { if (!cancelled) setUnreadCounts(counts) })
         .catch((err) => console.warn('[ServerChannels] unread refresh failed', err))
       return () => { cancelled = true }
-    }, [db, resolvedServerId]),
+    }, [db, resolvedServerId, sendEvent]),
   )
 
   // Live refresh: re-read whenever an event for this server arrives (the WS
@@ -232,16 +241,25 @@ export default function ServerChannelsScreen() {
     ]
   }, [confirmDelete, showDefaultDeleteBlocked])
 
-  const createChannel = async () => {
-    const id = normalizeChannelId(newName)
+  const dismissCreate = useCallback(() => {
     setCreating(false)
     setNewName('')
+    setNewCwd('')
+  }, [])
+
+  const createChannel = async () => {
+    const id = normalizeChannelId(newName)
+    const cwd = newCwd.trim() || undefined
+    setCreating(false)
+    setNewName('')
+    setNewCwd('')
     if (!id || !resolvedServerId) return
     // Optimistic local write for a snappy create→open; the server owns the
     // channel registry and broadcasts the authoritative `channels` list back,
-    // which the WS handler reconciles into this same table.
-    await upsertChannel(db, resolvedServerId, id)
-    sendEvent({ type: 'create_channel', serverId: resolvedServerId, channel: id })
+    // which the WS handler reconciles into this same table. The cwd rides along
+    // so the agent's launcher can spawn this session's terminal in that directory.
+    await upsertChannel(db, resolvedServerId, id, undefined, cwd)
+    sendEvent({ type: 'create_channel', serverId: resolvedServerId, channel: id, ...(cwd ? { cwd } : {}) })
     setChannels(await getChannelsForServer(db, resolvedServerId))
     openChannel(id)
   }
@@ -293,9 +311,13 @@ export default function ServerChannelsScreen() {
       />
 
       {/* New-channel modal */}
-      <Modal visible={creating} transparent animationType="fade" onRequestClose={() => setCreating(false)}>
-        <Pressable style={styles.modalBackdrop} onPress={() => setCreating(false)}>
-          <Pressable style={styles.card} onPress={() => {}}>
+      <Modal visible={creating} transparent animationType="fade" onRequestClose={dismissCreate}>
+        <KeyboardAvoidingView
+          style={styles.modalFlex}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        >
+          <Pressable style={styles.modalBackdrop} onPress={dismissCreate}>
+            <Pressable style={styles.card} onPress={() => {}}>
             <Text style={styles.cardTitle}>New channel</Text>
             <View style={styles.inputRow}>
               <Text style={styles.hash}>#</Text>
@@ -308,15 +330,32 @@ export default function ServerChannelsScreen() {
                 autoCapitalize="none"
                 autoCorrect={false}
                 style={styles.input}
+                returnKeyType="next"
+              />
+            </View>
+            <View style={styles.inputRow}>
+              <Feather name="folder" size={15} color={colors.textDim} />
+              <TextInput
+                value={newCwd}
+                onChangeText={setNewCwd}
+                placeholder="working directory (optional)"
+                placeholderTextColor={colors.textFaint}
+                autoCapitalize="none"
+                autoCorrect={false}
+                style={styles.input}
                 onSubmitEditing={() => createChannel().catch(console.warn)}
                 returnKeyType="done"
               />
             </View>
+            <Text style={styles.cardHint}>
+              Each channel is its own Claude Code session. Leave the directory blank to use the default project.
+            </Text>
             <Pressable style={styles.createBtn} onPress={() => createChannel().catch(console.warn)}>
               <Text style={styles.createBtnText}>Create</Text>
             </Pressable>
           </Pressable>
-        </Pressable>
+          </Pressable>
+        </KeyboardAvoidingView>
       </Modal>
 
       <FlatList
@@ -363,17 +402,27 @@ function ChannelListRow({
   colors: ThemeColors
 }) {
   const unread = unreadCount > 0
-  const active = item.last_status === 'thinking' || item.last_status === 'working'
+  const archived = item.archived === 1
+  // Archived = the backing terminal is gone, so any lingering thinking/working
+  // status is stale — don't show it as live.
+  const active = !archived && (item.last_status === 'thinking' || item.last_status === 'working')
   const time = relativeTime(item.last_event_at)
   return (
-    <View style={styles.rowInner}>
+    <View style={[styles.rowInner, archived && styles.rowInnerArchived]}>
       <ChannelBadge unread={unread} colors={colors} styles={styles} />
       <View style={styles.rowBody}>
         <View style={styles.rowTop}>
-          <Text style={[styles.channelName, unread && styles.channelNameUnread]} numberOfLines={1}>
+          <Text
+            style={[styles.channelName, unread && styles.channelNameUnread, archived && styles.channelNameArchived]}
+            numberOfLines={1}
+          >
             {item.display_name}
           </Text>
-          {isDefault ? (
+          {archived ? (
+            <View style={styles.archivedPill}>
+              <Text style={styles.archivedPillText}>Archived</Text>
+            </View>
+          ) : isDefault ? (
             <View style={styles.defaultPill}>
               <Text style={styles.defaultPillText}>Default</Text>
             </View>
@@ -451,6 +500,7 @@ function makeStyles(colors: ThemeColors) {
     },
     addBtnText: { color: colors.textOnAccent, fontSize: typography.sizeLg, lineHeight: 20 },
 
+    modalFlex: { flex: 1 },
     modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center' },
     card: {
       width: 300,
@@ -479,6 +529,7 @@ function makeStyles(colors: ThemeColors) {
     },
     hash: { color: colors.textDim, fontSize: typography.sizeLg },
     input: { flex: 1, color: colors.text, fontSize: typography.sizeLg, paddingVertical: 10 },
+    cardHint: { color: colors.textFaint, fontSize: typography.sizeSm, lineHeight: 16 },
     createBtn: {
       backgroundColor: colors.accent,
       borderRadius: radius.md,
@@ -497,6 +548,7 @@ function makeStyles(colors: ThemeColors) {
       borderBottomColor: colors.border,
       gap: spacing.md,
     },
+    rowInnerArchived: { opacity: 0.5 },
     badge: {
       width: 40,
       height: 40,
@@ -517,6 +569,7 @@ function makeStyles(colors: ThemeColors) {
     rowTop: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 3 },
     channelName: { color: colors.text, fontSize: typography.sizeLg, fontWeight: typography.weightSemibold, flexShrink: 1 },
     channelNameUnread: { fontWeight: typography.weightBold },
+    channelNameArchived: { color: colors.textMuted, fontWeight: typography.weightMedium },
     defaultPill: {
       borderRadius: radius.full,
       borderWidth: 1,
@@ -529,6 +582,23 @@ function makeStyles(colors: ThemeColors) {
     },
     defaultPillText: {
       color: colors.textDim,
+      fontSize: typography.sizeXs,
+      fontWeight: typography.weightSemibold,
+      lineHeight: 14,
+      textTransform: 'uppercase',
+    },
+    archivedPill: {
+      borderRadius: radius.full,
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: 'transparent',
+      paddingHorizontal: 8,
+      height: 18,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    archivedPillText: {
+      color: colors.textMuted,
       fontSize: typography.sizeXs,
       fontWeight: typography.weightSemibold,
       lineHeight: 14,

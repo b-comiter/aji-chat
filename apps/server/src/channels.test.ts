@@ -25,6 +25,19 @@ describe('upsertChannelInfo', () => {
     const list = upsertChannelInfo([{ id: 'a' }, { id: 'b' }], 'c')
     expect(list.map((c) => c.id)).toEqual(['a', 'b', 'c'])
   })
+
+  it('stores cwd on a new channel', () => {
+    expect(upsertChannelInfo([], 'feature-x', 'Feature X', '/dev/feature-x')).toEqual([
+      { id: 'feature-x', displayName: 'Feature X', cwd: '/dev/feature-x' },
+    ])
+  })
+
+  it('refreshes cwd when a new one is provided, keeps it otherwise', () => {
+    const withCwd = upsertChannelInfo([{ id: 'a', cwd: '/old' }], 'a', undefined, '/new')
+    expect(withCwd).toEqual([{ id: 'a', cwd: '/new' }])
+    const kept = upsertChannelInfo([{ id: 'a', cwd: '/new' }], 'a')
+    expect(kept).toEqual([{ id: 'a', cwd: '/new' }])
+  })
 })
 
 describe('removeChannelInfo', () => {
