@@ -91,11 +91,11 @@ function makeStyles(colors: ThemeColors) {
       width: BUTTON_SIZE,
       height: BUTTON_SIZE,
       borderRadius: radius.full,
-      backgroundColor: colors.border,
+      backgroundColor: colors.accent,
       alignItems: 'center',
       justifyContent: 'center',
       padding: 4,
     },
-    addBtnText: { color: colors.text, fontSize: typography.sizeLg, lineHeight: 20 },
+    addBtnText: { color: colors.textOnAccent, fontSize: typography.sizeLg, lineHeight: 20 },
   })
 }
