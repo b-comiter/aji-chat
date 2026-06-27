@@ -38,12 +38,17 @@ import { useTheme } from '../../context/ThemeContext'
 import { spacing, typography } from '../../constants/theme'
 import type { ThemeColors } from '../../constants/theme'
 import type { Item } from '../../hooks/chatTypes'
+import { TypingIndicator } from './TypingIndicator'
 
 type Props = {
   items: Item[]
   renderItem: ListRenderItem<Item>
   hasMoreOlder: boolean
   onLoadOlder: () => void
+  /** When set, shows an animated typing indicator at the visual bottom of the list. */
+  typingStatus?: 'thinking' | 'working'
+  avatarLabel?: string
+  serverName?: string
 }
 
 export type MessageListHandle = {
@@ -60,6 +65,9 @@ export const MessageList = forwardRef<MessageListHandle, Props>(function Message
   renderItem,
   hasMoreOlder,
   onLoadOlder,
+  typingStatus,
+  avatarLabel,
+  serverName,
 }, ref) {
   const { colors } = useTheme()
   const styles = useMemo(() => makeStyles(colors), [colors])
@@ -135,7 +143,10 @@ export const MessageList = forwardRef<MessageListHandle, Props>(function Message
     [hasMoreOlder, onLoadOlder],
   )
 
-  if (items.length === 0) {
+  // Show the plain empty state only when there are no messages AND the agent
+  // is idle. If the agent is active (typing indicator to show), render the
+  // FlatList even with zero data so ListHeaderComponent (the indicator) can mount.
+  if (items.length === 0 && !typingStatus) {
     return (
       <View style={styles.emptyWrap}>
         <Text style={styles.empty}>No messages yet</Text>
@@ -156,6 +167,15 @@ export const MessageList = forwardRef<MessageListHandle, Props>(function Message
           onScroll={onScroll}
           scrollEventThrottle={64}
           keyboardDismissMode="on-drag"
+          ListHeaderComponent={
+            typingStatus ? (
+              <TypingIndicator
+                agentStatus={typingStatus}
+                avatarLabel={avatarLabel ?? '?'}
+                serverName={serverName}
+              />
+            ) : null
+          }
         />
         {scrolledUp && (
           <Pressable
