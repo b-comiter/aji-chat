@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Animated, StyleSheet, Text, View } from 'react-native'
+import { Animated, Easing, StyleSheet, Text, View } from 'react-native'
 import { useTheme } from '../../context/ThemeContext'
 import { spacing, typography, radius } from '../../constants/theme'
 import type { ThemeColors } from '../../constants/theme'
@@ -7,6 +7,8 @@ import { Avatar } from './Avatar'
 
 const DOT_SIZE = 7
 const BOUNCE_HEIGHT = 5
+const SPINNER_SIZE = 22
+const SPINNER_BORDER = 2.5
 
 function formatElapsed(secs: number): string {
   const m = Math.floor(secs / 60)
@@ -57,6 +59,55 @@ function BouncingDots({ colors }: { colors: ThemeColors }) {
   )
 }
 
+// Round arc spinner — 3/4 of a circle (one gap) rotating at constant speed.
+// Pure React Native: no SVG or third-party packages needed.
+function SpinningLoader({ colors }: { colors: ThemeColors }) {
+  const spinAnim = useRef(new Animated.Value(0)).current
+
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.timing(spinAnim, {
+        toValue: 1,
+        duration: 900,
+        easing: Easing.linear,
+        useNativeDriver: true,
+      })
+    )
+    loop.start()
+    return () => loop.stop()
+  }, [spinAnim])
+
+  const rotate = spinAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0deg', '360deg'],
+  })
+
+  const arc = colors.assistantBubbleText
+  // Dim track shows the full circle beneath the arc
+  const track = `${colors.assistantBubbleText}30`
+
+  return (
+    <View style={styles.spinner}>
+      {/* Track — full circle at low opacity */}
+      <View style={[styles.spinnerRing, { borderColor: track }]} />
+      {/* Arc — 3/4 circle rotating */}
+      <Animated.View
+        style={[
+          styles.spinnerRing,
+          styles.spinnerArc,
+          {
+            borderTopColor: arc,
+            borderRightColor: arc,
+            borderBottomColor: arc,
+            borderLeftColor: 'transparent',
+            transform: [{ rotate }],
+          },
+        ]}
+      />
+    </View>
+  )
+}
+
 type Props = {
   agentStatus: 'thinking' | 'working'
   avatarLabel: string
@@ -99,7 +150,11 @@ export function TypingIndicator({ agentStatus, avatarLabel, serverName }: Props)
             },
           ]}
         >
-          <BouncingDots colors={colors} />
+          {agentStatus === 'working' ? (
+            <SpinningLoader colors={colors} />
+          ) : (
+            <BouncingDots colors={colors} />
+          )}
         </View>
         <Text style={[styles.time, { color: colors.textDim }]}>
           {agentStatus === 'thinking' ? 'thinking' : 'working'} · {formatElapsed(elapsed)}
@@ -128,6 +183,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md,
+    // Fixed height — tall enough for the spinner (22px), which is larger than the dots (7px).
+    minHeight: SPINNER_SIZE + spacing.md * 2,
+    justifyContent: 'center',
   },
   dots: {
     flexDirection: 'row',
@@ -138,6 +196,20 @@ const styles = StyleSheet.create({
     width: DOT_SIZE,
     height: DOT_SIZE,
     borderRadius: DOT_SIZE / 2,
+  },
+  spinner: {
+    width: SPINNER_SIZE,
+    height: SPINNER_SIZE,
+  },
+  spinnerRing: {
+    position: 'absolute',
+    width: SPINNER_SIZE,
+    height: SPINNER_SIZE,
+    borderRadius: SPINNER_SIZE / 2,
+    borderWidth: SPINNER_BORDER,
+  },
+  spinnerArc: {
+    // Positioned on top of the track
   },
   time: {
     fontSize: typography.sizeXs,
