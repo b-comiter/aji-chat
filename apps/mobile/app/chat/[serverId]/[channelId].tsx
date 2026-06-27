@@ -35,6 +35,7 @@ import { Composer } from '../../../components/chat/Composer'
 import { MessageList } from '../../../components/chat/MessageList'
 import type { MessageListHandle } from '../../../components/chat/MessageList'
 import { CommandPicker } from '../../../components/chat/CommandPicker'
+import { ModelPicker } from '../../../components/chat/ModelPicker'
 import { Row } from '../../../components/chat/MessageRow'
 import { parseEditDiff } from '../../../components/chat/diffHelpers'
 import { avatarInitials } from '../../../components/chat/Avatar'
@@ -70,6 +71,8 @@ export default function ChatScreen() {
   const [draft, setDraft] = useState('')
   const [isToolSheetOpen, setIsToolSheetOpen] = useState<Item[] | null>(null)
   const [selectedFile, setSelectedFile] = useState<FileItem | null>(null)
+  const [showModelPicker, setShowModelPicker] = useState(false)
+  const [activeModel, setActiveModel] = useState<string | undefined>()
   const [menuTarget, setMenuTarget] = useState<MessageMenuTarget | null>(null)
   const messageListRef = useRef<MessageListHandle | null>(null)
 
@@ -170,12 +173,20 @@ export default function ChatScreen() {
 
   // Show the typing indicator when the agent is active. Two paths:
   //   1. Explicit status events (Claude Code, Hermes): use agentStatus directly.
-  //      No hasStreaming suppression — rapid agents batch status + text_delta into
-  //      one React render, so the "thinking" state would never be visible otherwise.
-  //   2. Inferred from items (fallback for agents that don't emit status events): a
-  //      running tool (done:false tool item) or an empty in-flight assistant message.
+  //      No hasStreaming suppression here — rapid agents batch status + text_delta
+  //      into one React render, so the indicator would never be visible otherwise.
+  //   2. Inferred from items (fallback for agents without status events): a running
+  //      tool (done:false) or an empty in-flight assistant message.
+  //      For the inferred path only: hide when streaming text is already visible,
+  //      since the bubble itself signals activity.
   const typingStatus = useMemo((): 'thinking' | 'working' | undefined => {
     if (agentStatus !== 'idle') return agentStatus as 'thinking' | 'working'
+
+    const hasStreaming = items.some(
+      (it) => it.kind === 'message' && it.role === 'assistant' && !it.done && it.text.trim().length > 0,
+    )
+    if (hasStreaming) return undefined
+
     const hasInFlight = items.some(
       (it) =>
         (it.kind === 'tool' && !it.done) ||
@@ -235,6 +246,11 @@ export default function ChatScreen() {
 
   const allCommands = useMemo(() => [...LOCAL_COMMANDS, ...commands], [commands])
 
+  const modelSubcommands = useMemo(
+    () => allCommands.find((c) => c.name === 'model')?.subcommands ?? [],
+    [allCommands],
+  )
+
   const trimmedDraft = useMemo(() => draft.trim(), [draft])
   const rawQuery = trimmedDraft.startsWith('/') ? trimmedDraft.slice(1) : null
   const pickerQuery = rawQuery !== null && !rawQuery.includes(' ') ? rawQuery.toLowerCase() : null
@@ -256,6 +272,12 @@ export default function ChatScreen() {
   const handleSend = useCallback(() => {
     const text = trimmedDraft
     if (!text) return
+    // Intercept /model with no args — open the picker instead of sending to server.
+    if (text === '/model') {
+      setShowModelPicker(true)
+      setDraft('')
+      return
+    }
     sendMessage(text)
     setDraft('')
     // Explicit scroll to bottom on Send. In inverted FlatList, offset: 0 = visual bottom.
@@ -310,8 +332,19 @@ export default function ChatScreen() {
   const handleAttachFile = useCallback(() => handleAttach('file'), [handleAttach])
 
   const handleCommandSelect = useCallback((name: string) => {
+    if (name === 'model') {
+      setShowModelPicker(true)
+      setDraft('')
+      return
+    }
     setDraft(`/${name} `)
   }, [])
+
+  const handleModelSelect = useCallback((modelId: string) => {
+    setActiveModel(modelId)
+    sendMessage(`/model ${modelId}`)
+    messageListRef.current?.scrollToBottom()
+  }, [sendMessage])
 
   // ── Long-press message menu (copy / delete) ───────────────────────────────
 
@@ -410,6 +443,13 @@ export default function ChatScreen() {
         onAttachCamera={handleAttachCamera}
         onAttachPhoto={handleAttachPhoto}
         onAttachFile={handleAttachFile}
+      />
+      <ModelPicker
+        visible={showModelPicker}
+        models={modelSubcommands}
+        currentModel={activeModel}
+        onSelect={handleModelSelect}
+        onClose={() => setShowModelPicker(false)}
       />
       <ToolSheet
         tools={isToolSheetOpen ?? []}
