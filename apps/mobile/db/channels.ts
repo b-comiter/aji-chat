@@ -5,21 +5,44 @@ import type { ChannelRow } from './schema'
  *  upsertServer, deliberately does NOT touch last_event_at on conflict — that
  *  reconnect churn made channels show "just now" with no new message. Genuine
  *  activity advances last_event_at only via updateChannelPreview.
- *  Caller MUST upsert the parent server row first (channels FK → servers). */
+ *  Caller MUST upsert the parent server row first (channels FK → servers).
+ *  When displayName is provided it is applied even if the row already exists —
+ *  used by the Desktop hook to stamp the auto-generated conversation title. */
 export async function upsertChannel(
   db: SQLiteDatabase,
   serverId: string,
   channelId: string,
+  displayName?: string,
+  cwd?: string,
 ): Promise<void> {
   await db.runAsync(
-    `INSERT INTO channels (server_id, channel_id, display_name, last_event_at)
-     VALUES (?, ?, ?, ?)
+    `INSERT INTO channels (server_id, channel_id, display_name, last_event_at, cwd)
+     VALUES (?, ?, ?, ?, ?)
      ON CONFLICT(server_id, channel_id) DO NOTHING`,
     serverId,
     channelId,
-    channelId,
+    displayName ?? channelId,
     Date.now(),
+    cwd ?? null,
   )
+  if (displayName !== undefined) {
+    await db.runAsync(
+      `UPDATE channels SET display_name = ? WHERE server_id = ? AND channel_id = ?`,
+      displayName,
+      serverId,
+      channelId,
+    )
+  }
+  // Only overwrite cwd when a non-empty one is supplied, so a later event without
+  // it (e.g. an auto-discovery upsert) doesn't wipe the registered directory.
+  if (cwd) {
+    await db.runAsync(
+      `UPDATE channels SET cwd = ? WHERE server_id = ? AND channel_id = ?`,
+      cwd,
+      serverId,
+      channelId,
+    )
+  }
 }
 
 export async function updateChannelStatus(
@@ -56,17 +79,64 @@ export async function updateChannelPreview(
 }
 
 /**
- * All channels for a server, ordered by the user's manual `position` first and
- * recency as the tiebreak. Channels never reordered share `position = 0`, so the
- * default experience stays "most-recently-active first" until the user drags.
+ * All channels for a server. Live channels first; archived ones (their backing
+ * terminal is gone) sink to the bottom. Within each group, the user's manual
+ * `position` leads with recency as the tiebreak. Channels never reordered share
+ * `position = 0`, so the default experience stays "most-recently-active first".
  */
 export async function getChannelsForServer(
   db: SQLiteDatabase,
   serverId: string,
 ): Promise<ChannelRow[]> {
   return db.getAllAsync<ChannelRow>(
-    `SELECT * FROM channels WHERE server_id = ? ORDER BY position ASC, last_event_at DESC`,
+    `SELECT * FROM channels WHERE server_id = ? ORDER BY archived ASC, position ASC, last_event_at DESC`,
     serverId,
+  )
+}
+
+/**
+ * Reconcile archived state from a `sessions` event's live-channel set. A channel
+ * present in `liveChannels` is un-archived; a known channel absent from it is
+ * archived ONLY if it has prior activity (`last_event_at` set) — a brand-new,
+ * never-messaged channel is left live so it isn't archived before its terminal
+ * has had a chance to boot. Runs in a transaction so the list never reads back
+ * half-updated.
+ */
+export async function reconcileArchivedSessions(
+  db: SQLiteDatabase,
+  serverId: string,
+  liveChannels: string[],
+): Promise<void> {
+  const live = new Set(liveChannels)
+  const rows = await db.getAllAsync<{ channel_id: string; last_event_at: number | null }>(
+    `SELECT channel_id, last_event_at FROM channels WHERE server_id = ?`,
+    serverId,
+  )
+  await db.withTransactionAsync(async () => {
+    for (const r of rows) {
+      const archived = !live.has(r.channel_id) && r.last_event_at != null ? 1 : 0
+      await db.runAsync(
+        `UPDATE channels SET archived = ? WHERE server_id = ? AND channel_id = ?`,
+        archived,
+        serverId,
+        r.channel_id,
+      )
+    }
+  })
+}
+
+/** Set a channel's archived flag. Used for the optimistic un-archive on send. */
+export async function setChannelArchived(
+  db: SQLiteDatabase,
+  serverId: string,
+  channelId: string,
+  archived: boolean,
+): Promise<void> {
+  await db.runAsync(
+    `UPDATE channels SET archived = ? WHERE server_id = ? AND channel_id = ?`,
+    archived ? 1 : 0,
+    serverId,
+    channelId,
   )
 }
 

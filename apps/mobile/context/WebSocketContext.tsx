@@ -42,6 +42,7 @@ import {
   applyServerInfo,
   updateChannelStatus,
   upsertChannel,
+  reconcileArchivedSessions,
   getServer,
   isServerMuted,
   DEFAULT_CHANNEL,
@@ -446,10 +447,20 @@ export function WSProvider({ children }: { children: ReactNode }) {
           // entry into the local channels table as a thin cache. Server row
           // first (channels FK → servers). Channels removed server-side aren't
           // pruned here — the registry only grows via create_channel today.
+          // displayName is passed through when present — e.g. the Desktop hook
+          // stamps the auto-generated conversation title this way.
           await upsertServer(db, event.serverId)
           for (const ch of event.channels) {
-            await upsertChannel(db, event.serverId, ch.id)
+            await upsertChannel(db, event.serverId, ch.id, ch.displayName, ch.cwd)
           }
+          break
+        }
+
+        case 'sessions': {
+          // The agent reports which channels still have a live backing terminal.
+          // Mark known channels whose session is gone as archived; un-archive the
+          // live ones. (See reconcileArchivedSessions for the new-channel guard.)
+          await reconcileArchivedSessions(db, event.serverId, event.liveChannels)
           break
         }
 

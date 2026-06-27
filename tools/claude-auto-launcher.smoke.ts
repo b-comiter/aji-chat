@@ -18,7 +18,7 @@ import type { ClientEvent } from '@aji/protocol'
 // Set BEFORE importing the module: its top-level `main()` guard reads this, and
 // a static import would be hoisted above the assignment — so import dynamically.
 process.env.AJI_LAUNCHER_TEST = '1'
-const { shouldLaunch, buildLaunchCommand, buildTerminalAppleScript } = await import('./claude-auto-launcher.ts')
+const { shouldLaunch, buildLaunchCommand, buildTerminalAppleScript, tmuxSessionFor } = await import('./claude-auto-launcher.ts')
 
 const failures: string[] = []
 function check(label: string, cond: boolean): void {
@@ -37,16 +37,25 @@ check('non-message event → NO launch',
 
 // 2. Launch command
 const cmd = buildLaunchCommand({
-  projectDir: '/Users/me/dev/aji-chat',
+  cwd: '/Users/me/dev/aji-chat',
   claudeBin: 'claude',
   promptFile: '/tmp/aji-cc-initial-123.txt',
+  channel: 'feature-x',
 })
-check('launch cmd cds into project dir', cmd.includes('cd "/Users/me/dev/aji-chat"'))
+check('launch cmd exports the channel for the hook + bridge', cmd.includes('export AJI_CHANNEL="feature-x"'))
+check('launch cmd cds into the channel cwd', cmd.includes('cd "/Users/me/dev/aji-chat"'))
 check('launch cmd carries the channel flag', cmd.includes('--dangerously-load-development-channels server:aji-chat'))
 // The `--` must sit between the variadic flag and the prompt, or claude treats
 // the prompt as an untagged channel entry and exits.
 check('launch cmd isolates prompt with --', cmd.includes('server:aji-chat -- "$(cat'))
 check('launch cmd reads prompt via "$(cat …)"', cmd.includes('"$(cat "/tmp/aji-cc-initial-123.txt")"'))
+// On failure (bad cwd, claude missing) keep the pane open instead of vanishing.
+check('launch cmd keeps the pane open on failure', cmd.includes('|| exec zsh -l'))
+
+// 2b. Per-channel tmux session naming (tmux-safe: no '.' or ':')
+check('session name prefixes the channel', tmuxSessionFor('feature-x') === 'aji-cc-feature-x')
+check('session name defaults blank channel to general', tmuxSessionFor('') === 'aji-cc-general')
+check('session name strips tmux-unsafe dots', tmuxSessionFor('v1.2') === 'aji-cc-v1_2')
 
 // 3. AppleScript escaping
 const script = buildTerminalAppleScript('echo "hi" \\ there')

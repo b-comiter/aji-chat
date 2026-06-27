@@ -3,11 +3,13 @@
  *
  * Spawns tools/claude-channel-bridge.ts, discovers its ephemeral webhook port from
  * stderr, then POSTs ClientEvents directly to that listener (simulating what the
- * aji-chat server's webhook dispatch would do). Asserts the routing predicate:
- *   - user_message for our agent       → forwarded
- *   - user_message with no agent       → forwarded (back-compat)
- *   - user_message for a DIFFERENT agent → NOT forwarded
- *   - non-message ClientEvent          → NOT forwarded
+ * aji-chat server's webhook dispatch would do). Asserts the routing predicate
+ * (the bridge runs as the 'general' channel here):
+ *   - user_message for our agent, no channel → forwarded (general default)
+ *   - user_message with no agent             → forwarded (back-compat)
+ *   - user_message for a DIFFERENT agent     → NOT forwarded
+ *   - user_message for a DIFFERENT channel   → NOT forwarded
+ *   - non-message ClientEvent                → NOT forwarded
  *
  * Does NOT require the aji-chat server or a real Claude Code session. The actual
  * channel injection is verified manually end-to-end (see docs).
@@ -43,7 +45,7 @@ async function main(): Promise<void> {
   const proc = spawn(TSX, ['tools/claude-channel-bridge.ts'], {
     // Point at a definitely-dead server so webhook registration fails fast and
     // quietly — we are testing the listener + routing in isolation.
-    env: { ...process.env, AJI_AGENT: 'claude-code', AJI_SERVER: 'http://localhost:59999' },
+    env: { ...process.env, AJI_AGENT: 'claude-code', AJI_CHANNEL: 'general', AJI_SERVER: 'http://localhost:59999' },
     stdio: ['pipe', 'pipe', 'pipe'],
   })
 
@@ -67,18 +69,20 @@ async function main(): Promise<void> {
   await post(base, { type: 'user_message', text: 'hello from mobile', serverId: 'claude-code' })
   await post(base, { type: 'user_message', text: 'no serverId field' })
   await post(base, { type: 'user_message', text: 'for hermes', serverId: 'hermes' })
+  await post(base, { type: 'user_message', text: 'for another channel', serverId: 'claude-code', channel: 'feature-x' })
   await post(base, { type: 'get_commands' })
 
   await delay(400)
   proc.kill('SIGINT')
 
-  const forwarded = [...stderr.matchAll(/forwarding user_message → (.+)/g)].map((m) => m[1].trim())
+  const forwarded = [...stderr.matchAll(/forwarding user_message \(channel [^)]*\) → (.+)/g)].map((m) => m[1].trim())
 
   const ok =
     forwarded.length === 2 &&
     forwarded.includes('hello from mobile') &&
     forwarded.includes('no serverId field') &&
-    !forwarded.some((t) => t.includes('for hermes'))
+    !forwarded.some((t) => t.includes('for hermes')) &&
+    !forwarded.some((t) => t.includes('for another channel'))
 
   if (!ok) {
     console.error('SMOKE FAILED. forwarded =', JSON.stringify(forwarded))

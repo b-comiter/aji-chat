@@ -34,9 +34,13 @@ const DISPLAY_NAME = IS_DESKTOP ? 'Claude Desktop' : 'Claude Code'
 const PROMPT_SERVER = process.env.AJI_PROMPT_SERVER ?? 'http://localhost:4000/prompt/wait'
 const ACCESS_TOKEN = process.env.AJI_ACCESS_TOKEN?.trim() || undefined
 
-// Set once per invocation from session_id so every event in this hook run
-// carries the same channel. Uses first 8 chars of the UUID — short enough to
-// display well, long enough to be collision-proof in practice.
+// Set once per invocation so every event in this hook run carries the same
+// channel. The auto-launcher exports AJI_CHANNEL when it spawns a session (one
+// terminal per mobile-created channel) — that wins so outbound events match the
+// channel mobile created and the bridge filters on. Sessions not spawned by the
+// launcher (Claude Desktop, a manually-run CLI) have no AJI_CHANNEL and fall back
+// to the first 8 chars of session_id — short enough to display, long enough to
+// be collision-proof in practice.
 let CHANNEL: string | undefined
 const CHANNEL_EXEMPT: ReadonlySet<string> = new Set(['server_info', 'commands', 'channels'])
 
@@ -194,6 +198,51 @@ async function emit(event: ServerEvent): Promise<void> {
   await postJson(SERVER, CHANNEL && !CHANNEL_EXEMPT.has(event.type) ? { ...event, channel: CHANNEL } : event, 4000)
 }
 
+/**
+ * Read the conversation title Claude Desktop auto-generates for this session.
+ * Desktop stores a JSON file per session under
+ *   ~/Library/Application Support/Claude/claude-code-sessions/<workspace>/<window>/local_<id>.json
+ * Each file has a `cliSessionId` that matches the hook's session_id and a
+ * `title` string. Returns undefined if not found (non-Desktop, file missing, etc.)
+ */
+function readDesktopConversationTitle(cliSessionId: string): string | undefined {
+  const sessionsDir = path.join(
+    os.homedir(), 'Library', 'Application Support', 'Claude', 'claude-code-sessions',
+  )
+  try {
+    for (const wsId of fs.readdirSync(sessionsDir)) {
+      const wsPath = path.join(sessionsDir, wsId)
+      if (!fs.statSync(wsPath).isDirectory()) continue
+      for (const winId of fs.readdirSync(wsPath)) {
+        const winPath = path.join(wsPath, winId)
+        if (!fs.statSync(winPath).isDirectory()) continue
+        for (const file of fs.readdirSync(winPath)) {
+          if (!file.endsWith('.json')) continue
+          try {
+            const data = JSON.parse(fs.readFileSync(path.join(winPath, file), 'utf-8')) as Record<string, unknown>
+            if (data.cliSessionId === cliSessionId && typeof data.title === 'string') {
+              return data.title
+            }
+          } catch { /* skip malformed */ }
+        }
+      }
+    }
+  } catch { /* not macOS / not Desktop */ }
+  return undefined
+}
+
+/** Emit a channels event that names this session's channel with the Desktop conversation title. */
+async function emitDesktopChannelName(sessionId: string): Promise<void> {
+  if (!IS_DESKTOP || !CHANNEL) return
+  const title = readDesktopConversationTitle(sessionId)
+  if (!title) return
+  await emit({
+    type: 'channels',
+    serverId: AGENT,
+    channels: [{ id: CHANNEL, displayName: title }],
+  })
+}
+
 async function readStdin(): Promise<Record<string, unknown> | null> {
   let data = ''
   for await (const chunk of process.stdin) data += chunk
@@ -339,7 +388,7 @@ async function main(): Promise<void> {
 
   const event = payload.hook_event_name as string | undefined
   const sessionId = String(payload.session_id ?? 'default')
-  CHANNEL = sessionId.slice(0, 8)
+  CHANNEL = process.env.AJI_CHANNEL?.trim() || sessionId.slice(0, 8)
 
   switch (event) {
     case 'UserPromptSubmit': {
@@ -368,6 +417,7 @@ async function main(): Promise<void> {
       // session lifetime).
       await emitClaudeCodeServerInfo()
       if (!IS_DESKTOP) await emitClaudeCodeCommands()
+      await emitDesktopChannelName(sessionId)
       break
     }
     case 'PreToolUse': {
@@ -485,9 +535,11 @@ async function main(): Promise<void> {
 
       // Refresh mono-channel advertisement + the mobile command picker when
       // Claude goes idle — best time to send (and re-seed the server cache if it
-      // restarted mid-session).
+      // restarted mid-session). Emit the channel name at Stop too — the title is
+      // more likely to be finalized by the time the turn ends.
       await emitClaudeCodeServerInfo()
       if (!IS_DESKTOP) await emitClaudeCodeCommands()
+      await emitDesktopChannelName(sessionId)
       break
     }
     default:

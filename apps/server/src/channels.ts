@@ -10,19 +10,22 @@ import { loadJson, saveJson } from './persist'
 /**
  * Idempotently upsert a channel into a server's channel list, mutating and
  * returning the list. An existing channel id keeps its position and only
- * refreshes its `displayName` when a new non-empty one is supplied; an unknown
- * id is appended.
+ * refreshes its `displayName` / `cwd` when a new non-empty value is supplied; an
+ * unknown id is appended. `cwd` is opaque to the server — it just persists it so
+ * session-managing adapters can read it back via `GET /channels`.
  */
 export function upsertChannelInfo(
   list: ChannelInfo[],
   channel: string,
   displayName?: string,
+  cwd?: string,
 ): ChannelInfo[] {
   const existing = list.find((c) => c.id === channel)
   if (existing) {
     if (displayName) existing.displayName = displayName
+    if (cwd) existing.cwd = cwd
   } else {
-    list.push({ id: channel, ...(displayName ? { displayName } : {}) })
+    list.push({ id: channel, ...(displayName ? { displayName } : {}), ...(cwd ? { cwd } : {}) })
   }
   return list
 }
@@ -58,8 +61,8 @@ function saveChannels(): void {
 }
 
 /** Upsert a channel into a server's registry and persist. */
-export function registerChannel(serverId: string, channel: string, displayName?: string): void {
-  const list = upsertChannelInfo(channelsByServer.get(serverId) ?? [], channel, displayName)
+export function registerChannel(serverId: string, channel: string, displayName?: string, cwd?: string): void {
+  const list = upsertChannelInfo(channelsByServer.get(serverId) ?? [], channel, displayName, cwd)
   channelsByServer.set(serverId, list)
   saveChannels()
 }

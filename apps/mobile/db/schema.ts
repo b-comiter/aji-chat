@@ -71,6 +71,19 @@ export type ChannelRow = {
   /** When the user last opened this channel (unix ms); null = never. Drives
    *  the per-channel unread count and the "new messages" divider. */
   last_read_at: number | null
+  /** 1 when the channel's backing session (terminal) no longer exists on the
+   *  agent side. Archived channels stay visible (greyed); re-messaging respawns
+   *  the session and un-archives. Set by `reconcileArchivedSessions` from a
+   *  `sessions` event. */
+  archived: number
+  /** Working directory for the channel's backing session (Claude Code launcher
+   *  spawns the terminal here), echoed from the server registry; null when unset. */
+  cwd: string | null
+}
+
+/** Whether the channel's backing session is gone (greyed in the list). */
+export function isChannelArchived(row: Pick<ChannelRow, 'archived'> | null | undefined): boolean {
+  return row?.archived === 1
 }
 
 // ---------------------------------------------------------------------------
@@ -86,11 +99,13 @@ export type ChannelRow = {
  * per-server new-message-sound muting. v11 adds `servers.pin_position` (pin to
  * top). v12 moves unread tracking down to the channel: `channels.last_read_at`
  * (the server-level marker is gone; server unread is the sum of its channels').
- * This is a dev project with disposable local data, so rather than carry the
- * incremental column patches forward we drop everything and recreate the final
- * shape in one block.
+ * v13 adds `channels.archived` (the backing terminal session is gone) and
+ * `channels.cwd` (per-session working directory) for the multi-session Claude
+ * Code model. This is a dev project with disposable local data, so rather than
+ * carry the incremental column patches forward we drop everything and recreate
+ * the final shape in one block.
  */
-const SCHEMA_VERSION = 12
+const SCHEMA_VERSION = 13
 
 /**
  * Add a column if the table lacks it. Idempotent self-heal for DBs whose
@@ -150,6 +165,8 @@ export async function migrateDb(db: SQLiteDatabase): Promise<void> {
       last_status          TEXT NOT NULL DEFAULT 'idle',
       position             INTEGER NOT NULL DEFAULT 0,
       last_read_at         INTEGER,
+      archived             INTEGER NOT NULL DEFAULT 0,
+      cwd                  TEXT,
       PRIMARY KEY (server_id, channel_id)
     );
 
@@ -187,6 +204,8 @@ export async function migrateDb(db: SQLiteDatabase): Promise<void> {
   await ensureColumn(db, 'servers', 'pin_position', 'INTEGER')
   await ensureColumn(db, 'channels', 'position', 'INTEGER NOT NULL DEFAULT 0')
   await ensureColumn(db, 'channels', 'last_read_at', 'INTEGER')
+  await ensureColumn(db, 'channels', 'archived', 'INTEGER NOT NULL DEFAULT 0')
+  await ensureColumn(db, 'channels', 'cwd', 'TEXT')
 
   if (version < SCHEMA_VERSION) {
     await db.execAsync(`PRAGMA user_version = ${SCHEMA_VERSION}`)
