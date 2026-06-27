@@ -11,6 +11,11 @@
  * Turn ID persistence: UserPromptSubmit mints a turn_id and writes it to a
  * temp file keyed by session_id. Subsequent events within the same session read
  * it so tool calls and the final assistant message are grouped together.
+ *
+ * Intermediate message capture: Claude's text before and between tool calls
+ * lives in the transcript JSONL at `transcript_path`. PreToolUse reads from a
+ * per-turn line cursor so each assistant message is emitted exactly once —
+ * before the tool that follows it — rather than only the final response at Stop.
  */
 import * as fs from 'node:fs'
 import { randomUUID } from 'node:crypto'
@@ -43,27 +48,111 @@ interface PermissionSuggestion {
 }
 
 // ---------------------------------------------------------------------------
-// Turn ID persistence (file-based, keyed by Claude Code session_id)
+// Turn state persistence (file-based, keyed by Claude Code session_id)
+//
+// Stores per-turn metadata between hook invocations:
+//  - turnId: groups all events in one turn on mobile
+//  - transcriptPath: path to the JSONL transcript (captured when first seen)
+//  - lastLine: how many transcript lines have been processed; prevents
+//    re-emitting previous messages when reading at each PreToolUse
 // ---------------------------------------------------------------------------
+
+interface TurnState {
+  turnId: string
+  transcriptPath?: string
+  lastLine: number
+}
 
 function turnStatePath(sessionId: string): string {
   return path.join(os.tmpdir(), `aji-turn-${sessionId}`)
 }
 
-function readTurnId(sessionId: string): string | undefined {
+function readTurnState(sessionId: string): TurnState | undefined {
   try {
-    return fs.readFileSync(turnStatePath(sessionId), 'utf-8').trim() || undefined
+    const raw = fs.readFileSync(turnStatePath(sessionId), 'utf-8').trim()
+    if (!raw) return undefined
+    try {
+      return JSON.parse(raw) as TurnState
+    } catch {
+      // Legacy format: plain turn ID string (pre-intermediate-message support)
+      return { turnId: raw, lastLine: 0 }
+    }
   } catch {
     return undefined
   }
 }
 
-function writeTurnId(sessionId: string, turnId: string): void {
-  try { fs.writeFileSync(turnStatePath(sessionId), turnId, 'utf-8') } catch { /* ignore */ }
+function writeTurnState(sessionId: string, state: TurnState): void {
+  try { fs.writeFileSync(turnStatePath(sessionId), JSON.stringify(state), 'utf-8') } catch { /* ignore */ }
 }
 
-function clearTurnId(sessionId: string): void {
+function clearTurnState(sessionId: string): void {
   try { fs.unlinkSync(turnStatePath(sessionId)) } catch { /* ignore */ }
+}
+
+// ---------------------------------------------------------------------------
+// Transcript reading helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Count lines currently in the transcript. Called at UserPromptSubmit to
+ * establish the baseline so we only read messages added during this turn.
+ */
+function countTranscriptLines(transcriptPath: string): number {
+  try {
+    const content = fs.readFileSync(transcriptPath, 'utf-8').trim()
+    return content ? content.split('\n').length : 0
+  } catch {
+    return 0
+  }
+}
+
+/**
+ * Read assistant message texts from the transcript starting at `fromLine`.
+ * Returns all texts found and the new line count to use as the next `fromLine`.
+ *
+ * Only `{"type":"assistant"}` entries are considered; user messages, tool
+ * results, and system entries are skipped. An assistant entry may contain both
+ * a text block and tool_use blocks (Claude's "think then act" turn) — we only
+ * extract the text portion here; tool events come via PreToolUse/PostToolUse.
+ */
+function readNewAssistantMessages(
+  transcriptPath: string,
+  fromLine: number,
+): { texts: string[]; nextLine: number } {
+  try {
+    const content = fs.readFileSync(transcriptPath, 'utf-8').trim()
+    const lines = content ? content.split('\n') : []
+    const texts: string[] = []
+    for (let i = fromLine; i < lines.length; i++) {
+      try {
+        const entry = JSON.parse(lines[i]) as {
+          type?: string
+          message?: { content?: Array<{ type: string; text?: string }> }
+        }
+        if (entry.type === 'assistant' && entry.message?.content) {
+          const text = entry.message.content
+            .filter((c) => c.type === 'text' && typeof c.text === 'string')
+            .map((c) => c.text!)
+            .join('')
+          if (text.trim()) texts.push(text)
+        }
+      } catch { /* skip malformed line */ }
+    }
+    return { texts, nextLine: lines.length }
+  } catch {
+    return { texts: [], nextLine: fromLine }
+  }
+}
+
+/** Emit a list of assistant texts as complete message_start/text_delta/message_end triples. */
+async function emitMessages(texts: string[], turnId: string | undefined): Promise<void> {
+  for (const text of texts) {
+    const id = randomUUID()
+    await emit({ type: 'message_start', id, role: 'assistant', serverId: AGENT, ...(turnId ? { turn_id: turnId } : {}) })
+    await emit({ type: 'text_delta', id, text, serverId: AGENT, ...(turnId ? { turn_id: turnId } : {}) })
+    await emit({ type: 'message_end', id, serverId: AGENT, ...(turnId ? { turn_id: turnId } : {}) })
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -102,32 +191,6 @@ async function readStdin(): Promise<Record<string, unknown> | null> {
   for await (const chunk of process.stdin) data += chunk
   if (!data.trim()) return null
   try { return JSON.parse(data) as Record<string, unknown> } catch { return null }
-}
-
-/**
- * Read a Claude Code transcript (JSONL) and return the text of the most recent
- * assistant turn. Returns null if the file is missing/empty/no assistant text.
- */
-function lastAssistantText(transcriptPath: string): string | null {
-  try {
-    const lines = fs.readFileSync(transcriptPath, 'utf-8').trim().split('\n')
-    for (let i = lines.length - 1; i >= 0; i--) {
-      try {
-        const entry = JSON.parse(lines[i]) as {
-          type?: string
-          message?: { content?: Array<{ type: string; text?: string }> }
-        }
-        if (entry.type === 'assistant' && entry.message?.content) {
-          const text = entry.message.content
-            .filter((c) => c.type === 'text' && typeof c.text === 'string')
-            .map((c) => c.text!)
-            .join('')
-          if (text) return text
-        }
-      } catch { /* skip malformed line */ }
-    }
-  } catch { /* file missing */ }
-  return null
 }
 
 function permissionScopeLabel(destination: string | undefined): string {
@@ -279,7 +342,11 @@ async function main(): Promise<void> {
 
       const id = randomUUID()
       const turnId = randomUUID()
-      writeTurnId(sessionId, turnId)
+      const transcriptPath = payload.transcript_path as string | undefined
+      // Record how many transcript lines exist before this turn so PreToolUse
+      // only reads messages added during the current turn (not session history).
+      const lastLine = transcriptPath ? countTranscriptLines(transcriptPath) : 0
+      writeTurnState(sessionId, { turnId, transcriptPath, lastLine })
 
       if (!fromAjiChat) {
         await emit({ type: 'message_start', id, role: 'user', serverId: AGENT, turn_id: turnId })
@@ -297,7 +364,21 @@ async function main(): Promise<void> {
     case 'PreToolUse': {
       // tool_use_id is stable across PreToolUse / PostToolUse for the same call
       const id = String(payload.tool_use_id ?? randomUUID())
-      const turnId = readTurnId(sessionId)
+      const state = readTurnState(sessionId)
+      const turnId = state?.turnId
+      // transcript_path may arrive here even if it wasn't in UserPromptSubmit
+      const transcriptPath = (payload.transcript_path as string | undefined) ?? state?.transcriptPath
+
+      // Flush any assistant text Claude wrote before this tool call. The
+      // transcript already contains the full assistant turn (text + tool_use
+      // blocks) by the time PreToolUse fires, so we read it here rather than
+      // waiting for Stop — which would otherwise drop all intermediate messages.
+      if (transcriptPath && state) {
+        const { texts, nextLine } = readNewAssistantMessages(transcriptPath, state.lastLine)
+        await emitMessages(texts, turnId)
+        writeTurnState(sessionId, { ...state, transcriptPath, lastLine: nextLine })
+      }
+
       await emit({ type: 'status', value: 'working', serverId: AGENT })
       await emit({
         type: 'tool_start',
@@ -314,6 +395,7 @@ async function main(): Promise<void> {
       // fall through to Claude's default behavior.
       if (IS_DESKTOP) break
       const { options, suggestions } = buildPermissionOptions(payload)
+      const state = readTurnState(sessionId)
       const response = await waitForPermission({
         type: 'permission_request',
         id: randomUUID(),
@@ -349,22 +431,26 @@ async function main(): Promise<void> {
       }
 
       if (response.choice === 'apply_suggestions') {
-        if (suggestions.length === 0) break
+        const { suggestions: s } = buildPermissionOptions(payload)
+        if (s.length === 0) break
         writeHookJson({
           hookSpecificOutput: {
             hookEventName: 'PermissionRequest',
             decision: {
               behavior: 'allow',
-              updatedPermissions: suggestions,
+              updatedPermissions: s,
             },
           },
         })
       }
+
+      void state // used above for turn context; no further action needed
       break
     }
     case 'PostToolUse': {
       const id = String(payload.tool_use_id ?? randomUUID())
-      const turnId = readTurnId(sessionId)
+      const state = readTurnState(sessionId)
+      const turnId = state?.turnId
       await emit({ type: 'tool_end', id, result: payload.tool_response, serverId: AGENT, ...(turnId ? { turn_id: turnId } : {}) })
       // Claude resumes reasoning after the tool result — go back to thinking so
       // mobile doesn't show the agent as still running a tool between calls.
@@ -372,19 +458,22 @@ async function main(): Promise<void> {
       break
     }
     case 'Stop': {
-      // Read turn ID before clearing; emit idle first so mobile is unblocked
-      // even if the subsequent message emits hit their 4 s timeout.
-      const turnId = readTurnId(sessionId)
-      clearTurnId(sessionId)
+      const state = readTurnState(sessionId)
+      clearTurnState(sessionId)
+      const transcriptPath = (payload.transcript_path as string | undefined) ?? state?.transcriptPath
+      const turnId = state?.turnId
+
+      // Emit idle first so mobile is unblocked even if subsequent emits time out.
       await emit({ type: 'status', value: 'idle', serverId: AGENT })
-      const transcriptPath = payload.transcript_path as string | undefined
-      const text = transcriptPath ? lastAssistantText(transcriptPath) : null
-      if (text) {
-        const id = randomUUID()
-        await emit({ type: 'message_start', id, role: 'assistant', serverId: AGENT, ...(turnId ? { turn_id: turnId } : {}) })
-        await emit({ type: 'text_delta', id, text, serverId: AGENT, ...(turnId ? { turn_id: turnId } : {}) })
-        await emit({ type: 'message_end', id, serverId: AGENT, ...(turnId ? { turn_id: turnId } : {}) })
+
+      // Emit any assistant messages not yet flushed by PreToolUse — this covers
+      // the final response (no tool follows it) and any messages missed if
+      // transcript_path wasn't available during earlier PreToolUse calls.
+      if (transcriptPath) {
+        const { texts } = readNewAssistantMessages(transcriptPath, state?.lastLine ?? 0)
+        await emitMessages(texts, turnId)
       }
+
       // Refresh mono-channel advertisement + the mobile command picker when
       // Claude goes idle — best time to send (and re-seed the server cache if it
       // restarted mid-session).
