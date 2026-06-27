@@ -168,6 +168,22 @@ export default function ChatScreen() {
     [displayItems],
   )
 
+  // Show the typing indicator when the agent is active. Two paths:
+  //   1. Explicit status events (Claude Code, Hermes): use agentStatus directly.
+  //      No hasStreaming suppression — rapid agents batch status + text_delta into
+  //      one React render, so the "thinking" state would never be visible otherwise.
+  //   2. Inferred from items (fallback for agents that don't emit status events): a
+  //      running tool (done:false tool item) or an empty in-flight assistant message.
+  const typingStatus = useMemo((): 'thinking' | 'working' | undefined => {
+    if (agentStatus !== 'idle') return agentStatus as 'thinking' | 'working'
+    const hasInFlight = items.some(
+      (it) =>
+        (it.kind === 'tool' && !it.done) ||
+        (it.kind === 'message' && it.role === 'assistant' && !it.done && it.text.trim().length === 0),
+    )
+    return hasInFlight ? 'working' : undefined
+  }, [agentStatus, items])
+
   // Single pass over chronological displayItems to build all per-item rendering metadata.
   // Id-based maps (not index-based) because MessageList reverses items for the inverted
   // FlatList — renderItem's `index` is the nth-newest, not nth-chronological.
@@ -379,6 +395,9 @@ export default function ChatScreen() {
         renderItem={renderItem}
         hasMoreOlder={hasMoreOlder}
         onLoadOlder={loadOlder}
+        typingStatus={typingStatus}
+        avatarLabel={avatarLabel}
+        serverName={serverName}
       />
       {pickerItems.length > 0 && <CommandPicker items={pickerItems} onSelect={handleCommandSelect} />}
       <Composer
